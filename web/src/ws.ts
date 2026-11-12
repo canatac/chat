@@ -1,4 +1,4 @@
-import type { Message, User } from './types';
+import type { CallInfo, Message, User } from './types';
 
 export interface WsEvent {
   type: string;
@@ -6,6 +6,9 @@ export interface WsEvent {
   messages?: Message[];
   user?: User;
   online?: number[];
+  call?: CallInfo | null;
+  from?: number;
+  data?: unknown;
   error?: string;
 }
 
@@ -63,8 +66,12 @@ export class ChatSocket {
   }
 
   sendMessage(content: string): void {
+    this.sendRaw({ type: 'message', content });
+  }
+
+  sendRaw(obj: unknown): void {
     if (this.isOpen() && this.ws) {
-      this.ws.send(JSON.stringify({ type: 'message', content }));
+      this.ws.send(JSON.stringify(obj));
     }
   }
 
