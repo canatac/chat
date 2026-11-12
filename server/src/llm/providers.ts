@@ -1,4 +1,5 @@
 import type { Config } from '../config.js';
+import type { Usage } from './pricing.js';
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -18,6 +19,11 @@ export interface LLMConfig {
   model?: string;
   temperature: number;
   maxTokens: number;
+}
+
+export interface LLMResult {
+  text: string;
+  usage: Usage;
 }
 
 export function toLLMConfig(cfg: Config): LLMConfig {
@@ -119,7 +125,21 @@ export function parseAnthropicResponse(json: unknown): string {
   return text;
 }
 
-export async function chatCompletion(llm: LLMConfig, messages: ChatMessage[], opts: ChatOptions = {}): Promise<string> {
+export function parseOpenAIUsage(json: unknown): Usage {
+  const u = (json as { usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } }).usage;
+  const promptTokens = u?.prompt_tokens ?? 0;
+  const completionTokens = u?.completion_tokens ?? 0;
+  return { promptTokens, completionTokens, totalTokens: u?.total_tokens ?? promptTokens + completionTokens };
+}
+
+export function parseAnthropicUsage(json: unknown): Usage {
+  const u = (json as { usage?: { input_tokens?: number; output_tokens?: number } }).usage;
+  const promptTokens = u?.input_tokens ?? 0;
+  const completionTokens = u?.output_tokens ?? 0;
+  return { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens };
+}
+
+export async function chatCompletion(llm: LLMConfig, messages: ChatMessage[], opts: ChatOptions = {}): Promise<LLMResult> {
   const isAnthropic = llm.provider.toLowerCase() === 'anthropic';
   const req = isAnthropic ? buildAnthropicRequest(llm, messages, opts) : buildOpenAIRequest(llm, messages, opts);
   const res = await fetch(req.url, {
@@ -133,5 +153,7 @@ export async function chatCompletion(llm: LLMConfig, messages: ChatMessage[], op
     throw new Error(`Erreur LLM (HTTP ${res.status}) : ${detail.slice(0, 300)}`);
   }
   const json: unknown = await res.json();
-  return isAnthropic ? parseAnthropicResponse(json) : parseOpenAIResponse(json);
+  const text = isAnthropic ? parseAnthropicResponse(json) : parseOpenAIResponse(json);
+  const usage = isAnthropic ? parseAnthropicUsage(json) : parseOpenAIUsage(json);
+  return { text, usage };
 }
