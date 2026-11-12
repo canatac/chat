@@ -13,7 +13,7 @@ import { deriveDocument, HttpError, type DeriveKind } from './llm/derive.js';
 import { handleCommand } from './llm/run.js';
 import { chunkText, extractText } from './llm/rag.js';
 import { pricesFor } from './llm/pricing.js';
-import { sttConfigured, transcribeFile } from './llm/stt.js';
+import { isAudioMime, sttConfigured, transcribeFile } from './llm/stt.js';
 
 export interface PublicUser {
   id: number;
@@ -142,6 +142,63 @@ export function createServer(config: Config, dataDir: string): ServerContext {
       );
     }
     return msg;
+  }
+
+  async function transcribeAndStore(
+    fileRow: FileRow,
+    displayName: string,
+    mime: string,
+    userId: number,
+  ): Promise<FileRow | null> {
+    if (!sttConfigured(config)) return null;
+    try {
+      const result = await transcribeFile(config, path.join(uploadsDir, fileRow.path), displayName, mime);
+      const text = result.text;
+      if (!text) return null;
+      const costPerMin = config.STT_COST_PER_AUDIO_MIN ?? 0;
+      const sttCost = result.durationSeconds ? (result.durationSeconds / 60) * costPerMin : 0;
+      const date = new Date().toLocaleString('fr-FR');
+      const tName = `🎙️ Transcription — ${displayName} (${date}).txt`;
+      const tFname = `${Date.now()}-tr-${Math.random().toString(36).slice(2, 8)}.txt`;
+      fs.writeFileSync(path.join(uploadsDir, tFname), text);
+      const transcriptRow = db.insertFile(
+        db.getBot().id,
+        null,
+        tName,
+        'text/plain',
+        Buffer.byteLength(text),
+        tFname,
+        fileRow.call_id,
+      );
+      chunkText(text, config.RAG_CHUNK_SIZE).forEach((c, i) => db.insertChunk(transcriptRow.id, i, c));
+      db.insertUsage({
+        userId,
+        messageId: fileRow.message_id,
+        command: 'stt',
+        provider: config.STT_PROVIDER,
+        model: config.STT_MODEL,
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+        costUsd: sttCost,
+        error: null,
+      });
+      return transcriptRow;
+    } catch (err) {
+      db.insertUsage({
+        userId,
+        messageId: fileRow.message_id,
+        command: 'stt',
+        provider: config.STT_PROVIDER,
+        model: config.STT_MODEL,
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+        costUsd: 0,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
   }
 
   const auth: express.RequestHandler = (req, res, next) => {
@@ -340,6 +397,10 @@ export function createServer(config: Config, dataDir: string): ServerContext {
       );
       void (async () => {
         try {
+          if (isAudioMime(uploaded.mimetype, displayName)) {
+            await transcribeAndStore(fileRow, displayName, uploaded.mimetype, req.user?.id ?? -1);
+            return;
+          }
           const textContent = await extractText(path.join(uploadsDir, uploaded.filename), uploaded.mimetype, displayName);
           if (textContent.trim()) {
             chunkText(textContent, config.RAG_CHUNK_SIZE).forEach((c, i) => db.insertChunk(fileRow.id, i, c));
@@ -427,55 +488,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     const message = serializeMessage(db, messageRow);
     broadcast({ type: 'message', message });
 
-    void (async () => {
-      if (!sttConfigured(config)) return;
-      try {
-        const result = await transcribeFile(config, path.join(uploadsDir, uploaded.filename), displayName, uploaded.mimetype);
-        const text = result.text;
-        if (!text) return;
-        const costPerMin = config.STT_COST_PER_AUDIO_MIN ?? 0;
-        const sttCost = result.durationSeconds ? (result.durationSeconds / 60) * costPerMin : 0;
-        const date = new Date().toLocaleString('fr-FR');
-        const tName = `🎙️ Transcription — appel${label} du ${date}.txt`;
-        const tFname = `${Date.now()}-tr-${Math.random().toString(36).slice(2, 8)}.txt`;
-        fs.writeFileSync(path.join(uploadsDir, tFname), text);
-        const transcriptRow = db.insertFile(
-          db.getBot().id,
-          null,
-          tName,
-          'text/plain',
-          Buffer.byteLength(text),
-          tFname,
-          call.id,
-        );
-        chunkText(text, config.RAG_CHUNK_SIZE).forEach((c, i) => db.insertChunk(transcriptRow.id, i, c));
-        db.insertUsage({
-          userId: req.user?.id ?? -1,
-          messageId: messageRow.id,
-          command: 'stt',
-          provider: config.STT_PROVIDER,
-          model: config.STT_MODEL,
-          promptTokens: 0,
-          completionTokens: 0,
-          totalTokens: 0,
-          costUsd: sttCost,
-          error: null,
-        });
-      } catch (err) {
-        db.insertUsage({
-          userId: req.user?.id ?? -1,
-          messageId: messageRow.id,
-          command: 'stt',
-          provider: config.STT_PROVIDER,
-          model: config.STT_MODEL,
-          promptTokens: 0,
-          completionTokens: 0,
-          totalTokens: 0,
-          costUsd: 0,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    })();
+    void transcribeAndStore(fileRow, displayName, uploaded.mimetype, req.user?.id ?? -1);
 
     res.status(201).json({ file: toPublicFile(fileRow), message, transcriptPending: sttConfigured(config) });
   });
@@ -510,6 +523,34 @@ export function createServer(config: Config, dataDir: string): ServerContext {
       }
       res.status(500).json({ error: err instanceof Error ? err.message : 'Erreur dérivation' });
     }
+  });
+
+  app.post('/api/files/:id/transcribe', auth, async (req, res) => {
+    const file = db.getFileById(Number(req.params.id));
+    if (!file) {
+      res.status(404).json({ error: 'Fichier introuvable' });
+      return;
+    }
+    if (!isAudioMime(file.mime, file.name)) {
+      res.status(400).json({ error: "Ce fichier n'est pas un fichier audio" });
+      return;
+    }
+    if (!sttConfigured(config)) {
+      res.status(503).json({ error: 'STT non configuré : définir STT_BASE_URL et/ou STT_API_KEY dans le .env' });
+      return;
+    }
+    const row = await transcribeAndStore(file, file.name, file.mime, req.user?.id ?? -1);
+    if (!row) {
+      res.status(502).json({ error: 'Transcription vide ou en erreur (voir llm_usage)' });
+      return;
+    }
+    res.status(201).json({
+      file: {
+        ...toPublicFile(row),
+        messageId: row.message_id,
+        user: { id: row.user_id, name: db.getUserById(row.user_id)?.name ?? '' },
+      },
+    });
   });
 
   app.get('/api/admin/stats', auth, adminOnly, (req, res) => {
