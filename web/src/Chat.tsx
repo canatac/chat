@@ -3,10 +3,12 @@ import AttachFileIcon from '@mui/icons-material/AttachFile';
 import FolderSharedIcon from '@mui/icons-material/FolderShared';
 import ForumIcon from '@mui/icons-material/Forum';
 import LogoutIcon from '@mui/icons-material/Logout';
+import PhoneIcon from '@mui/icons-material/Phone';
 import SendIcon from '@mui/icons-material/Send';
 import {
   AppBar,
   Avatar,
+  Badge,
   Box,
   Button,
   Chip,
@@ -20,10 +22,11 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from './api';
 import AdminDialog from './components/AdminDialog';
+import CallDialog from './components/CallDialog';
 import DocDrawer from './components/DocDrawer';
 import MessageRow from './components/MessageRow';
 import PresenceMenu from './components/PresenceMenu';
-import type { Message, User } from './types';
+import type { CallInfo, Message, User } from './types';
 import { ChatSocket } from './ws';
 
 const PAGE_SIZE = 50;
@@ -50,10 +53,13 @@ export default function Chat({ token, user, onLogout }: Props) {
   const [connected, setConnected] = useState(false);
   const [docOpen, setDocOpen] = useState(false);
   const [adminOpen, setAdminOpen] = useState(false);
+  const [callOpen, setCallOpen] = useState(false);
+  const [call, setCall] = useState<CallInfo | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const nearBottomRef = useRef(true);
   const socketRef = useRef<ChatSocket | null>(null);
+  const [socket, setSocket] = useState<ChatSocket | null>(null);
 
   useEffect(() => {
     api
@@ -67,6 +73,10 @@ export default function Chat({ token, user, onLogout }: Props) {
       .users()
       .then((r) => setUsers(r.users))
       .catch(() => {});
+    api
+      .calls.active()
+      .then((r) => setCall(r.call))
+      .catch(() => {});
     const socket = new ChatSocket(token);
     socket.onStatus(setConnected);
     socket.onMessage((event) => {
@@ -76,10 +86,13 @@ export default function Chat({ token, user, onLogout }: Props) {
         );
       } else if (event.type === 'presence' && Array.isArray(event.online)) {
         setOnlineIds(event.online);
+      } else if (event.type === 'call') {
+        setCall(event.call ?? null);
       }
     });
     socket.connect();
     socketRef.current = socket;
+    setSocket(socket);
     return () => socket.close();
   }, [token]);
 
@@ -142,6 +155,13 @@ export default function Chat({ token, user, onLogout }: Props) {
           <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
             Chat d'équipe
           </Typography>
+          <Tooltip title={call ? "Appel en cours" : "Appel d'équipe"}>
+            <IconButton color="inherit" onClick={() => setCallOpen(true)}>
+              <Badge variant="dot" color="error" invisible={!call}>
+                <PhoneIcon />
+              </Badge>
+            </IconButton>
+          </Tooltip>
           <PresenceMenu users={users} onlineIds={onlineIds} />
           <Chip
             label={connected ? 'en ligne' : 'hors ligne'}
@@ -232,6 +252,14 @@ export default function Chat({ token, user, onLogout }: Props) {
 
       <DocDrawer open={docOpen} onClose={() => setDocOpen(false)} />
       <AdminDialog open={adminOpen} onClose={() => setAdminOpen(false)} />
+      <CallDialog
+        open={callOpen}
+        onClose={() => setCallOpen(false)}
+        user={user}
+        socket={socket}
+        call={call}
+        onCallChange={setCall}
+      />
     </Box>
   );
 }

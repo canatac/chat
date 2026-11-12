@@ -248,9 +248,108 @@ test('dashboard admin : 200 pour un admin, 403 pour un non-admin', async () => {
   const bob = await loginAs('Bob', 'motdepasse2');
   const ok = await api('/api/admin/stats', { headers: { Authorization: `Bearer ${alice}` } });
   assert.equal(ok.status, 200);
-  const stats = (await ok.json()) as { users: { total: number }; llm: { calls: number; totalTokens: number } };
+  const stats = (await ok.json()) as { users: { total: number }; llm: { calls: number; totalTokens: number }; calls?: { total: number } };
   assert.ok(stats.users.total >= 2);
   assert.equal(stats.llm.calls, 0);
   const ko = await api('/api/admin/stats', { headers: { Authorization: `Bearer ${bob}` } });
   assert.equal(ko.status, 403);
+});
+
+test('cycle de vie d\u2019un appel : start, join, end', async () => {
+  const alice = await loginAs('Alice', 'motdepasse1');
+  const bob = await loginAs('Bob', 'motdepasse2');
+  const authA = { Authorization: `Bearer ${alice}` };
+  const authB = { Authorization: `Bearer ${bob}` };
+
+  const active0 = await api('/api/calls/active', { headers: authA });
+  assert.equal(((await active0.json()) as { call: unknown }).call, null);
+
+  const start = await api('/api/calls/start', {
+    method: 'POST',
+    headers: { ...authA, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'Revue hebdo' }),
+  });
+  assert.equal(start.status, 201);
+  const started = (await start.json()) as { call: { id: number; title: string; participants: { name: string }[] } };
+  assert.equal(started.call.title, 'Revue hebdo');
+  assert.deepEqual(started.call.participants.map((p) => p.name), ['Alice']);
+
+  const again = await api('/api/calls/start', {
+    method: 'POST',
+    headers: { ...authB, 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  assert.equal(again.status, 409);
+
+  const join = await api('/api/calls/join', { method: 'POST', headers: authB });
+  assert.equal(join.status, 200);
+  const joined = (await join.json()) as { call: { participants: { name: string }[] } };
+  assert.equal(joined.call.participants.length, 2);
+
+  const end = await api('/api/calls/end', { method: 'POST', headers: authA });
+  assert.equal(end.status, 200);
+  const active1 = await api('/api/calls/active', { headers: authA });
+  assert.equal(((await active1.json()) as { call: unknown }).call, null);
+});
+
+test('relais de signalisation WebRTC entre deux clients', async () => {
+  const alice = await loginAs('Alice', 'motdepasse1');
+  const bob = await loginAs('Bob', 'motdepasse2');
+  const port = (ctx.server.address() as { port: number }).port;
+  const meA = (await (await api('/api/me', { headers: { Authorization: `Bearer ${alice}` } })).json()) as { user: { id: number } };
+  const meB = (await (await api('/api/me', { headers: { Authorization: `Bearer ${bob}` } })).json()) as { user: { id: number } };
+
+  const wsB = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${bob}`);
+  const sigPromise = waitForEvent(wsB, (e) => e.type === 'signal');
+  await new Promise<void>((resolve, reject) => {
+    wsB.once('open', resolve);
+    wsB.once('error', reject);
+  });
+
+  const wsA = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${alice}`);
+  await new Promise<void>((resolve, reject) => {
+    wsA.once('open', resolve);
+    wsA.once('error', reject);
+  });
+  wsA.send(JSON.stringify({ type: 'signal', to: meB.user.id, data: { sdp: { type: 'offer', sdp: 'fake' } } }));
+  const sig = (await sigPromise) as unknown as { from: number; data: { sdp: { type: string } } };
+  assert.equal(sig.from, meA.user.id);
+  assert.equal(sig.data.sdp.type, 'offer');
+  wsA.close();
+  wsB.close();
+});
+
+test('upload d\u2019un enregistrement d\u2019appel + dérivation sans LLM (503)', async () => {
+  const alice = await loginAs('Alice', 'motdepasse1');
+  const auth = { Authorization: `Bearer ${alice}` };
+  const start = await api('/api/calls/start', {
+    method: 'POST',
+    headers: { ...auth, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'Point synchro' }),
+  });
+  const { call } = (await start.json()) as { call: { id: number } };
+
+  const fd = new FormData();
+  fd.append('file', new Blob([new Uint8Array([1, 2, 3, 4])], { type: 'audio/webm' }), 'appel.webm');
+  const up = await fetch(`${baseUrl}/api/calls/${call.id}/recording`, { method: 'POST', headers: auth, body: fd });
+  assert.equal(up.status, 201);
+  const upBody = (await up.json()) as { file: { id: number; callId: number }; transcriptPending: boolean };
+  assert.equal(upBody.file.callId, call.id);
+  assert.equal(upBody.transcriptPending, false);
+  assert.ok(ctx.db.getFileById(upBody.file.id)?.call_id === call.id);
+
+  const txtFd = new FormData();
+  txtFd.append('file', new Blob(['Transcription test : décision de livrer vendredi.'], { type: 'text/plain' }), 'transcription-appel.txt');
+  txtFd.append('post', 'false');
+  const upTxt = await fetch(`${baseUrl}/api/files`, { method: 'POST', headers: auth, body: txtFd });
+  const txtBody = (await upTxt.json()) as { file: { id: number } };
+
+  const derive = await api(`/api/files/${txtBody.file.id}/derive`, {
+    method: 'POST',
+    headers: { ...auth, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind: 'resume' }),
+  });
+  assert.equal(derive.status, 503);
+
+  await api('/api/calls/end', { method: 'POST', headers: auth });
 });

@@ -8,10 +8,12 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { z } from 'zod';
 import { hashPassword, signToken, verifyPassword, verifyToken } from './auth.js';
 import { isAdminUser, type Config } from './config.js';
-import { DB, type FileListRow, type FileRow, type MessageRow, type UserRow } from './db.js';
+import { DB, type CallRow, type FileListRow, type FileRow, type MessageRow, type UserRow } from './db.js';
+import { deriveDocument, HttpError, type DeriveKind } from './llm/derive.js';
 import { handleCommand } from './llm/run.js';
 import { chunkText, extractText } from './llm/rag.js';
 import { pricesFor } from './llm/pricing.js';
+import { sttConfigured, transcribeFile } from './llm/stt.js';
 
 export interface PublicUser {
   id: number;
@@ -25,6 +27,7 @@ export interface PublicFile {
   size: number;
   mime: string;
   createdAt: string;
+  callId: number | null;
 }
 
 export interface SerializedMessage {
@@ -40,7 +43,14 @@ export function toPublicUser(u: UserRow): PublicUser {
 }
 
 export function toPublicFile(f: FileRow): PublicFile {
-  return { id: f.id, name: f.name, size: f.size, mime: f.mime, createdAt: new Date(f.created_at).toISOString() };
+  return {
+    id: f.id,
+    name: f.name,
+    size: f.size,
+    mime: f.mime,
+    createdAt: new Date(f.created_at).toISOString(),
+    callId: f.call_id,
+  };
 }
 
 export function serializeMessage(db: DB, row: MessageRow): SerializedMessage {
@@ -52,6 +62,14 @@ export function serializeMessage(db: DB, row: MessageRow): SerializedMessage {
     user: toPublicUser(user),
     files: db.listFilesByMessage(row.id).map(toPublicFile),
   };
+}
+
+export interface CallInfo {
+  id: number;
+  title: string;
+  startedBy: PublicUser;
+  participants: PublicUser[];
+  active: boolean;
 }
 
 export interface ServerContext {
@@ -74,6 +92,24 @@ export function createServer(config: Config, dataDir: string): ServerContext {
   const online = new Map<number, Set<WebSocket>>();
   function onlineUserIds(): number[] {
     return [...online.keys()];
+  }
+
+  let activeCall: { row: CallRow; participants: Set<number> } | null = null;
+
+  function serializeCall(): CallInfo | null {
+    if (!activeCall) return null;
+    const startedBy = db.getUserById(activeCall.row.started_by) as UserRow;
+    return {
+      id: activeCall.row.id,
+      title: activeCall.row.title,
+      startedBy: toPublicUser(startedBy),
+      participants: [...activeCall.participants].map((id) => toPublicUser(db.getUserById(id) as UserRow)),
+      active: true,
+    };
+  }
+
+  function broadcastCall(): void {
+    broadcast({ type: 'call', call: serializeCall() });
   }
 
   function broadcast(payload: unknown): void {
@@ -185,6 +221,60 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     res.json({
       users: db.listUsers().map((u) => ({ ...toPublicUser(u), online: onlineIds.has(u.id) })),
     });
+  });
+
+  app.get('/api/calls/active', auth, (req, res) => {
+    res.json({ call: serializeCall() });
+  });
+
+  const callTitleSchema = z.object({ title: z.string().trim().max(120).optional() });
+
+  app.post('/api/calls/start', auth, (req, res) => {
+    if (activeCall) {
+      res.status(409).json({ error: 'Un appel est déjà en cours', call: serializeCall() });
+      return;
+    }
+    const parsed = callTitleSchema.safeParse(req.body ?? {});
+    const title = parsed.success ? parsed.data.title ?? '' : '';
+    const row = db.startCall(req.user?.id ?? -1, title);
+    activeCall = { row, participants: new Set([req.user?.id ?? -1]) };
+    broadcastCall();
+    res.status(201).json({ call: serializeCall() });
+  });
+
+  app.post('/api/calls/join', auth, (req, res) => {
+    if (!activeCall) {
+      res.status(404).json({ error: 'Aucun appel en cours' });
+      return;
+    }
+    activeCall.participants.add(req.user?.id ?? -1);
+    broadcastCall();
+    res.json({ call: serializeCall() });
+  });
+
+  app.post('/api/calls/leave', auth, (req, res) => {
+    if (!activeCall) {
+      res.status(404).json({ error: 'Aucun appel en cours' });
+      return;
+    }
+    activeCall.participants.delete(req.user?.id ?? -1);
+    if (activeCall.participants.size === 0) {
+      db.endCall(activeCall.row.id);
+      activeCall = null;
+    }
+    broadcastCall();
+    res.json({ call: serializeCall() });
+  });
+
+  app.post('/api/calls/end', auth, (req, res) => {
+    if (!activeCall) {
+      res.status(404).json({ error: 'Aucun appel en cours' });
+      return;
+    }
+    db.endCall(activeCall.row.id);
+    activeCall = null;
+    broadcastCall();
+    res.json({ ok: true });
   });
 
   const listQuerySchema = z.object({
@@ -300,6 +390,125 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     res.download(path.join(uploadsDir, file.path), file.name);
   });
 
+  const recordUpload = multer({
+    storage: multer.diskStorage({
+      destination: uploadsDir,
+      filename: (_req, file, cb) => {
+        const safe = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-80);
+        cb(null, `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safe}`);
+      },
+    }),
+    limits: { fileSize: config.RECORDING_MAX_MB * 1024 * 1024 },
+  });
+
+  app.post('/api/calls/:id/recording', auth, recordUpload.single('file'), (req, res) => {
+    const call = db.getCallById(Number(req.params.id));
+    if (!call) {
+      res.status(404).json({ error: 'Appel introuvable' });
+      return;
+    }
+    if (!req.file) {
+      res.status(400).json({ error: 'Champ "file" requis' });
+      return;
+    }
+    const uploaded = req.file;
+    const displayName = Buffer.from(uploaded.originalname, 'latin1').toString('utf8');
+    const label = call.title ? ` « ${call.title} »` : '';
+    const messageRow = db.insertMessage(req.user?.id ?? -1, `🎙️ Enregistrement de l'appel${label}`);
+    const fileRow = db.insertFile(
+      req.user?.id ?? -1,
+      messageRow.id,
+      displayName,
+      uploaded.mimetype || 'audio/webm',
+      uploaded.size,
+      uploaded.filename,
+      call.id,
+    );
+    const message = serializeMessage(db, messageRow);
+    broadcast({ type: 'message', message });
+
+    void (async () => {
+      if (!sttConfigured(config)) return;
+      try {
+        const text = await transcribeFile(config, path.join(uploadsDir, uploaded.filename), displayName, uploaded.mimetype);
+        if (!text) return;
+        const date = new Date().toLocaleString('fr-FR');
+        const tName = `🎙️ Transcription — appel${label} du ${date}.txt`;
+        const tFname = `${Date.now()}-tr-${Math.random().toString(36).slice(2, 8)}.txt`;
+        fs.writeFileSync(path.join(uploadsDir, tFname), text);
+        const transcriptRow = db.insertFile(
+          db.getBot().id,
+          null,
+          tName,
+          'text/plain',
+          Buffer.byteLength(text),
+          tFname,
+          call.id,
+        );
+        chunkText(text, config.RAG_CHUNK_SIZE).forEach((c, i) => db.insertChunk(transcriptRow.id, i, c));
+        db.insertUsage({
+          userId: req.user?.id ?? -1,
+          messageId: messageRow.id,
+          command: 'stt',
+          provider: config.STT_PROVIDER,
+          model: config.STT_MODEL,
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+          costUsd: 0,
+          error: null,
+        });
+      } catch (err) {
+        db.insertUsage({
+          userId: req.user?.id ?? -1,
+          messageId: messageRow.id,
+          command: 'stt',
+          provider: config.STT_PROVIDER,
+          model: config.STT_MODEL,
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+          costUsd: 0,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    })();
+
+    res.status(201).json({ file: toPublicFile(fileRow), message, transcriptPending: sttConfigured(config) });
+  });
+
+  const deriveSchema = z.object({ kind: z.enum(['resume', 'cr']) });
+
+  app.post('/api/files/:id/derive', auth, async (req, res) => {
+    const file = db.getFileById(Number(req.params.id));
+    if (!file) {
+      res.status(404).json({ error: 'Fichier introuvable' });
+      return;
+    }
+    const parsed = deriveSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'kind requis : "resume" ou "cr"' });
+      return;
+    }
+    try {
+      const kind: DeriveKind = parsed.data.kind;
+      const row = await deriveDocument({ db, config, userId: req.user?.id ?? -1, uploadsDir }, file, kind);
+      res.status(201).json({
+        file: {
+          ...toPublicFile(row),
+          messageId: row.message_id,
+          user: { id: row.user_id, name: db.getUserById(row.user_id)?.name ?? '' },
+        },
+      });
+    } catch (err) {
+      if (err instanceof HttpError) {
+        res.status(err.statusCode).json({ error: err.message });
+        return;
+      }
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Erreur dérivation' });
+    }
+  });
+
   app.get('/api/admin/stats', auth, adminOnly, (req, res) => {
     const overview = db.statsOverview();
     const model = config.LLM_MODEL ?? '';
@@ -307,6 +516,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
       users: { total: overview.users, online: onlineUserIds().length },
       messages: overview.messages,
       files: { count: overview.files, bytes: overview.fileBytes },
+      calls: { total: overview.calls, active: activeCall ? activeCall.participants.size : 0 },
       llm: {
         calls: overview.llmCalls,
         errors: overview.llmErrors,
@@ -376,6 +586,8 @@ export function createServer(config: Config, dataDir: string): ServerContext {
       content: z.string().optional(),
       before: z.number().optional(),
       limit: z.number().optional(),
+      to: z.number().optional(),
+      data: z.unknown().optional(),
     });
 
     ws.on('message', (data) => {
@@ -395,6 +607,14 @@ export function createServer(config: Config, dataDir: string): ServerContext {
         const limit = Math.min(Math.max(Math.trunc(msg.data.limit ?? 50), 1), 200);
         const rows = db.listMessages(limit, typeof msg.data.before === 'number' ? msg.data.before : undefined);
         ws.send(JSON.stringify({ type: 'history', messages: rows.reverse().map((r) => serializeMessage(db, r)) }));
+      } else if (msg.data.type === 'signal' && typeof msg.data.to === 'number') {
+        const target = online.get(msg.data.to);
+        if (target) {
+          const payload = JSON.stringify({ type: 'signal', from: user.id, data: msg.data.data });
+          for (const c of target) {
+            if (c.readyState === WebSocket.OPEN) c.send(payload);
+          }
+        }
       }
     });
     const onClose = () => {
