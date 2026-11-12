@@ -1,4 +1,4 @@
-import type { AdminStats, FileItem, Message, User } from './types';
+import type { AdminStats, CallInfo, FileItem, Message, User } from './types';
 
 const TOKEN_KEY = 'chat.token';
 
@@ -87,4 +87,35 @@ export const api = {
     return res.blob();
   },
   adminStats: () => req<AdminStats>('/api/admin/stats'),
+  calls: {
+    active: () => req<{ call: CallInfo | null }>('/api/calls/active'),
+    start: (title: string) =>
+      req<{ call: CallInfo }>('/api/calls/start', { method: 'POST', body: JSON.stringify({ title }) }),
+    join: () => req<{ call: CallInfo }>('/api/calls/join', { method: 'POST' }),
+    leave: () => req<{ call: CallInfo | null }>('/api/calls/leave', { method: 'POST' }),
+    end: () => req<{ ok: boolean }>('/api/calls/end', { method: 'POST' }),
+  },
+  uploadRecording: async (callId: number, blob: Blob, filename: string) => {
+    const token = getToken();
+    const fd = new FormData();
+    fd.append('file', blob, filename);
+    const res = await fetch(`/api/calls/${callId}/recording`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: fd,
+    });
+    if (!res.ok) {
+      let messageText = res.statusText;
+      try {
+        const body = (await res.json()) as { error?: string };
+        if (body.error) messageText = body.error;
+      } catch {
+        // garder statusText
+      }
+      throw new Error(messageText);
+    }
+    return (await res.json()) as { file: FileItem; transcriptPending: boolean };
+  },
+  derive: (fileId: number, kind: 'resume' | 'cr') =>
+    req<{ file: FileItem }>(`/api/files/${fileId}/derive`, { method: 'POST', body: JSON.stringify({ kind }) }),
 };
