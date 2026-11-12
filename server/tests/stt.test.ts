@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { loadConfig } from '../src/config.js';
-import { buildTranscriptionRequest, resolveSttBaseUrl, sttConfigured, toSttConfig } from '../src/llm/stt.js';
+import {
+  buildTranscriptionRequest,
+  parseTranscriptionVerboseJson,
+  resolveSttBaseUrl,
+  sttConfigured,
+  toSttConfig,
+} from '../src/llm/stt.js';
 
 const cfg = loadConfig({ LLM_API_KEY: '', STT_API_KEY: '' });
 
@@ -35,4 +41,39 @@ test('STT_BASE_URL personnalisé (serveur Whisper local) prioritaire', () => {
 test('provider inconnu sans base URL échoue', () => {
   const stt = toSttConfig(loadConfig({ STT_PROVIDER: 'inconnu', STT_API_KEY: '', STT_BASE_URL: '' }));
   assert.throws(() => resolveSttBaseUrl(stt), /STT_BASE_URL/);
+});
+
+test('buildTranscriptionRequest : response_format text par défaut, verbose_json si coût suivi', () => {
+  const stt = toSttConfig(loadConfig({ STT_PROVIDER: 'openai', STT_API_KEY: 'k' }));
+  assert.equal(buildTranscriptionRequest(stt, 'a.webm', 'audio/webm').responseFormat, 'text');
+  assert.equal(buildTranscriptionRequest(stt, 'a.webm', 'audio/webm', true).responseFormat, 'verbose_json');
+});
+
+test('parseTranscriptionVerboseJson extrait texte et durée (billing à la minute)', () => {
+  const r1 = parseTranscriptionVerboseJson({ text: 'bonjour', duration: 42.5 });
+  assert.equal(r1.text, 'bonjour');
+  assert.equal(r1.durationSeconds, 42.5);
+  const r2 = parseTranscriptionVerboseJson({ text: 'salut', usage: { duration: 12 } });
+  assert.equal(r2.durationSeconds, 12);
+  const r3 = parseTranscriptionVerboseJson({ text: 'hey', usage: { seconds: 7 } });
+  assert.equal(r3.durationSeconds, 7);
+  assert.throws(() => parseTranscriptionVerboseJson({}), /invalide/);
+});
+
+test('config Scaleway MaaS : base api.scaleway.ai + modèle whisper-large-v3', () => {
+  const cfg2 = loadConfig({
+    STT_PROVIDER: 'openai-compatible',
+    STT_BASE_URL: 'https://api.scaleway.ai/v1',
+    STT_API_KEY: 'SCWXXXXXXXX',
+    STT_MODEL: 'whisper-large-v3',
+    STT_LANGUAGE: 'fr',
+    STT_COST_PER_AUDIO_MIN: '0.0032',
+  });
+  assert.equal(sttConfigured(cfg2), true);
+  const req = buildTranscriptionRequest(toSttConfig(cfg2), 'appel.webm', 'audio/webm', true);
+  assert.equal(req.url, 'https://api.scaleway.ai/v1/audio/transcriptions');
+  assert.equal(req.headers.Authorization, 'Bearer SCWXXXXXXXX');
+  assert.equal(req.model, 'whisper-large-v3');
+  assert.equal(req.language, 'fr');
+  assert.equal(req.responseFormat, 'verbose_json');
 });
