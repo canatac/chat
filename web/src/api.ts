@@ -1,4 +1,4 @@
-import type { Message, User } from './types';
+import type { AdminStats, FileItem, Message, User } from './types';
 
 const TOKEN_KEY = 'chat.token';
 
@@ -46,8 +46,45 @@ export const api = {
       body: JSON.stringify({ name, password }),
     }),
   me: () => req<{ user: User }>('/api/me'),
+  users: () => req<{ users: User[] }>('/api/users'),
   messages: (before?: number, limit = 50) =>
     req<{ messages: Message[] }>(`/api/messages?limit=${limit}${before !== undefined ? `&before=${before}` : ''}`),
   send: (content: string) =>
     req<{ message: Message }>('/api/messages', { method: 'POST', body: JSON.stringify({ content }) }),
+  files: (query = '', before?: number, limit = 100) =>
+    req<{ files: FileItem[] }>(
+      `/api/files?limit=${limit}${before !== undefined ? `&before=${before}` : ''}${query ? `&query=${encodeURIComponent(query)}` : ''}`,
+    ),
+  uploadFile: async (file: File, message: string, post: boolean) => {
+    const token = getToken();
+    const fd = new FormData();
+    fd.append('file', file);
+    if (message) fd.append('message', message);
+    fd.append('post', String(post));
+    const res = await fetch('/api/files', {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: fd,
+    });
+    if (!res.ok) {
+      let messageText = res.statusText;
+      try {
+        const body = (await res.json()) as { error?: string };
+        if (body.error) messageText = body.error;
+      } catch {
+        // garder statusText
+      }
+      throw new Error(messageText);
+    }
+    return (await res.json()) as { file: FileItem; message: Message | null };
+  },
+  downloadFile: async (id: number): Promise<Blob> => {
+    const token = getToken();
+    const res = await fetch(`/api/files/${id}/download`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) throw new Error('Téléchargement impossible');
+    return res.blob();
+  },
+  adminStats: () => req<AdminStats>('/api/admin/stats'),
 };
