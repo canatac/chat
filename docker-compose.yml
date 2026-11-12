@@ -1,0 +1,33 @@
+services:
+  chat:
+    build: .
+    container_name: chat-pme
+    restart: unless-stopped
+    ports:
+      - "${CHAT_BIND:-0.0.0.0}:${PORT:-4000}:4000"
+    env_file:
+      - .env
+    volumes:
+      - chat-data:/app/data
+
+  caddy:
+    image: caddy:2-alpine
+    profiles:
+      - https
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DOMAIN=${DOMAIN:?Définir DOMAIN dans .env pour activer le profil https}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - chat
+
+volumes:
+  chat-data:
+  caddy-data:
+  caddy-config:
