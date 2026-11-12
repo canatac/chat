@@ -5,6 +5,33 @@ entreprise qui veut faire tourner la discussion sur **ses propres serveurs** (pa
 Scaleway), avec une **intégration LLM configurable** : la chatroom profite du modèle de votre
 choix pour faire des comptes-rendus de réunion ou proposer des solutions aux problèmes soulevés.
 
+## Mode d'emploi (utilisateur)
+
+**Envoyer un fichier (audio, PDF, doc…) dans la conversation**
+1. Bouton **trombone** à gauche de la zone de message → choisir le fichier (le texte saisi sert de légende).
+2. Le fichier est posté dans la chat (chip cliquable pour le télécharger/relire) **et** déposé dans
+   l'**espace documentaire** (icône **dossier** en haut à droite : recherche, dépôt, téléchargement).
+3. **Fichier audio** (`.webm`, `.mp3`, `.wav`…) : il est **transcrit automatiquement** si le STT est
+   configuré → la transcription `.txt` apparaît dans l'espace documentaire. Sinon, bouton
+   **🎙️ Transcrire** sur la ligne du fichier dans l'espace documentaire.
+
+**Démarrer / rejoindre un appel audio avec partage d'écran**
+1. Bouton **📞 téléphone** en haut → « Démarrer l'appel » (titre optionnel). Les autres voient une
+   pastille rouge sur le 📞 et peuvent « Rejoindre l'appel ».
+2. Dans l'appel : micro on/off, **partage d'écran**, **REC** (enregistrement de tout l'appel),
+   « Quitter l'appel » ou « Terminer l'appel » (pour tout le monde).
+
+**Enregistrer → transcrire → archiver → résumer → relire**
+1. REC pendant l'appel, second clic pour arrêter : l'audio est envoyé au serveur, posté dans la chat
+   et déposé dans l'espace documentaire (lié à l'appel).
+2. Si le STT est configuré, la **transcription brute** est déposée automatiquement dans l'espace
+   documentaire (et indexée par le RAG : interrogeable avec `/ask`).
+3. Sur la ligne de la transcription dans l'espace documentaire : icônes **Résumé** et
+   **Compte-rendu** → génèrent un fichier `.md` déposé à son tour (coût tracé dans le dashboard admin).
+4. Relire : bouton **télécharger** sur n'importe quel fichier de l'espace documentaire.
+
+**Commandes LLM dans la chat** : `/resume [n]`, `/solve <problème>`, `/ask <question>`, `/aide`.
+
 ## Fonctionnalités
 
 - Chatroom unique en **temps réel** (WebSocket), interface **Material UI** responsive
@@ -13,16 +40,16 @@ choix pour faire des comptes-rendus de réunion ou proposer des solutions aux pr
 - Historique persistant en **SQLite** (fichier unique, sauvegardable)
 - **Fichiers** : pièce jointe à n'importe quel message (bouton trombone) + **espace documentaire** dédié
   (bouton dossier en haut à droite : recherche, dépôt, téléchargement). Les fichiers texte/PDF sont
-  indexés automatiquement
+  indexés automatiquement, les fichiers audio transcrits (STT)
 - **RAG** : `/ask` et `/solve` fouillent les documents déposés et citent leurs sources
 - **Dashboard d'administration** (réservé aux noms de `ADMIN_NAMES`) : volume de tokens
   (entrée/sortie/total), **estimation du coût** en USD, activité par jour/commande/modèle, volumétrie
   messages/membres/documents/appels
 - **Appels d'équipe avec partage d'écran** (bouton téléphone en haut) : WebRTC en mesh, un appel à la
   fois, micro coupable, partage d'écran, enregistrement audio de l'appel (bouton REC)
-- **Transcription des appels** : l'enregistrement est transcrit (STT configurable, ex. Whisper) et la
-  transcription brute est déposée automatiquement dans l'espace documentaire — donc indexée par le RAG ;
-  boutons **Résumé** et **Compte-rendu** (générés par le LLM configuré) sur chaque transcription
+- **Transcription des appels et notes vocales** : transcription brute déposée automatiquement dans
+  l'espace documentaire — indexée par le RAG ; boutons **Résumé** et **Compte-rendu** (LLM) sur chaque
+  transcription
 - **Commandes LLM** dans la chatroom : le résultat est posté par le bot « Assistant »
 
 | Commande | Effet |
@@ -97,7 +124,8 @@ demande `response_format=verbose_json` à l'API pour récupérer la durée audio
 dans `llm_usage` (visible dans le dashboard admin).
 
 `STT_API_KEY` sinon `LLM_API_KEY` est réutilisée ; `STT_LANGUAGE=fr` pour forcer la langue.
-Sans STT configuré, l'audio reste déposé dans l'espace documentaire sans transcription.
+Tout fichier audio déposé (note vocale, enregistrement d'appel) est transcrit automatiquement si le STT est
+configuré ; sinon `POST /api/files/:id/transcribe` (bouton 🎙️ dans l'espace documentaire).
 La transcription brute est déposée automatiquement dans l'espace documentaire (indexée RAG) ; les boutons
 **Résumé** / **Compte-rendu** de l'espace documentaire appellent le LLM configuré (`POST /api/files/:id/derive`).
 
@@ -189,9 +217,10 @@ npm start            # http://localhost:4000
 - `GET /api/users` → `{users: [...]}` (avec `online`)
 - `GET /api/messages?limit=50&before=<id>` → `{messages: [...]}` (ordre chronologique, avec `files`)
 - `POST /api/messages` `{content}` → `{message}`
-- `POST /api/files` (multipart : `file`, `message?`, `post=true|false`) → `{file, message?}`
+- `POST /api/files` (multipart : `file`, `message?`, `post=true|false`) → `{file, message?}` — **fichier audio transcrit automatiquement si STT configuré**
 - `GET /api/files?limit=&before=&query=` → `{files: [...]}` (espace documentaire)
 - `GET /api/files/:id/download` → téléchargement
+- `POST /api/files/:id/transcribe` → transcrit un fichier audio (STT) et dépose la transcription dans l'espace documentaire
 - `POST /api/files/:id/derive` `{kind: "resume"|"cr"}` → génère un résumé / compte-rendu (LLM) déposé dans l'espace documentaire
 - `GET /api/calls/active`, `POST /api/calls/start|join|leave|end` → cycle de vie de l'appel
 - `POST /api/calls/:id/recording` (multipart `file`) → enregistre l'appel + transcription STT automatique
