@@ -12,6 +12,7 @@ export interface MessageFile {
   size: number;
   mime: string;
   createdAt: string;
+  callId?: number | null;
 }
 
 export interface Message {
@@ -29,13 +30,29 @@ export interface FileItem {
   mime: string;
   createdAt: string;
   messageId: number | null;
+  callId?: number | null;
   user: { id: number; name: string };
+}
+
+export interface CallParticipant {
+  id: number;
+  name: string;
+  isBot: boolean;
+}
+
+export interface CallInfo {
+  id: number;
+  title: string;
+  startedBy: CallParticipant;
+  participants: CallParticipant[];
+  active: boolean;
 }
 
 export interface AdminStats {
   users: { total: number; online: number };
   messages: number;
   files: { count: number; bytes: number };
+  calls?: { total: number; active: number };
   llm: {
     calls: number;
     errors: number;
