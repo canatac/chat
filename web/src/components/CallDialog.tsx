@@ -41,6 +41,19 @@ interface RemoteStream {
   stream: MediaStream;
 }
 
+function normalizeMediaError(err: unknown): Error {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/not allowed|permission|denied|secure context|insecure|notfound|notreadable/i.test(msg)) {
+    return new Error(
+      "Accès micro/écran bloqué par le navigateur (contexte non sécurisé ou permission refusée). " +
+        "Ouvre l'app en HTTPS (DOMAIN=chat.tondomaine.fr dans .env + docker compose --profile https up -d) " +
+        "ou via http://localhost:4000 (tunnel SSH : ssh -L 4000:127.0.0.1:4000 root@<IP_VM>). " +
+        "Vérifie aussi que le micro est autorisé pour ce site (icône 🔒 dans la barre d'adresse).",
+    );
+  }
+  return err instanceof Error ? err : new Error(msg);
+}
+
 export default function CallDialog({ open, onClose, user, socket, call, onCallChange }: Props) {
   const [title, setTitle] = useState('');
   const [joined, setJoined] = useState(false);
@@ -64,7 +77,12 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
       });
       sessionRef.current = session;
       knownPeersRef.current = new Set();
-      await session.start();
+      try {
+        await session.start();
+      } catch (err) {
+        sessionRef.current = null;
+        throw normalizeMediaError(err);
+      }
       for (const p of callInfo.participants) {
         if (p.id !== user.id) {
           knownPeersRef.current.add(p.id);
@@ -185,7 +203,7 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
         setSharing(true);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Partage d'écran refusé");
+      setError(normalizeMediaError(err).message);
     }
   };
 
