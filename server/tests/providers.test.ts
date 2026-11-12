@@ -4,7 +4,9 @@ import {
   buildAnthropicRequest,
   buildOpenAIRequest,
   parseAnthropicResponse,
+  parseAnthropicUsage,
   parseOpenAIResponse,
+  parseOpenAIUsage,
   resolveBaseUrl,
   type LLMConfig,
 } from '../src/llm/providers.js';
@@ -100,4 +102,21 @@ test('parseAnthropicResponse concatène les blocs texte', () => {
     'partie 1 \npartie 2',
   );
   assert.throws(() => parseAnthropicResponse({ content: [] }), /invalide/);
+});
+
+test('parseOpenAIUsage lit prompt/completion/total tokens', () => {
+  assert.deepEqual(parseOpenAIUsage({ usage: { prompt_tokens: 120, completion_tokens: 30, total_tokens: 150 } }), {
+    promptTokens: 120,
+    completionTokens: 30,
+    totalTokens: 150,
+  });
+  assert.deepEqual(parseOpenAIUsage({}), { promptTokens: 0, completionTokens: 0, totalTokens: 0 });
+});
+
+test('parseAnthropicUsage mappe input/output tokens', () => {
+  assert.deepEqual(parseAnthropicUsage({ usage: { input_tokens: 200, output_tokens: 50 } }), {
+    promptTokens: 200,
+    completionTokens: 50,
+    totalTokens: 250,
+  });
 });
