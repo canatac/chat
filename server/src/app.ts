@@ -430,8 +430,11 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     void (async () => {
       if (!sttConfigured(config)) return;
       try {
-        const text = await transcribeFile(config, path.join(uploadsDir, uploaded.filename), displayName, uploaded.mimetype);
+        const result = await transcribeFile(config, path.join(uploadsDir, uploaded.filename), displayName, uploaded.mimetype);
+        const text = result.text;
         if (!text) return;
+        const costPerMin = config.STT_COST_PER_AUDIO_MIN ?? 0;
+        const sttCost = result.durationSeconds ? (result.durationSeconds / 60) * costPerMin : 0;
         const date = new Date().toLocaleString('fr-FR');
         const tName = `🎙️ Transcription — appel${label} du ${date}.txt`;
         const tFname = `${Date.now()}-tr-${Math.random().toString(36).slice(2, 8)}.txt`;
@@ -455,7 +458,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
           promptTokens: 0,
           completionTokens: 0,
           totalTokens: 0,
-          costUsd: 0,
+          costUsd: sttCost,
           error: null,
         });
       } catch (err) {
