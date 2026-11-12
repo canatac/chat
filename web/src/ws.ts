@@ -5,6 +5,7 @@ export interface WsEvent {
   message?: Message;
   messages?: Message[];
   user?: User;
+  online?: number[];
   error?: string;
 }
 

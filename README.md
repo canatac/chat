@@ -8,20 +8,28 @@ choix pour faire des comptes-rendus de réunion ou proposer des solutions aux pr
 ## Fonctionnalités
 
 - Chatroom unique en **temps réel** (WebSocket), interface **Material UI** responsive
+- **Présence** : pastilles des membres en haut à droite (vert = en ligne, gris = hors ligne), avec détail au clic
 - Comptes simples : nom d'utilisateur + mot de passe (hash bcrypt, sessions JWT 30 jours)
 - Historique persistant en **SQLite** (fichier unique, sauvegardable)
+- **Fichiers** : pièce jointe à n'importe quel message (bouton trombone) + **espace documentaire** dédié
+  (bouton dossier en haut à droite : recherche, dépôt, téléchargement). Les fichiers texte/PDF sont
+  indexés automatiquement
+- **RAG** : `/ask` et `/solve` fouillent les documents déposés et citent leurs sources
+- **Dashboard d'administration** (réservé aux noms de `ADMIN_NAMES`) : volume de tokens
+  (entrée/sortie/total), **estimation du coût** en USD, activité par jour/commande/modèle, volumétrie
+  messages/membres/documents
 - **Commandes LLM** dans la chatroom : le résultat est posté par le bot « Assistant »
 
 | Commande | Effet |
 | --- | --- |
 | `/resume [n]` | Compte-rendu des `n` derniers messages (50 par défaut) : thèmes, décisions, actions à suivre, questions ouvertes |
 | `/solve <problème>` | 2 à 4 pistes de solution concrètes pour un problème soulevé dans la chatroom |
-| `/ask <question>` | Réponse à une question, en s'appuyant sur le contexte récent de la chatroom |
+| `/ask <question>` | Réponse à une question, en s'appuyant sur la chatroom **et les documents déposés (RAG)** |
 | `/aide` | Liste des commandes |
 
 ## Stack
 
-- **Backend** : Node.js 22 + TypeScript, Express (REST), `ws` (WebSocket), `node:sqlite`, `bcryptjs`, `jsonwebtoken`
+- **Backend** : Node.js 22 + TypeScript, Express (REST), `ws` (WebSocket), `node:sqlite`, `bcryptjs`, `jsonwebtoken`, `multer` (upload)
 - **Frontend** : React 18 + Vite + TypeScript + Material UI (`@mui/material`)
 - **Déploiement** : un seul conteneur Docker (le serveur sert aussi l'UI compilée), HTTPS optionnel via Caddy + Let's Encrypt
 
@@ -42,6 +50,23 @@ fournisseur précis : choisissez le vôtre.
 
 Autres variables : `LLM_TEMPERATURE` (0.4), `LLM_MAX_TOKENS` (1024), `LLM_CONTEXT_MESSAGES`
 (nombre de messages envoyés comme contexte au LLM, 50).
+
+### Coût et administration
+
+- `ADMIN_NAMES=alice,bob` : ces utilisateurs voient l'icône **dashboard** (en haut à droite) avec les
+  tokens consommés et le coût estimé. Les prix par modèle sont intégrés pour les modèles usuels ;
+  sinon définir `LLM_INPUT_PRICE_PER_1M` et `LLM_OUTPUT_PRICE_PER_1M` (USD / million de tokens).
+- Chaque appel LLM est enregistré (commande, modèle, tokens entrée/sortie, coût, erreurs) dans la
+  table `llm_usage`.
+
+### RAG sur les documents
+
+Les fichiers déposés (`.txt`, `.md`, `.csv`, `.json`, `.html`, `.pdf`) sont découpés en passages
+(`RAG_CHUNK_SIZE`, ~1200 caractères) et indexés dans `doc_chunks`. `/ask` et `/solve` retrouvent les
+`RAG_TOP_K` passages les plus pertinents (recherche lexicale, sans appel d'embeddings donc **sans coût
+LLM supplémentaire**) et les injectent dans le prompt avec citation du document. Pour un RAG sémantique
+par embeddings, il faudra brancher un endpoint d'embeddings — possible en évolution, mais inutile pour
+des volumes documentaires PME modestes.
 
 Exemple Ollama sur la même VM (gratuit, données chez vous) :
 
@@ -85,7 +110,7 @@ npm start            # http://localhost:4000
    git clone https://github.com/canatac/chat.git && cd chat
    cp .env.example .env
    ```
-6. **Configurer `.env`** : `JWT_SECRET=$(openssl rand -hex 32)`, puis `LLM_PROVIDER`,
+6. **Configurer `.env`** : `JWT_SECRET=$(openssl rand -hex 32)`, `ADMIN_NAMES`, puis `LLM_PROVIDER`,
    `LLM_API_KEY`, `LLM_MODEL` (et `LLM_BASE_URL` si fournisseur personnalisé).
 7. **Lancer** :
    ```bash
@@ -104,7 +129,7 @@ npm start            # http://localhost:4000
    ```bash
    git pull && docker compose up -d --build
    ```
-10. **Sauvegarde** : toute la base tient dans le volume Docker `chat-data` :
+10. **Sauvegarde** : toute la base et les fichiers déposés tiennent dans le volume Docker `chat-data` :
     ```bash
     docker run --rm -v chat_chat-data:/data -v "$(pwd)":/backup alpine \
       tar czf /backup/chat-data-$(date +%F).tgz -C /data .
@@ -116,22 +141,27 @@ npm start            # http://localhost:4000
 
 - `POST /api/auth/register` `{name, password}` → `{token, user}`
 - `POST /api/auth/login` `{name, password}` → `{token, user}`
-- `GET /api/me` → `{user}`
-- `GET /api/messages?limit=50&before=<id>` → `{messages: [...]}` (ordre chronologique)
+- `GET /api/me` → `{user}` (avec `isAdmin`)
+- `GET /api/users` → `{users: [...]}` (avec `online`)
+- `GET /api/messages?limit=50&before=<id>` → `{messages: [...]}` (ordre chronologique, avec `files`)
 - `POST /api/messages` `{content}` → `{message}`
+- `POST /api/files` (multipart : `file`, `message?`, `post=true|false`) → `{file, message?}`
+- `GET /api/files?limit=&before=&query=` → `{files: [...]}` (espace documentaire)
+- `GET /api/files/:id/download` → téléchargement
+- `GET /api/admin/stats` → statistiques LLM (admin uniquement)
 
 ### WebSocket `/ws?token=<jwt>`
 
 - Client → serveur : `{type: "message", content}` ou `{type: "history", before?, limit?}`
 - Serveur → client : `{type: "hello", user}`, `{type: "message", message}`,
-  `{type: "history", messages}`, `{type: "error", error}`
+  `{type: "history", messages}`, `{type: "presence", online: [ids]}`, `{type: "error", error}`
 
 ## Structure du projet
 
 ```
-server/   API REST + WebSocket, SQLite, intégration LLM (Node.js/TypeScript)
-  src/llm/ providers (OpenAI-compatible, Anthropic) + commandes /resume, /solve, /ask
-web/      Interface React + Material UI (Vite)
+server/   API REST + WebSocket, SQLite, upload, RAG, suivi de conso LLM (Node.js/TypeScript)
+  src/llm/ providers (OpenAI-compatible, Anthropic) + pricing + rag + commandes /resume, /solve, /ask
+web/      Interface React + Material UI (Vite) : chat, présence, espace documentaire, dashboard admin
 deploy/   Caddyfile pour le HTTPS
 docker-compose.yml / Dockerfile / .env.example
 ```
@@ -139,6 +169,7 @@ docker-compose.yml / Dockerfile / .env.example
 ## Notes de sécurité
 
 - Mots de passe hashés (bcrypt), tokens JWT signés (30 jours), `.env` jamais commité (`.gitignore`)
-- Les commandes LLM envoient les `LLM_CONTEXT_MESSAGES` derniers messages au fournisseur choisi :
-  en hébergement interne pur, préférez Ollama/vLLM local
+- Les commandes LLM envoient les `LLM_CONTEXT_MESSAGES` derniers messages **et** les `RAG_TOP_K`
+  extraits de documents au fournisseur choisi : en hébergement interne pur, préférez Ollama/vLLM local
+- `GET /api/admin/stats` est réservé aux noms de `ADMIN_NAMES` (403 sinon)
 - Toujours exposer l'appli derrière **HTTPS** (profil `https` fourni) si elle est reachable depuis Internet
