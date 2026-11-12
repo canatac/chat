@@ -1,6 +1,8 @@
+import DescriptionIcon from '@mui/icons-material/Description';
 import DownloadIcon from '@mui/icons-material/Download';
 import InsertDriveFileIcon from '@mui/icons-material/InsertDriveFile';
 import SearchIcon from '@mui/icons-material/Search';
+import SummarizeIcon from '@mui/icons-material/Summarize';
 import UploadFileIcon from '@mui/icons-material/UploadFile';
 import {
   Avatar,
@@ -13,6 +15,7 @@ import {
   ListItemAvatar,
   ListItemText,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -80,6 +83,16 @@ export default function DocDrawer({ open, onClose }: Props) {
     }
   };
 
+  const derive = async (f: FileItem, kind: 'resume' | 'cr') => {
+    setError(null);
+    try {
+      await api.derive(f.id, kind);
+      await load(query);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Erreur de génération');
+    }
+  };
+
   return (
     <Drawer
       anchor="right"
@@ -119,9 +132,25 @@ export default function DocDrawer({ open, onClose }: Props) {
             <ListItem
               key={f.id}
               secondaryAction={
-                <IconButton edge="end" onClick={() => void download(f)}>
-                  <DownloadIcon />
-                </IconButton>
+                <Box sx={{ display: 'flex' }}>
+                  {/transcription/i.test(f.name) && (
+                    <>
+                      <Tooltip title="Générer un résumé (LLM)">
+                        <IconButton edge="end" onClick={() => void derive(f, 'resume')}>
+                          <SummarizeIcon />
+                        </IconButton>
+                      </Tooltip>
+                      <Tooltip title="Générer un compte-rendu (LLM)">
+                        <IconButton edge="end" onClick={() => void derive(f, 'cr')}>
+                          <DescriptionIcon />
+                        </IconButton>
+                      </Tooltip>
+                    </>
+                  )}
+                  <IconButton edge="end" onClick={() => void download(f)}>
+                    <DownloadIcon />
+                  </IconButton>
+                </Box>
               }
             >
               <ListItemAvatar>
@@ -142,7 +171,8 @@ export default function DocDrawer({ open, onClose }: Props) {
           )}
         </List>
         <Typography variant="caption" color="text.secondary">
-          Les documents déposés alimentent aussi les commandes /ask et /solve (RAG).
+          Les documents déposés alimentent aussi les commandes /ask et /solve (RAG). Sur une transcription
+          d'appel, les boutons génèrent un résumé ou un compte-rendu (LLM) déposé ici.
         </Typography>
       </Box>
     </Drawer>
