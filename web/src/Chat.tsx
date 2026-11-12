@@ -1,3 +1,6 @@
+import AdminPanelSettingsIcon from '@mui/icons-material/AdminPanelSettings';
+import AttachFileIcon from '@mui/icons-material/AttachFile';
+import FolderSharedIcon from '@mui/icons-material/FolderShared';
 import ForumIcon from '@mui/icons-material/Forum';
 import LogoutIcon from '@mui/icons-material/Logout';
 import SendIcon from '@mui/icons-material/Send';
@@ -16,7 +19,10 @@ import {
 } from '@mui/material';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from './api';
+import AdminDialog from './components/AdminDialog';
+import DocDrawer from './components/DocDrawer';
 import MessageRow from './components/MessageRow';
+import PresenceMenu from './components/PresenceMenu';
 import type { Message, User } from './types';
 import { ChatSocket } from './ws';
 
@@ -25,7 +31,7 @@ const PAGE_SIZE = 50;
 const COMMAND_HINTS: Record<string, string> = {
   '/resume': 'Compte-rendu des derniers messages',
   '/solve': 'Suggestions de solutions pour un problème',
-  '/ask': 'Question à l\u2019assistant (avec le contexte de la chatroom)',
+  '/ask': 'Question à l\u2019assistant (chatroom + documents déposés)',
   '/aide': 'Liste des commandes disponibles',
 };
 
@@ -37,10 +43,15 @@ interface Props {
 
 export default function Chat({ token, user, onLogout }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
+  const [users, setUsers] = useState<User[]>([]);
+  const [onlineIds, setOnlineIds] = useState<number[]>([]);
   const [input, setInput] = useState('');
   const [hasMore, setHasMore] = useState(false);
   const [connected, setConnected] = useState(false);
+  const [docOpen, setDocOpen] = useState(false);
+  const [adminOpen, setAdminOpen] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
   const nearBottomRef = useRef(true);
   const socketRef = useRef<ChatSocket | null>(null);
 
@@ -52,6 +63,10 @@ export default function Chat({ token, user, onLogout }: Props) {
         setHasMore(r.messages.length === PAGE_SIZE);
       })
       .catch(() => {});
+    api
+      .users()
+      .then((r) => setUsers(r.users))
+      .catch(() => {});
     const socket = new ChatSocket(token);
     socket.onStatus(setConnected);
     socket.onMessage((event) => {
@@ -59,6 +74,8 @@ export default function Chat({ token, user, onLogout }: Props) {
         setMessages((prev) =>
           prev.some((m) => m.id === event.message?.id) ? prev : [...prev, event.message as Message],
         );
+      } else if (event.type === 'presence' && Array.isArray(event.online)) {
+        setOnlineIds(event.online);
       }
     });
     socket.connect();
@@ -99,6 +116,19 @@ export default function Chat({ token, user, onLogout }: Props) {
     setInput('');
   };
 
+  const onFilePicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    e.target.value = '';
+    if (!f) return;
+    const text = input.trim();
+    try {
+      await api.uploadFile(f, text, true);
+      setInput('');
+    } catch {
+      // l'upload a échoué : le message texte reste envoyable
+    }
+  };
+
   const hint = useMemo(() => {
     const key = Object.keys(COMMAND_HINTS).find((k) => input.trimStart().startsWith(k));
     return key ? COMMAND_HINTS[key] : null;
@@ -112,16 +142,29 @@ export default function Chat({ token, user, onLogout }: Props) {
           <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
             Chat d'équipe
           </Typography>
+          <PresenceMenu users={users} onlineIds={onlineIds} />
           <Chip
             label={connected ? 'en ligne' : 'hors ligne'}
             size="small"
             sx={{ mr: 1, bgcolor: connected ? '#dcf8c6' : '#eeeeee', color: '#333333' }}
           />
+          <Tooltip title="Espace documentaire">
+            <IconButton color="inherit" onClick={() => setDocOpen(true)}>
+              <FolderSharedIcon />
+            </IconButton>
+          </Tooltip>
+          {user.isAdmin && (
+            <Tooltip title="Administration (conso LLM)">
+              <IconButton color="inherit" onClick={() => setAdminOpen(true)}>
+                <AdminPanelSettingsIcon />
+              </IconButton>
+            </Tooltip>
+          )}
           <Chip
             avatar={<Avatar>{user.name.slice(0, 1).toUpperCase()}</Avatar>}
             label={user.name}
             variant="outlined"
-            sx={{ mr: 1, color: 'inherit', borderColor: 'rgba(255,255,255,0.5)' }}
+            sx={{ mx: 1, color: 'inherit', borderColor: 'rgba(255,255,255,0.5)' }}
           />
           <Tooltip title="Se déconnecter">
             <IconButton color="inherit" onClick={onLogout}>
@@ -160,6 +203,12 @@ export default function Chat({ token, user, onLogout }: Props) {
           </Typography>
         )}
         <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-end' }}>
+          <input hidden type="file" ref={fileRef} onChange={onFilePicked} />
+          <Tooltip title="Joindre un fichier à la conversation">
+            <IconButton color="primary" onClick={() => fileRef.current?.click()}>
+              <AttachFileIcon />
+            </IconButton>
+          </Tooltip>
           <TextField
             fullWidth
             multiline
@@ -180,6 +229,9 @@ export default function Chat({ token, user, onLogout }: Props) {
           </IconButton>
         </Box>
       </Paper>
+
+      <DocDrawer open={docOpen} onClose={() => setDocOpen(false)} />
+      <AdminDialog open={adminOpen} onClose={() => setAdminOpen(false)} />
     </Box>
   );
 }
