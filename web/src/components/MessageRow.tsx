@@ -1,10 +1,37 @@
+import AttachFileIcon from '@mui/icons-material/AttachFile';
 import SmartToyIcon from '@mui/icons-material/SmartToy';
-import { Avatar, Box, Paper, Typography } from '@mui/material';
-import type { Message } from '../types';
+import { Avatar, Box, Chip, Paper, Typography } from '@mui/material';
+import { api } from '../api';
+import type { Message, MessageFile } from '../types';
 
 interface Props {
   message: Message;
   own: boolean;
+}
+
+function FileChip({ file }: { file: MessageFile }) {
+  const download = async () => {
+    try {
+      const blob = await api.downloadFile(file.id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = file.name;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      // ignore
+    }
+  };
+  return (
+    <Chip
+      size="small"
+      icon={<AttachFileIcon />}
+      label={file.name}
+      onClick={() => void download()}
+      sx={{ maxWidth: '100%' }}
+    />
+  );
 }
 
 export default function MessageRow({ message, own }: Props) {
@@ -44,6 +71,13 @@ export default function MessageRow({ message, own }: Props) {
             <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
               {message.content}
             </Typography>
+            {message.files && message.files.length > 0 && (
+              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mt: 0.5 }}>
+                {message.files.map((f) => (
+                  <FileChip key={f.id} file={f} />
+                ))}
+              </Box>
+            )}
           </Paper>
         </Box>
       </Box>
