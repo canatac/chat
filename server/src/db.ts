@@ -29,7 +29,16 @@ export interface FileRow {
   mime: string;
   size: number;
   path: string;
+  call_id: number | null;
   created_at: number;
+}
+
+export interface CallRow {
+  id: number;
+  title: string;
+  started_by: number;
+  started_at: number;
+  ended_at: number | null;
 }
 
 export interface FileListRow extends FileRow {
@@ -89,9 +98,17 @@ export class DB {
         mime TEXT NOT NULL,
         size INTEGER NOT NULL,
         path TEXT NOT NULL,
+        call_id INTEGER REFERENCES calls(id),
         created_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_files_id ON files(id);
+      CREATE TABLE IF NOT EXISTS calls (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL DEFAULT '',
+        started_by INTEGER NOT NULL REFERENCES users(id),
+        started_at INTEGER NOT NULL,
+        ended_at INTEGER
+      );
       CREATE TABLE IF NOT EXISTS doc_chunks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         file_id INTEGER NOT NULL REFERENCES files(id),
@@ -118,6 +135,10 @@ export class DB {
       this.db
         .prepare("INSERT INTO users (name, pass_hash, is_bot, created_at) VALUES ('assistant', NULL, 1, ?)")
         .run(Date.now());
+    }
+    const fileCols = this.db.prepare('PRAGMA table_info(files)').all() as unknown as { name: string }[];
+    if (!fileCols.some((c) => c.name === 'call_id')) {
+      this.db.exec('ALTER TABLE files ADD COLUMN call_id INTEGER REFERENCES calls(id)');
     }
   }
 
@@ -172,10 +193,18 @@ export class DB {
     return rows as unknown as ContextRow[];
   }
 
-  insertFile(userId: number, messageId: number | null, name: string, mime: string, size: number, relPath: string): FileRow {
+  insertFile(
+    userId: number,
+    messageId: number | null,
+    name: string,
+    mime: string,
+    size: number,
+    relPath: string,
+    callId: number | null = null,
+  ): FileRow {
     const info = this.db
-      .prepare('INSERT INTO files (user_id, message_id, name, mime, size, path, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(userId, messageId, name, mime, size, relPath, Date.now());
+      .prepare('INSERT INTO files (user_id, message_id, name, mime, size, path, call_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(userId, messageId, name, mime, size, relPath, callId, Date.now());
     return this.getFileById(Number(info.lastInsertRowid)) as FileRow;
   }
 
@@ -205,6 +234,25 @@ export class DB {
     return this.db
       .prepare('SELECT * FROM files WHERE message_id = ? ORDER BY id')
       .all(messageId) as unknown as FileRow[];
+  }
+
+  startCall(userId: number, title: string): CallRow {
+    const info = this.db
+      .prepare('INSERT INTO calls (title, started_by, started_at, ended_at) VALUES (?, ?, ?, NULL)')
+      .run(title, userId, Date.now());
+    return this.db.prepare('SELECT * FROM calls WHERE id = ?').get(Number(info.lastInsertRowid)) as unknown as CallRow;
+  }
+
+  endCall(id: number): void {
+    this.db.prepare('UPDATE calls SET ended_at = ? WHERE id = ?').run(Date.now(), id);
+  }
+
+  getCallById(id: number): CallRow | undefined {
+    return this.db.prepare('SELECT * FROM calls WHERE id = ?').get(id) as unknown as CallRow | undefined;
+  }
+
+  getActiveCall(): CallRow | undefined {
+    return this.db.prepare('SELECT * FROM calls WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1').get() as unknown as CallRow | undefined;
   }
 
   insertChunk(fileId: number, idx: number, content: string): void {
@@ -249,7 +297,8 @@ export class DB {
           (SELECT COALESCE(SUM(prompt_tokens), 0) FROM llm_usage) AS promptTokens,
           (SELECT COALESCE(SUM(completion_tokens), 0) FROM llm_usage) AS completionTokens,
           (SELECT COALESCE(SUM(total_tokens), 0) FROM llm_usage) AS totalTokens,
-          (SELECT COALESCE(SUM(cost_usd), 0) FROM llm_usage) AS costUsd`,
+          (SELECT COALESCE(SUM(cost_usd), 0) FROM llm_usage) AS costUsd,
+          (SELECT COUNT(*) FROM calls) AS calls`,
       )
       .get() as unknown as Record<string, number>;
   }
