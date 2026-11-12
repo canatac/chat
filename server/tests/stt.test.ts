@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { loadConfig } from '../src/config.js';
 import {
   buildTranscriptionRequest,
+  isAudioMime,
   parseTranscriptionVerboseJson,
   resolveSttBaseUrl,
   sttConfigured,
@@ -58,6 +59,14 @@ test('parseTranscriptionVerboseJson extrait texte et durée (billing à la minut
   const r3 = parseTranscriptionVerboseJson({ text: 'hey', usage: { seconds: 7 } });
   assert.equal(r3.durationSeconds, 7);
   assert.throws(() => parseTranscriptionVerboseJson({}), /invalide/);
+});
+
+test('isAudioMime reconnaît les mime audio et extensions usuelles', () => {
+  assert.equal(isAudioMime('audio/webm', 'appel.webm'), true);
+  assert.equal(isAudioMime('audio/mpeg', 'x'), true);
+  assert.equal(isAudioMime('application/octet-stream', 'note.mp3'), true);
+  assert.equal(isAudioMime('application/octet-stream', 'rapport.pdf'), false);
+  assert.equal(isAudioMime('text/plain', 'compte.txt'), false);
 });
 
 test('config Scaleway MaaS : base api.scaleway.ai + modèle whisper-large-v3', () => {
