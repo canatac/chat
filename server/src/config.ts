@@ -17,6 +17,12 @@ const envSchema = z.object({
   MAX_UPLOAD_MB: z.coerce.number().int().min(1).max(500).default(25),
   RAG_TOP_K: z.coerce.number().int().min(1).max(20).default(5),
   RAG_CHUNK_SIZE: z.coerce.number().int().min(200).max(4000).default(1200),
+  STT_PROVIDER: z.string().default('openai'),
+  STT_BASE_URL: z.string().optional(),
+  STT_API_KEY: z.string().optional(),
+  STT_MODEL: z.string().default('whisper-1'),
+  STT_LANGUAGE: z.string().optional(),
+  RECORDING_MAX_MB: z.coerce.number().int().min(1).max(2000).default(200),
 });
 
 export type Config = z.infer<typeof envSchema>;
