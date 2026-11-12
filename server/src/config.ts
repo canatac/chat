@@ -23,6 +23,7 @@ const envSchema = z.object({
   STT_MODEL: z.string().default('whisper-1'),
   STT_LANGUAGE: z.string().optional(),
   RECORDING_MAX_MB: z.coerce.number().int().min(1).max(2000).default(200),
+  STT_COST_PER_AUDIO_MIN: z.coerce.number().min(0).optional(),
 });
 
 export type Config = z.infer<typeof envSchema>;

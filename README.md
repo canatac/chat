@@ -78,7 +78,23 @@ Autres variables : `LLM_TEMPERATURE` (0.4), `LLM_MAX_TOKENS` (1024), `LLM_CONTEX
 | --- | --- | --- | --- |
 | OpenAI | `openai` | `https://api.openai.com/v1` | `whisper-1` |
 | Groq (économique) | `groq` | `https://api.groq.com/openai/v1` | `whisper-large-v3` |
+| **Scaleway Model-as-a-Service** (données hébergées à Paris, 0,003 €/min audio) | `openai-compatible` | `https://api.scaleway.ai/v1` | `whisper-large-v3` |
 | Whisper local (données 100 % chez vous) | `openai-compatible` | `http://127.0.0.1:9000/v1` | selon votre serveur |
+
+Configuration Scaleway (clé secrète IAM, console Scaleway → IAM → API Keys) :
+
+```bash
+STT_PROVIDER=openai-compatible
+STT_BASE_URL=https://api.scaleway.ai/v1
+STT_API_KEY=<SCW_SECRET_KEY>
+STT_MODEL=whisper-large-v3
+STT_LANGUAGE=fr
+STT_COST_PER_AUDIO_MIN=0.0032   # ~0,003 €/min converti ; active le suivi du coût STT dans le dashboard
+```
+
+Le format `audio/webm` produit par le navigateur est accepté par Scaleway (webm supporté). `STT_COST_PER_AUDIO_MIN`
+demande `response_format=verbose_json` à l'API pour récupérer la durée audio et valoriser chaque transcription
+dans `llm_usage` (visible dans le dashboard admin).
 
 `STT_API_KEY` sinon `LLM_API_KEY` est réutilisée ; `STT_LANGUAGE=fr` pour forcer la langue.
 Sans STT configuré, l'audio reste déposé dans l'espace documentaire sans transcription.
@@ -139,7 +155,7 @@ npm start            # http://localhost:4000
    ```
 6. **Configurer `.env`** : `JWT_SECRET=$(openssl rand -hex 32)`, `ADMIN_NAMES`, puis `LLM_PROVIDER`,
    `LLM_API_KEY`, `LLM_MODEL` (et `LLM_BASE_URL` si fournisseur personnalisé), `STT_*` pour la
-   transcription des appels.
+   transcription des appels (voir bloc Scaleway ci-dessus).
 7. **Lancer** :
    ```bash
    docker compose up -d --build
@@ -205,6 +221,6 @@ docker-compose.yml / Dockerfile / .env.example
 - Les commandes LLM envoient les `LLM_CONTEXT_MESSAGES` derniers messages **et** les `RAG_TOP_K`
   extraits de documents au fournisseur choisi : en hébergement interne pur, préférez Ollama/vLLM local
 - Les transcriptions d'appels partent vers le fournisseur STT choisi : préférez un Whisper local pour
-  que l'audio ne quitte jamais votre VM
+  que l'audio ne quitte jamais votre VM (Scaleway MaaS = données hébergées à Paris, conforme EU)
 - `GET /api/admin/stats` est réservé aux noms de `ADMIN_NAMES` (403 sinon)
 - Toujours exposer l'appli derrière **HTTPS** (profil `https` fourni) si elle est reachable depuis Internet
