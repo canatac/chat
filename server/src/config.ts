@@ -24,6 +24,9 @@ const envSchema = z.object({
   STT_LANGUAGE: z.string().optional(),
   RECORDING_MAX_MB: z.coerce.number().int().min(1).max(2000).default(200),
   STT_COST_PER_AUDIO_MIN: z.coerce.number().min(0).optional(),
+  TURN_URLS: z.string().default(''),
+  TURN_USERNAME: z.string().default(''),
+  TURN_CREDENTIAL: z.string().default(''),
 });
 
 export type Config = z.infer<typeof envSchema>;
