@@ -284,6 +284,20 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     res.json({ call: serializeCall() });
   });
 
+  app.get('/api/rtc-config', auth, (req, res) => {
+    const iceServers: { urls: string | string[]; username?: string; credential?: string }[] = [
+      { urls: 'stun:stun.l.google.com:19302' },
+    ];
+    if (config.TURN_URLS) {
+      iceServers.push({
+        urls: config.TURN_URLS.split(',').map((s) => s.trim()).filter(Boolean),
+        username: config.TURN_USERNAME || undefined,
+        credential: config.TURN_CREDENTIAL || undefined,
+      });
+    }
+    res.json({ iceServers });
+  });
+
   const callTitleSchema = z.object({ title: z.string().trim().max(120).optional() });
 
   app.post('/api/calls/start', auth, (req, res) => {
