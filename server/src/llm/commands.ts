@@ -1,6 +1,6 @@
 import type { ContextRow } from '../db.js';
 
-export type CommandName = 'resume' | 'solve' | 'ask' | 'help';
+export type CommandName = 'resume' | 'solve' | 'ask' | 'lien' | 'help';
 
 export interface Command {
   name: CommandName;
@@ -12,8 +12,10 @@ export const COMMAND_HELP = [
   '• /resume [n] — compte-rendu des n derniers messages (50 par défaut)',
   '• /solve <problème> — pistes de solution pour un problème soulevé dans la chatroom',
   '• /ask <question> — question à l\u2019assistant (contexte de la chatroom + documents déposés)',
+  '• /lien <url> [titre] — télécharge un média (ex. émission radio .m4a), le transcrit (STT), génère un CR et archive une copie webm',
   '• /aide — afficher cette aide',
   'Les commandes /ask et /solve fouillent aussi les documents déposés dans l\u2019espace documentaire (RAG).',
+  'Coller seul un lien média (.m4a, .mp3, .webm…) déclenche aussi /lien automatiquement.',
 ].join('\n');
 
 export function parseCommand(content: string): Command | null {
@@ -25,6 +27,7 @@ export function parseCommand(content: string): Command | null {
   if (name === 'resume') return { name: 'resume', arg };
   if (name === 'solve') return { name: 'solve', arg };
   if (name === 'ask' || name === 'question') return { name: 'ask', arg };
+  if (name === 'lien' || name === 'link') return { name: 'lien', arg };
   return { name: 'help', arg: '' };
 }
 
@@ -53,6 +56,8 @@ export function buildUserPrompt(cmd: Command, context: string, docs = ''): strin
       return `Contexte de la chatroom et documents :\n\n${ctx}\n\nProblème soulevé : ${cmd.arg || '(non précisé)'}\n\nPropose 2 à 4 pistes de solution concrètes, ordonnées par pertinence. Pour chaque piste : actions à mener, avantage, risque principal, prochaine étape immédiate. Cite les documents utilisés quand c'est pertinent.`;
     case 'ask':
       return `Contexte (chatroom + documents) :\n\n${ctx}\n\nQuestion : ${cmd.arg || '(non précisée)'}\n\nRéponds à la question en t'appuyant d'abord sur les documents de référence fournis quand ils sont pertinents, puis sur la conversation. Indique entre parenthèses le nom du document utilisé.`;
+    case 'lien':
+      return '';
     case 'help':
       return '';
   }
