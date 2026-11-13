@@ -9,6 +9,7 @@ export interface WsEvent {
   call?: CallInfo | null;
   from?: number;
   data?: unknown;
+  callId?: number | null;
   error?: string;
 }
 
