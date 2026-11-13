@@ -263,7 +263,7 @@ test('dashboard admin : 200 pour un admin, 403 pour un non-admin', async () => {
   assert.equal(ko.status, 403);
 });
 
-test('cycle de vie d’unun appel : start, join, end', async () => {
+test('cycle de vie d\u2019un appel : start, join, end', async () => {
   const alice = await loginAs('Alice', 'motdepasse1');
   const bob = await loginAs('Bob', 'motdepasse2');
   const authA = { Authorization: `Bearer ${alice}` };
