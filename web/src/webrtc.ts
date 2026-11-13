@@ -30,6 +30,7 @@ export class CallSession {
   private recordedChunks: Blob[] = [];
   private recordDest: MediaStreamAudioDestinationNode | null = null;
   private recordCtx: AudioContext | null = null;
+  private unlockCtx: AudioContext | null = null;
   private readonly ws: ChatSocket;
   private readonly userId: number;
   private readonly handlers: CallSessionHandlers;
@@ -40,8 +41,24 @@ export class CallSession {
     this.handlers = handlers;
   }
 
+  private unlockAudio(): void {
+    try {
+      if (!this.unlockCtx) this.unlockCtx = new AudioContext();
+      void this.unlockCtx.resume();
+      const ctx = this.unlockCtx;
+      const buf = ctx.createBuffer(1, 1, 22050);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      src.start(0);
+    } catch {
+      // ignore
+    }
+  }
+
   async start(): Promise<MediaStream> {
     await loadIceServers();
+    this.unlockAudio();
     this.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
     return this.localStream;
   }
@@ -110,6 +127,7 @@ export class CallSession {
     pc.ontrack = (ev) => {
       const stream = ev.streams[0];
       if (stream) {
+        this.unlockAudio();
         this.remoteStreams.set(peerId, stream);
         this.handlers.onRemoteStream(peerId, stream);
       }
