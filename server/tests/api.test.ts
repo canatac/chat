@@ -377,3 +377,14 @@ test('fichier audio déposé à la main : pas de transcription sans STT, endpoin
   const trTxt = await api(`/api/files/${txtBody.file.id}/transcribe`, { method: 'POST', headers: auth });
   assert.equal(trTxt.status, 400);
 });
+
+test('rtc-config : STUN public par défaut, TURN ajouté si TURN_URLS configuré', async () => {
+  const alice = await loginAs('Alice', 'motdepasse1');
+  const res = await api('/api/rtc-config', { headers: { Authorization: `Bearer ${alice}` } });
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { iceServers: { urls: string | string[] }[] };
+  assert.ok(body.iceServers.some((s) => String(s.urls).includes('stun:')));
+  assert.equal(body.iceServers.some((s) => String(s.urls).includes('turn:')), false);
+  const noAuth = await api('/api/rtc-config');
+  assert.equal(noAuth.status, 401);
+});
