@@ -27,6 +27,9 @@ const envSchema = z.object({
   TURN_URLS: z.string().default(''),
   TURN_USERNAME: z.string().default(''),
   TURN_CREDENTIAL: z.string().default(''),
+  LINK_FETCH_ALLOWED_DOMAINS: z.string().default(''),
+  MAX_LINK_FETCH_MB: z.coerce.number().int().min(1).max(5000).default(500),
+  LINK_FETCH_ALLOW_PRIVATE: z.string().default('0'),
 });
 
 export type Config = z.infer<typeof envSchema>;

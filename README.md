@@ -15,11 +15,18 @@ choix pour faire des comptes-rendus de réunion ou proposer des solutions aux pr
    configuré → la transcription `.txt` apparaît dans l'espace documentaire. Sinon, bouton
    **🎙️ Transcrire** sur la ligne du fichier dans l'espace documentaire.
 
+**Télécharger et résumer un média distant (émission radio, podcast…)**
+- Colle simplement le lien dans la chat (ex. un `.m4a` de 1 h) → il est téléchargé automatiquement, ou
+  utilise la commande **`/lien <url> [titre]`**. Le bot poste un récap : média original déposé,
+  transcription (STT), copie **webm/opus** (archivage léger, via ffmpeg), et **compte-rendu** généré par le LLM.
+- Garde-fous : `LINK_FETCH_ALLOWED_DOMAINS` (liste blanche de domaines, `*.` supporté), IP privées/localhost
+  bloquées (anti-SSRF), plafond `MAX_LINK_FETCH_MB` (500 Mo par défaut).
+
 **Démarrer / rejoindre un appel (audio + caméra optionnelle + partage d'écran)**
 1. Bouton **📞 téléphone** en haut → « Démarrer l'appel » (titre optionnel). Les autres voient une
    pastille rouge sur le 📞 et peuvent « Rejoindre l'appel ».
 2. Dans l'appel : micro on/off, **📷 caméra** (optionnelle), **🖥️ partage d'écran**, **REC**
-   (enregistrement de tout l'appel), « Quitter l'appel » ou « Terminer l'appel » (pour tout le monde).
+   (enregistrement partagé de tout l'appel, pastille `REC — <nom>` synchronisée pour tous), « Quitter l'appel » ou « Terminer l'appel » (pour tout le monde).
 
 > **Appels depuis un téléphone / entre réseaux différents (4G ↔ box)** : le serveur **TURN (coturn)**
 > tourne dans `docker-compose`. Réglage obligatoire dans le `.env` de la VM :
@@ -33,7 +40,7 @@ choix pour faire des comptes-rendus de réunion ou proposer des solutions aux pr
 > (tunnel SSH `ssh -L 4000:127.0.0.1:4000 root@<IP>`).
 
 **Enregistrer → transcrire → archiver → résumer → relire**
-1. REC pendant l'appel, second clic pour arrêter : l'audio est envoyé au serveur, posté dans la chat
+1. REC pendant l'appel, second clic pour arrêter (n'importe qui peut arrêter) : l'audio est envoyé au serveur, posté dans la chat
    et déposé dans l'espace documentaire (lié à l'appel).
 2. Si le STT est configuré, la **transcription brute** est déposée automatiquement dans l'espace
    documentaire (et indexée par le RAG : interrogeable avec `/ask`).
@@ -41,7 +48,7 @@ choix pour faire des comptes-rendus de réunion ou proposer des solutions aux pr
    **Compte-rendu** → génèrent un fichier `.md` déposé à son tour (coût tracé dans le dashboard admin).
 4. Relire : bouton **télécharger** sur n'importe quel fichier de l'espace documentaire.
 
-**Commandes LLM dans la chat** : `/resume [n]`, `/solve <problème>`, `/ask <question>`, `/aide`.
+**Commandes LLM dans la chat** : `/resume [n]`, `/solve <problème>`, `/ask <question>`, `/lien <url> [titre]`, `/aide`.
 
 ## Fonctionnalités
 
@@ -52,12 +59,13 @@ choix pour faire des comptes-rendus de réunion ou proposer des solutions aux pr
 - **Fichiers** : pièce jointe à n'importe quel message (bouton trombone) + **espace documentaire** dédié
   (bouton dossier en haut à droite : recherche, dépôt, téléchargement). Les fichiers texte/PDF sont
   indexés automatiquement, les fichiers audio transcrits (STT)
+- **/lien** : médias distants (émissions radio…) téléchargés, transcrits, CR auto, copie webm
 - **RAG** : `/ask` et `/solve` fouillent les documents déposés et citent leurs sources
 - **Dashboard d'administration** (réservé aux noms de `ADMIN_NAMES`) : volume de tokens
   (entrée/sortie/total), **estimation du coût** en USD, activité par jour/commande/modèle, volumétrie
   messages/membres/documents/appels
 - **Appels d'équipe** (bouton téléphone en haut) : WebRTC en mesh, audio + caméra optionnelle + partage
-  d'écran, enregistrement audio de l'appel (bouton REC), TURN coturn pour les appels cross-réseaux
+  d'écran, enregistrement partagé (REC synchronisé), TURN coturn pour les appels cross-réseaux
 - **Transcription des appels et notes vocales** : transcription brute déposée automatiquement dans
   l'espace documentaire — indexée par le RAG ; boutons **Résumé** et **Compte-rendu** (LLM) sur chaque
   transcription
@@ -69,11 +77,12 @@ choix pour faire des comptes-rendus de réunion ou proposer des solutions aux pr
 | `/resume [n]` | Compte-rendu des `n` derniers messages (50 par défaut) : thèmes, décisions, actions à suivre, questions ouvertes |
 | `/solve <problème>` | 2 à 4 pistes de solution concrètes pour un problème soulevé dans la chatroom |
 | `/ask <question>` | Réponse à une question, en s'appuyant sur la chatroom **et les documents déposés (RAG)** |
+| `/lien <url> [titre]` | Télécharge le média, le transcrit (STT), génère un CR, archive une copie webm (ffmpeg) |
 | `/aide` | Liste des commandes |
 
 ## Stack
 
-- **Backend** : Node.js 22 + TypeScript, Express (REST), `ws` (WebSocket), `node:sqlite`, `bcryptjs`, `jsonwebtoken`, `multer` (upload)
+- **Backend** : Node.js 22 + TypeScript, Express (REST), `ws` (WebSocket), `node:sqlite`, `bcryptjs`, `jsonwebtoken`, `multer` (upload), `ffmpeg` (transcodage webm)
 - **Frontend** : React 18 + Vite + TypeScript + Material UI (`@mui/material`) + WebRTC natif (appels mesh)
 - **Déploiement** : conteneurs Docker (`chat` + `coturn` TURN + `wireguard` VPN + `caddy` optionnel HTTPS), volume `chat-data` pour les données
 
@@ -122,16 +131,17 @@ docker compose logs wireguard
 ### Appels, enregistrement et transcription (STT)
 
 - Appel WebRTC **mesh** (pair-à-pair) : le serveur ne relaie que la signalisation (`{type:"signal"}` sur le
-  WebSocket) et l'état de l'appel (`{type:"call"}`). Conçu pour ~5-6 participants ; au-delà, prévoir un
-  SFU (LiveKit, mediasoup, Jitsi). Le partage d'écran utilise `getDisplayMedia`.
+  WebSocket) et l'état de l'appel (`{type:"call"}`, incluant l'état `recording`). Conçu pour ~5-6 participants ;
+  au-delà, prévoir un SFU (LiveKit, mediasoup, Jitsi). Le partage d'écran utilise `getDisplayMedia`.
 - **ICE** : `GET /api/rtc-config` renvoie les serveurs ICE (STUN public + TURN coturn si `TURN_URLS` est défini).
   Le TURN est **indispensable** pour les appels entre réseaux différents (mobile 4G/5G ↔ box) : sans lui,
   pas de média (son/image) même si la session démarre. `coturn` est déployé par `docker-compose`
   (ports UDP 3478 + 49160-49200 à ouvrir dans le security group Scaleway).
-- L'enregistrement se fait **côté navigateur** (mix micro local + flux distants via MediaRecorder) puis
-  envoyé au serveur à l'arrêt : pas de serveur d'enregistrement lourd. Le fichier audio est déposé dans
-  l'espace documentaire et posté dans la chatroom. **Garder l'onglet ouvert pendant l'enregistrement.**
-- Transcription via un provider **OpenAI-compatible** (`/audio/transcriptions`) :
+- L'enregistrement se fait **côté navigateur** (mix micro local + flux distants via MediaRecorder, webm ou
+  m4a selon le navigateur) puis envoyé au serveur à l'arrêt : pas de serveur d'enregistrement lourd.
+  Un seul enregistrement à la fois, piloté par tous les participants. **Garder l'onglet ouvert pendant l'enregistrement.**
+- Transcription via un provider **OpenAI-compatible** (`/audio/transcriptions`) — **m4a/mp3/webm acceptés
+  directement, pas besoin de convertir en webm pour transcrire** :
 
 | Fournisseur | `STT_PROVIDER` | `STT_BASE_URL` | `STT_MODEL` |
 | --- | --- | --- | --- |
@@ -151,24 +161,34 @@ STT_LANGUAGE=fr
 STT_COST_PER_AUDIO_MIN=0.0032   # ~0,003 €/min converti ; active le suivi du coût STT dans le dashboard
 ```
 
-Le format `audio/webm` produit par le navigateur est accepté par Scaleway (webm supporté). `STT_COST_PER_AUDIO_MIN`
-demande `response_format=verbose_json` à l'API pour récupérer la durée audio et valoriser chaque transcription
-dans `llm_usage` (visible dans le dashboard admin).
-
+`STT_COST_PER_AUDIO_MIN` demande `response_format=verbose_json` à l'API pour récupérer la durée audio et
+valoriser chaque transcription dans `llm_usage` (visible dans le dashboard admin).
 `STT_API_KEY` sinon `LLM_API_KEY` est réutilisée ; `STT_LANGUAGE=fr` pour forcer la langue.
-Tout fichier audio déposé (note vocale, enregistrement d'appel) est transcrit automatiquement si le STT est
-configuré ; sinon `POST /api/files/:id/transcribe` (bouton 🎙️ dans l'espace documentaire).
+Tout fichier audio déposé (note vocale, enregistrement d'appel, média téléchargé via `/lien`) est transcrit
+automatiquement si le STT est configuré ; sinon `POST /api/files/:id/transcribe` (bouton 🎙️ dans l'espace documentaire).
 La transcription brute est déposée automatiquement dans l'espace documentaire (indexée RAG) ; les boutons
 **Résumé** / **Compte-rendu** de l'espace documentaire appellent le LLM configuré (`POST /api/files/:id/derive`).
+
+### /lien : médias distants (émissions radio, podcasts)
+
+`/lien <url> [titre]` (ou juste coller le lien média seul) :
+1. Le serveur télécharge le fichier (plafond `MAX_LINK_FETCH_MB`, anti-SSRF : `LINK_FETCH_ALLOWED_DOMAINS`,
+   IP privées bloquées) et le dépose dans l'espace documentaire, attaché au message.
+2. S'il est audio (m4a, mp3, webm…) : **transcription directe** via le STT (pas besoin de convertir en webm),
+   puis **compte-rendu** généré par le LLM si configuré.
+3. Si `ffmpeg` est présent (installé dans l'image Docker) : une **copie webm/opus 64k** est produite pour
+   l'archivage léger (1 h de m4a ≈ 60-90 Mo → ~30 Mo en webm).
+4. Le bot poste un récap dans la chat avec les noms des fichiers créés (tous dans l'espace documentaire, indexés RAG).
+
+Coût indicatif pour 1 h d'émission (Scaleway) : transcription 0,003 €/min ≈ **0,18 €** + CR LLM (quelques
+centimes selon le modèle), tracé dans le dashboard admin.
 
 ### RAG sur les documents
 
 Les fichiers déposés (`.txt`, `.md`, `.csv`, `.json`, `.html`, `.pdf`) sont découpés en passages
 (`RAG_CHUNK_SIZE`, ~1200 caractères) et indexés dans `doc_chunks`. `/ask` et `/solve` retrouvent les
 `RAG_TOP_K` passages les plus pertinents (recherche lexicale, sans appel d'embeddings donc **sans coût
-LLM supplémentaire**) et les injectent dans le prompt avec citation du document. Pour un RAG sémantique
-par embeddings, il faudra brancher un endpoint d'embeddings — possible en évolution, mais inutile pour
-des volumes documentaires PME modestes.
+LLM supplémentaire**) et les injectent dans le prompt avec citation du document.
 
 Exemple Ollama sur la même VM (gratuit, données chez vous) :
 
@@ -178,8 +198,7 @@ LLM_BASE_URL=http://127.0.0.1:11434/v1
 LLM_MODEL=llama3.2
 ```
 
-Sans `LLM_MODEL`, l'appli fonctionne normalement ; les commandes `/resume`, `/solve` et `/ask`
-répondent simplement que le LLM n'est pas configuré.
+Sans `LLM_MODEL`, l'appli fonctionne normalement ; les commandes LLM répondent que le LLM n'est pas configuré.
 
 ## Développement local
 
@@ -208,6 +227,7 @@ npm start            # http://localhost:4000
    - **UDP 51820** ← 0.0.0.0/0 (handshake WireGuard)
    - **UDP 3478** et **UDP 49160-49200** ← 0.0.0.0/0 (TURN coturn, appels WebRTC cross-réseaux)
    - tout le reste : DROP
+   (procédure de switch mode test/prod : `deploy/security-groups.md`)
 3. **Se connecter** : `ssh root@<IP_PUBLIQUE>`.
 4. **Installer Docker** :
    ```bash
@@ -220,7 +240,7 @@ npm start            # http://localhost:4000
    ```
 6. **Configurer `.env`** : `JWT_SECRET=$(openssl rand -hex 32)`, `ADMIN_NAMES`, `WG_SERVERURL=<domaine ou IP publique>`,
    `TURN_EXTERNAL_IP=<IP publique>`, `TURN_URLS=turn:<IP publique>:3478`, `TURN_USERNAME`, `TURN_CREDENTIAL`,
-   puis `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL`, `STT_*` (bloc Scaleway ci-dessus).
+   `LINK_FETCH_ALLOWED_DOMAINS=proxycast.radiofrance.fr,...`, puis `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL`, `STT_*`.
 7. **Lancer** :
    ```bash
    docker compose up -d --build
@@ -230,7 +250,8 @@ npm start            # http://localhost:4000
    ```bash
    docker compose --profile https up -d
    ```
-   Caddy obtient automatiquement un certificat Let's Encrypt et fait reverse-proxy vers le chat.
+   Caddy obtient automatiquement un certificat Let's Encrypt. Sur le port 80, Caddy ne sert **que** la
+   redirection 301 vers HTTPS + le défi ACME (`deploy/Caddyfile`) — jamais l'app en clair.
 9. **Mises à jour** :
    ```bash
    git pull && docker compose up -d --build
@@ -255,9 +276,10 @@ npm start            # http://localhost:4000
 - `POST /api/files` (multipart : `file`, `message?`, `post=true|false`) → `{file, message?}` — **fichier audio transcrit automatiquement si STT configuré**
 - `GET /api/files?limit=&before=&query=` → `{files: [...]}` (espace documentaire)
 - `GET /api/files/:id/download` → téléchargement
-- `POST /api/files/:id/transcribe` → transcrit un fichier audio (STT) et dépose la transcription dans l'espace documentaire
-- `POST /api/files/:id/derive` `{kind: "resume"|"cr"}` → génère un résumé / compte-rendu (LLM) déposé dans l'espace documentaire
+- `POST /api/files/:id/transcribe` → transcrit un fichier audio (STT)
+- `POST /api/files/:id/derive` `{kind: "resume"|"cr"}` → résumé / CR (LLM) déposé dans l'espace documentaire
 - `GET /api/calls/active`, `POST /api/calls/start|join|leave|end` → cycle de vie de l'appel
+- `POST /api/calls/:id/recording/start|stop` → état d'enregistrement partagé (diffusé en WS)
 - `POST /api/calls/:id/recording` (multipart `file`) → enregistre l'appel + transcription STT automatique
 - `GET /api/admin/stats` → statistiques LLM + appels (admin uniquement)
 
@@ -272,17 +294,18 @@ npm start            # http://localhost:4000
 ## Structure du projet
 
 ```
-server/   API REST + WebSocket, SQLite, upload, appels, RAG, STT, suivi de conso LLM (Node.js/TypeScript)
-  src/llm/ providers (OpenAI-compatible, Anthropic) + pricing + rag + stt + derive + commandes
+server/   API REST + WebSocket, SQLite, upload, appels, RAG, STT, /lien, suivi de conso LLM (Node.js/TypeScript)
+  src/llm/ providers (OpenAI-compatible, Anthropic) + pricing + rag + stt + derive + link + commandes
 web/      Interface React + Material UI (Vite) : chat, présence, espace documentaire, appels WebRTC, dashboard admin
-deploy/   Caddyfile pour le HTTPS
-docker-compose.yml (chat + coturn + wireguard + caddy) / Dockerfile / .env.example
+deploy/   Caddyfile + security-groups.md
+docker-compose.yml (chat + coturn + wireguard + caddy) / Dockerfile (avec ffmpeg) / .env.example
 ```
 
 ## Notes de sécurité
 
 - Mots de passe hashés (bcrypt), tokens JWT signés (30 jours), `.env` jamais commité (`.gitignore`)
 - Security group restrictif (voir déploiement) : 22/443 limités à l'IP du PC, 80/51820/UDP TURN ouverts, reste en DROP ; le téléphone accède via le VPN WireGuard
+- `/lien` : allowlist de domaines (`LINK_FETCH_ALLOWED_DOMAINS`), IP privées/localhost/métadonnées cloud bloquées (anti-SSRF), plafond de taille `MAX_LINK_FETCH_MB` ; ne jamais mettre `LINK_FETCH_ALLOW_PRIVATE=1` en production
 - Les commandes LLM envoient les `LLM_CONTEXT_MESSAGES` derniers messages **et** les `RAG_TOP_K`
   extraits de documents au fournisseur choisi : en hébergement interne pur, préférez Ollama/vLLM local
 - Les transcriptions d'appels partent vers le fournisseur STT choisi : préférez un Whisper local pour
