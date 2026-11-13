@@ -95,14 +95,18 @@ export const api = {
     leave: () => req<{ call: CallInfo | null }>('/api/calls/leave', { method: 'POST' }),
     end: () => req<{ ok: boolean }>('/api/calls/end', { method: 'POST' }),
     recordingStart: (callId: number) =>
-      req<{ call: CallInfo }>(`/api/calls/${callId}/recording/start`, { method: 'POST' }),
-    recordingStop: (callId: number) =>
-      req<{ call: CallInfo | null }>(`/api/calls/${callId}/recording/stop`, { method: 'POST' }),
+      req<{ call: CallInfo; recordingId: string }>(`/api/calls/${callId}/recording/start`, { method: 'POST' }),
+    recordingStop: (callId: number, recordingId?: string) =>
+      req<{ call: CallInfo | null }>(`/api/calls/${callId}/recording/stop`, {
+        method: 'POST',
+        body: JSON.stringify(recordingId ? { recordingId } : {}),
+      }),
   },
-  uploadRecording: async (callId: number, blob: Blob, filename: string) => {
+  uploadRecording: async (callId: number, blob: Blob, filename: string, recordingId?: string) => {
     const token = getToken();
     const fd = new FormData();
     fd.append('file', blob, filename);
+    if (recordingId) fd.append('recordingId', recordingId);
     const res = await fetch(`/api/calls/${callId}/recording`, {
       method: 'POST',
       headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -118,7 +122,7 @@ export const api = {
       }
       throw new Error(messageText);
     }
-    return (await res.json()) as { file: FileItem; transcriptPending: boolean };
+    return (await res.json()) as { file: FileItem; transcriptPending: boolean; duplicate?: boolean; recordingId?: string };
   },
   derive: (fileId: number, kind: 'resume' | 'cr') =>
     req<{ file: FileItem }>(`/api/files/${fileId}/derive`, { method: 'POST', body: JSON.stringify({ kind }) }),
