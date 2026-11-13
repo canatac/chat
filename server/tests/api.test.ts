@@ -394,6 +394,29 @@ test('derive : 422 si la transcription est trop courte (garde-fou anti-hallucina
   assert.equal(res.status, 422);
 });
 
+test('enregistrement partagé d\u2019un appel : start/stop diffusé dans l\u2019état call', async () => {
+  const alice = await loginAs('Alice', 'motdepasse1');
+  const auth = { Authorization: `Bearer ${alice}`, 'Content-Type': 'application/json' };
+  const start = await api('/api/calls/start', { method: 'POST', headers: auth, body: JSON.stringify({ title: 'Sync' }) });
+  const { call } = (await start.json()) as { call: { id: number; recording: unknown } };
+  assert.equal(call.recording, null);
+
+  const rs = await api(`/api/calls/${call.id}/recording/start`, { method: 'POST', headers: auth });
+  assert.equal(rs.status, 200);
+  const rsBody = (await rs.json()) as { call: { recording: { startedBy: { name: string } } } };
+  assert.equal(rsBody.call.recording.startedBy.name, 'Alice');
+
+  const rsAgain = await api(`/api/calls/${call.id}/recording/start`, { method: 'POST', headers: auth });
+  assert.equal(rsAgain.status, 409);
+
+  const rt = await api(`/api/calls/${call.id}/recording/stop`, { method: 'POST', headers: auth });
+  assert.equal(rt.status, 200);
+  const rtBody = (await rt.json()) as { call: { recording: unknown } };
+  assert.equal(rtBody.call.recording, null);
+
+  await api('/api/calls/end', { method: 'POST', headers: auth });
+});
+
 test('rtc-config : STUN public par défaut, TURN ajouté si TURN_URLS configuré', async () => {
   const alice = await loginAs('Alice', 'motdepasse1');
   const res = await api('/api/rtc-config', { headers: { Authorization: `Bearer ${alice}` } });

@@ -94,6 +94,10 @@ export const api = {
     join: () => req<{ call: CallInfo }>('/api/calls/join', { method: 'POST' }),
     leave: () => req<{ call: CallInfo | null }>('/api/calls/leave', { method: 'POST' }),
     end: () => req<{ ok: boolean }>('/api/calls/end', { method: 'POST' }),
+    recordingStart: (callId: number) =>
+      req<{ call: CallInfo }>(`/api/calls/${callId}/recording/start`, { method: 'POST' }),
+    recordingStop: (callId: number) =>
+      req<{ call: CallInfo | null }>(`/api/calls/${callId}/recording/stop`, { method: 'POST' }),
   },
   uploadRecording: async (callId: number, blob: Blob, filename: string) => {
     const token = getToken();

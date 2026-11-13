@@ -130,6 +130,13 @@ export class CallSession {
       if (stream) {
         this.unlockAudio();
         this.remoteStreams.set(peerId, stream);
+        if (this.recorder && this.recordCtx && this.recordDest) {
+          try {
+            this.recordCtx.createMediaStreamSource(stream).connect(this.recordDest);
+          } catch {
+            // ignore
+          }
+        }
         this.handlers.onRemoteStream(peerId, stream);
       }
     };

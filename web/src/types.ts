@@ -40,12 +40,18 @@ export interface CallParticipant {
   isBot: boolean;
 }
 
+export interface CallRecording {
+  startedBy: CallParticipant;
+  startedAt: number;
+}
+
 export interface CallInfo {
   id: number;
   title: string;
   startedBy: CallParticipant;
   participants: CallParticipant[];
   active: boolean;
+  recording: CallRecording | null;
 }
 
 export interface AdminStats {
