@@ -33,6 +33,14 @@ export interface FileRow {
   created_at: number;
 }
 
+export interface RecordingRow {
+  id: string;
+  call_id: number;
+  user_id: number;
+  file_id: number | null;
+  created_at: number;
+}
+
 export interface CallRow {
   id: number;
   title: string;
@@ -108,6 +116,13 @@ export class DB {
         started_by INTEGER NOT NULL REFERENCES users(id),
         started_at INTEGER NOT NULL,
         ended_at INTEGER
+      );
+      CREATE TABLE IF NOT EXISTS recordings (
+        id TEXT PRIMARY KEY,
+        call_id INTEGER NOT NULL REFERENCES calls(id),
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        file_id INTEGER REFERENCES files(id),
+        created_at INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS doc_chunks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -249,6 +264,20 @@ export class DB {
 
   getCallById(id: number): CallRow | undefined {
     return this.db.prepare('SELECT * FROM calls WHERE id = ?').get(id) as unknown as CallRow | undefined;
+  }
+
+  getRecording(id: string): RecordingRow | undefined {
+    return this.db.prepare('SELECT * FROM recordings WHERE id = ?').get(id) as unknown as RecordingRow | undefined;
+  }
+
+  insertRecording(r: { id: string; callId: number; userId: number; fileId: number | null }): void {
+    this.db
+      .prepare('INSERT INTO recordings (id, call_id, user_id, file_id, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(r.id, r.callId, r.userId, r.fileId, Date.now());
+  }
+
+  setRecordingFile(id: string, fileId: number): void {
+    this.db.prepare('UPDATE recordings SET file_id = ? WHERE id = ?').run(fileId, id);
   }
 
   getActiveCall(): CallRow | undefined {
