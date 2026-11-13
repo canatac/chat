@@ -229,25 +229,37 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
   const toggleRecord = () => {
     const session = sessionRef.current;
     if (!session || !call) return;
-    if (recording) {
-      session.stopRecording();
+    try {
+      if (recording) {
+        session.stopRecording();
+        setRecording(false);
+        const ext = session.recordingExtension();
+        session.startRecording((blob) => {
+          void api
+            .uploadRecording(call.id, blob, `appel-${call.id}-${Date.now()}.${ext}`)
+            .then((r) =>
+              setNote(
+                r.transcriptPending
+                  ? "Enregistrement envoyé — transcription en cours, à retrouver dans l'espace documentaire"
+                  : "Enregistrement déposé dans l'espace documentaire (STT non configuré : pas de transcription)",
+              ),
+            )
+            .catch((e) => setError(e instanceof Error ? e.message : "Erreur d'envoi"))
+        });
+      } else {
+        session.startRecording(() => {});
+        setRecording(true);
+        setNote(null);
+      }
+    } catch (err) {
       setRecording(false);
-      session.startRecording((blob) => {
-        void api
-          .uploadRecording(call.id, blob, `appel-${call.id}-${Date.now()}.webm`)
-          .then((r) =>
-            setNote(
-              r.transcriptPending
-                ? "Enregistrement envoyé — transcription en cours, à retrouver dans l'espace documentaire"
-                : "Enregistrement déposé dans l'espace documentaire (STT non configuré : pas de transcription)",
-            ),
-          )
-          .catch((e) => setError(e instanceof Error ? e.message : "Erreur d'envoi"))
-      });
-    } else {
-      session.startRecording(() => {});
-      setRecording(true);
-      setNote(null);
+      setError(
+        err instanceof Error && /MediaRecorder|NotSupported/i.test(err.message)
+          ? "Enregistrement non supporté par ce navigateur (MediaRecorder indisponible). Essaie Safari ou Chrome."
+          : err instanceof Error
+            ? err.message
+            : "Erreur d'enregistrement",
+      );
     }
   };
 
