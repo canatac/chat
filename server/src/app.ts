@@ -415,7 +415,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
       const text = typeof req.body.message === 'string' ? req.body.message.trim().slice(0, 4000) : '';
       let messageId: number | null = null;
       if (post) {
-        messageId = db.insertMessage(req.user?.id ?? -1, text || `📌 ${displayName}`).id;
+        messageId = db.insertMessage(req.user?.id ?? -1, text || `📎 ${displayName}`).id;
       }
       const fileRow = db.insertFile(
         req.user?.id ?? -1,
