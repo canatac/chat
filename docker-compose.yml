@@ -28,6 +28,32 @@ services:
       - "3478:3478/udp"
       - "49160-49200:49160-49200/udp"
 
+  wireguard:
+    image: linuxserver/wireguard:1.0.20250521
+    container_name: chat-wg
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Paris
+      - SERVERURL=${WG_SERVERURL:-auto}
+      - SERVERPORT=${WG_PORT:-51820}
+      - PEERS=${WG_PEERS:-pc,telephone}
+      - SERVERADDR=10.66.66.1
+      - INTERNAL_SUBNET=10.66.66.0/24
+      - ALLOWEDIPS=0.0.0.0/0
+      - PEERDNS=1.1.1.1,8.8.8.8
+      - LOG_CONFS=true
+    volumes:
+      - wg-config:/config
+    ports:
+      - "51820:51820/udp"
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+    restart: unless-stopped
+
   caddy:
     image: caddy:2-alpine
     profiles:
@@ -47,5 +73,6 @@ services:
 
 volumes:
   chat-data:
+  wg-config:
   caddy-data:
   caddy-config:
