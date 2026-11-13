@@ -31,6 +31,7 @@ export class CallSession {
   private recordDest: MediaStreamAudioDestinationNode | null = null;
   private recordCtx: AudioContext | null = null;
   private unlockCtx: AudioContext | null = null;
+  private lastMimeType = '';
   private readonly ws: ChatSocket;
   private readonly userId: number;
   private readonly handlers: CallSessionHandlers;
@@ -221,8 +222,27 @@ export class CallSession {
     this.screenStream = null;
   }
 
+  private pickRecorderMimeType(): string {
+    const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus', 'audio/ogg'];
+    for (const c of candidates) {
+      try {
+        if (MediaRecorder.isTypeSupported(c)) return c;
+      } catch {
+        // ignore
+      }
+    }
+    return '';
+  }
+
+  recordingExtension(): string {
+    if (this.lastMimeType.includes('mp4')) return 'm4a';
+    if (this.lastMimeType.includes('ogg')) return 'ogg';
+    return 'webm';
+  }
+
   startRecording(onBlob: (blob: Blob) => void): void {
     if (this.recorder) return;
+    this.lastMimeType = this.pickRecorderMimeType();
     this.recordCtx = new AudioContext();
     void this.recordCtx.resume();
     this.recordDest = this.recordCtx.createMediaStreamDestination();
@@ -232,12 +252,12 @@ export class CallSession {
     for (const stream of this.remoteStreams.values()) {
       this.recordCtx.createMediaStreamSource(stream).connect(this.recordDest);
     }
-    this.recorder = new MediaRecorder(this.recordDest.stream, { mimeType: 'audio/webm' });
+    this.recorder = new MediaRecorder(this.recordDest.stream, this.lastMimeType ? { mimeType: this.lastMimeType } : undefined);
     this.recorder.ondataavailable = (e) => {
       if (e.data.size > 0) this.recordedChunks.push(e.data);
     };
     this.recorder.onstop = () => {
-      onBlob(new Blob(this.recordedChunks, { type: 'audio/webm' }));
+      onBlob(new Blob(this.recordedChunks, { type: this.lastMimeType || 'audio/webm' }));
       this.recordedChunks = [];
     };
     this.recorder.start(1000);
