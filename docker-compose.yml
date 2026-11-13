@@ -10,6 +10,50 @@ services:
     volumes:
       - chat-data:/app/data
 
+  coturn:
+    image: coturn/coturn:4.6.2
+    restart: unless-stopped
+    command: >
+      -n
+      --realm=${TURN_REALM:-chat.local}
+      --user=${TURN_USERNAME:-chat}:${TURN_CREDENTIAL:-change-me}
+      --external-ip=${TURN_EXTERNAL_IP:?Définir TURN_EXTERNAL_IP (IP publique de la VM) dans .env}
+      --listening-port=3478
+      --min-port=49160
+      --max-port=49200
+      --no-cli --no-tls --no-dtls
+      --log-file=stdout
+    ports:
+      - "3478:3478/tcp"
+      - "3478:3478/udp"
+      - "49160-49200:49160-49200/udp"
+
+  wireguard:
+    image: linuxserver/wireguard:1.0.20250521
+    container_name: chat-wg
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Paris
+      - SERVERURL=${WG_SERVERURL:-auto}
+      - SERVERPORT=${WG_PORT:-51820}
+      - PEERS=${WG_PEERS:-pc,telephone}
+      - SERVERADDR=10.66.66.1
+      - INTERNAL_SUBNET=10.66.66.0/24
+      - ALLOWEDIPS=0.0.0.0/0
+      - PEERDNS=1.1.1.1,8.8.8.8
+      - LOG_CONFS=true
+    volumes:
+      - wg-config:/config
+    ports:
+      - "51820:51820/udp"
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+    restart: unless-stopped
+
   caddy:
     image: caddy:2-alpine
     profiles:
@@ -29,5 +73,6 @@ services:
 
 volumes:
   chat-data:
+  wg-config:
   caddy-data:
   caddy-config:

@@ -1,3 +1,4 @@
+import { api } from './api';
 import type { ChatSocket } from './ws';
 
 export interface CallSessionHandlers {
@@ -5,12 +6,25 @@ export interface CallSessionHandlers {
   onPeerRemoved: (userId: number) => void;
 }
 
-const ICE_SERVERS: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
+const DEFAULT_ICE_SERVERS: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
+let iceServersCache: RTCIceServer[] | null = null;
+
+async function loadIceServers(): Promise<RTCIceServer[]> {
+  if (iceServersCache) return iceServersCache;
+  try {
+    const cfg = await api.rtcConfig();
+    iceServersCache = cfg.iceServers?.length ? cfg.iceServers : DEFAULT_ICE_SERVERS;
+  } catch {
+    iceServersCache = DEFAULT_ICE_SERVERS;
+  }
+  return iceServersCache;
+}
 
 export class CallSession {
   private pcs = new Map<number, RTCPeerConnection>();
   private remoteStreams = new Map<number, MediaStream>();
   private localStream: MediaStream | null = null;
+  private videoStream: MediaStream | null = null;
   private screenStream: MediaStream | null = null;
   private recorder: MediaRecorder | null = null;
   private recordedChunks: Blob[] = [];
@@ -27,6 +41,7 @@ export class CallSession {
   }
 
   async start(): Promise<MediaStream> {
+    await loadIceServers();
     this.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
     return this.localStream;
   }
@@ -39,15 +54,50 @@ export class CallSession {
     return this.screenStream;
   }
 
+  getVideoStream(): MediaStream | null {
+    return this.videoStream;
+  }
+
+  async startCamera(): Promise<MediaStream> {
+    this.videoStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    const track = this.videoStream.getVideoTracks()[0];
+    for (const peerId of [...this.pcs.keys()]) {
+      const pc = this.pcs.get(peerId);
+      if (pc && this.videoStream) {
+        pc.addTrack(track, this.videoStream);
+        await this.sendOffer(peerId);
+      }
+    }
+    return this.videoStream;
+  }
+
+  async stopCamera(): Promise<void> {
+    if (!this.videoStream) return;
+    const tracks = this.videoStream.getTracks();
+    for (const t of tracks) t.stop();
+    for (const peerId of [...this.pcs.keys()]) {
+      const pc = this.pcs.get(peerId);
+      if (!pc) continue;
+      for (const sender of pc.getSenders()) {
+        if (sender.track && tracks.includes(sender.track)) pc.removeTrack(sender);
+      }
+      await this.sendOffer(peerId);
+    }
+    this.videoStream = null;
+  }
+
   hasPeer(peerId: number): boolean {
     return this.pcs.has(peerId);
   }
 
   private createPc(peerId: number): RTCPeerConnection {
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    const pc = new RTCPeerConnection({ iceServers: iceServersCache ?? DEFAULT_ICE_SERVERS });
     this.pcs.set(peerId, pc);
     if (this.localStream) {
       for (const t of this.localStream.getTracks()) pc.addTrack(t, this.localStream);
+    }
+    if (this.videoStream) {
+      for (const t of this.videoStream.getTracks()) pc.addTrack(t, this.videoStream);
     }
     if (this.screenStream) {
       for (const t of this.screenStream.getTracks()) pc.addTrack(t, this.screenStream);
@@ -118,6 +168,9 @@ export class CallSession {
   }
 
   async startScreenShare(): Promise<MediaStream> {
+    if (!('getDisplayMedia' in navigator.mediaDevices)) {
+      throw new Error("Partage d'écran non supporté par ce navigateur (ex. Safari iOS). Utilise un PC ou un téléphone Android.");
+    }
     this.screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
     const track = this.screenStream.getVideoTracks()[0];
     if (track) {
@@ -153,6 +206,7 @@ export class CallSession {
   startRecording(onBlob: (blob: Blob) => void): void {
     if (this.recorder) return;
     this.recordCtx = new AudioContext();
+    void this.recordCtx.resume();
     this.recordDest = this.recordCtx.createMediaStreamDestination();
     if (this.localStream) {
       this.recordCtx.createMediaStreamSource(this.localStream).connect(this.recordDest);
@@ -187,10 +241,12 @@ export class CallSession {
     this.stopRecording();
     for (const t of this.localStream?.getTracks() ?? []) t.stop();
     for (const t of this.screenStream?.getTracks() ?? []) t.stop();
+    for (const t of this.videoStream?.getTracks() ?? []) t.stop();
     for (const pc of this.pcs.values()) pc.close();
     this.pcs.clear();
     this.remoteStreams.clear();
     this.localStream = null;
+    this.videoStream = null;
     this.screenStream = null;
   }
 }

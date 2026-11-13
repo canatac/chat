@@ -1,6 +1,7 @@
 import DescriptionIcon from '@mui/icons-material/Description';
 import DownloadIcon from '@mui/icons-material/Download';
 import InsertDriveFileIcon from '@mui/icons-material/InsertDriveFile';
+import RecordVoiceOverIcon from '@mui/icons-material/RecordVoiceOver';
 import SearchIcon from '@mui/icons-material/Search';
 import SummarizeIcon from '@mui/icons-material/Summarize';
 import UploadFileIcon from '@mui/icons-material/UploadFile';
@@ -93,6 +94,16 @@ export default function DocDrawer({ open, onClose }: Props) {
     }
   };
 
+  const transcribe = async (f: FileItem) => {
+    setError(null);
+    try {
+      await api.transcribe(f.id);
+      await load(query);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Erreur de transcription');
+    }
+  };
+
   return (
     <Drawer
       anchor="right"
@@ -133,6 +144,13 @@ export default function DocDrawer({ open, onClose }: Props) {
               key={f.id}
               secondaryAction={
                 <Box sx={{ display: 'flex' }}>
+                  {f.mime?.startsWith('audio/') && (
+                    <Tooltip title="Transcrire ce fichier audio (STT)">
+                      <IconButton edge="end" onClick={() => void transcribe(f)}>
+                        <RecordVoiceOverIcon />
+                      </IconButton>
+                    </Tooltip>
+                  )}
                   {/transcription/i.test(f.name) && (
                     <>
                       <Tooltip title="Générer un résumé (LLM)">
@@ -171,8 +189,9 @@ export default function DocDrawer({ open, onClose }: Props) {
           )}
         </List>
         <Typography variant="caption" color="text.secondary">
-          Les documents déposés alimentent aussi les commandes /ask et /solve (RAG). Sur une transcription
-          d'appel, les boutons génèrent un résumé ou un compte-rendu (LLM) déposé ici.
+          Les documents déposés alimentent aussi les commandes /ask et /solve (RAG). Les fichiers audio sont
+          transcrits automatiquement (STT) ; sur une transcription, les boutons génèrent un résumé ou un
+          compte-rendu (LLM) déposé ici.
         </Typography>
       </Box>
     </Drawer>

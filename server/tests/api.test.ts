@@ -353,3 +353,38 @@ test('upload d\u2019un enregistrement d\u2019appel + dérivation sans LLM (503)'
 
   await api('/api/calls/end', { method: 'POST', headers: auth });
 });
+
+test('fichier audio déposé à la main : pas de transcription sans STT, endpoint transcribe 503/400', async () => {
+  const alice = await loginAs('Alice', 'motdepasse1');
+  const auth = { Authorization: `Bearer ${alice}` };
+
+  const fd = new FormData();
+  fd.append('file', new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/webm' }), 'note-vocale.webm');
+  fd.append('post', 'false');
+  const up = await fetch(`${baseUrl}/api/files`, { method: 'POST', headers: auth, body: fd });
+  assert.equal(up.status, 201);
+  const upBody = (await up.json()) as { file: { id: number; name: string; mime: string } };
+  assert.equal(upBody.file.mime, 'audio/webm');
+
+  const tr = await api(`/api/files/${upBody.file.id}/transcribe`, { method: 'POST', headers: auth });
+  assert.equal(tr.status, 503);
+
+  const txtFd = new FormData();
+  txtFd.append('file', new Blob(['texte'], { type: 'text/plain' }), 'doc.txt');
+  txtFd.append('post', 'false');
+  const upTxt = await fetch(`${baseUrl}/api/files`, { method: 'POST', headers: auth, body: txtFd });
+  const txtBody = (await upTxt.json()) as { file: { id: number } };
+  const trTxt = await api(`/api/files/${txtBody.file.id}/transcribe`, { method: 'POST', headers: auth });
+  assert.equal(trTxt.status, 400);
+});
+
+test('rtc-config : STUN public par défaut, TURN ajouté si TURN_URLS configuré', async () => {
+  const alice = await loginAs('Alice', 'motdepasse1');
+  const res = await api('/api/rtc-config', { headers: { Authorization: `Bearer ${alice}` } });
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { iceServers: { urls: string | string[] }[] };
+  assert.ok(body.iceServers.some((s) => String(s.urls).includes('stun:')));
+  assert.equal(body.iceServers.some((s) => String(s.urls).includes('turn:')), false);
+  const noAuth = await api('/api/rtc-config');
+  assert.equal(noAuth.status, 401);
+});

@@ -5,6 +5,44 @@ entreprise qui veut faire tourner la discussion sur **ses propres serveurs** (pa
 Scaleway), avec une **intégration LLM configurable** : la chatroom profite du modèle de votre
 choix pour faire des comptes-rendus de réunion ou proposer des solutions aux problèmes soulevés.
 
+## Mode d'emploi (utilisateur)
+
+**Envoyer un fichier (audio, PDF, doc…) dans la conversation**
+1. Bouton **trombone** à gauche de la zone de message → choisir le fichier (le texte saisi sert de légende).
+2. Le fichier est posté dans la chat (chip cliquable pour le télécharger/relire) **et** déposé dans
+   l'**espace documentaire** (icône **dossier** en haut à droite : recherche, dépôt, téléchargement).
+3. **Fichier audio** (`.webm`, `.mp3`, `.wav`…) : il est **transcrit automatiquement** si le STT est
+   configuré → la transcription `.txt` apparaît dans l'espace documentaire. Sinon, bouton
+   **🎙️ Transcrire** sur la ligne du fichier dans l'espace documentaire.
+
+**Démarrer / rejoindre un appel (audio + caméra optionnelle + partage d'écran)**
+1. Bouton **📞 téléphone** en haut → « Démarrer l'appel » (titre optionnel). Les autres voient une
+   pastille rouge sur le 📞 et peuvent « Rejoindre l'appel ».
+2. Dans l'appel : micro on/off, **📷 caméra** (optionnelle), **🖥️ partage d'écran**, **REC**
+   (enregistrement de tout l'appel), « Quitter l'appel » ou « Terminer l'appel » (pour tout le monde).
+
+> **Appels depuis un téléphone / entre réseaux différents (4G ↔ box)** : le serveur **TURN (coturn)**
+> tourne dans `docker-compose`. Réglage obligatoire dans le `.env` de la VM :
+> `TURN_EXTERNAL_IP=<IP publique de la VM>`, `TURN_URLS=turn:<IP publique>:3478`,
+> `TURN_USERNAME` / `TURN_CREDENTIAL`. Security group Scaleway : ouvrir **UDP 3478** et **UDP 49160-49200**.
+> Sans TURN, la signalisation passe (la session « démarre ») mais **aucun média ne circule** (pas de son ni
+> d'image) entre deux réseaux NAT différents — symptôme classique.
+> **iOS** : Safari iPhone/iPad ne supporte pas `getDisplayMedia` → partage d'écran impossible depuis un iPhone
+> (message explicite affiché) ; PC ou Android requis pour partager son écran. Caméra et audio OK sur iOS.
+> **Contexte sécurisé requis** : micro/caméra/écran exigent HTTPS (`https://…`) ou `http://localhost`
+> (tunnel SSH `ssh -L 4000:127.0.0.1:4000 root@<IP>`).
+
+**Enregistrer → transcrire → archiver → résumer → relire**
+1. REC pendant l'appel, second clic pour arrêter : l'audio est envoyé au serveur, posté dans la chat
+   et déposé dans l'espace documentaire (lié à l'appel).
+2. Si le STT est configuré, la **transcription brute** est déposée automatiquement dans l'espace
+   documentaire (et indexée par le RAG : interrogeable avec `/ask`).
+3. Sur la ligne de la transcription dans l'espace documentaire : icônes **Résumé** et
+   **Compte-rendu** → génèrent un fichier `.md` déposé à son tour (coût tracé dans le dashboard admin).
+4. Relire : bouton **télécharger** sur n'importe quel fichier de l'espace documentaire.
+
+**Commandes LLM dans la chat** : `/resume [n]`, `/solve <problème>`, `/ask <question>`, `/aide`.
+
 ## Fonctionnalités
 
 - Chatroom unique en **temps réel** (WebSocket), interface **Material UI** responsive
@@ -13,16 +51,17 @@ choix pour faire des comptes-rendus de réunion ou proposer des solutions aux pr
 - Historique persistant en **SQLite** (fichier unique, sauvegardable)
 - **Fichiers** : pièce jointe à n'importe quel message (bouton trombone) + **espace documentaire** dédié
   (bouton dossier en haut à droite : recherche, dépôt, téléchargement). Les fichiers texte/PDF sont
-  indexés automatiquement
+  indexés automatiquement, les fichiers audio transcrits (STT)
 - **RAG** : `/ask` et `/solve` fouillent les documents déposés et citent leurs sources
 - **Dashboard d'administration** (réservé aux noms de `ADMIN_NAMES`) : volume de tokens
   (entrée/sortie/total), **estimation du coût** en USD, activité par jour/commande/modèle, volumétrie
   messages/membres/documents/appels
-- **Appels d'équipe avec partage d'écran** (bouton téléphone en haut) : WebRTC en mesh, un appel à la
-  fois, micro coupable, partage d'écran, enregistrement audio de l'appel (bouton REC)
-- **Transcription des appels** : l'enregistrement est transcrit (STT configurable, ex. Whisper) et la
-  transcription brute est déposée automatiquement dans l'espace documentaire — donc indexée par le RAG ;
-  boutons **Résumé** et **Compte-rendu** (générés par le LLM configuré) sur chaque transcription
+- **Appels d'équipe** (bouton téléphone en haut) : WebRTC en mesh, audio + caméra optionnelle + partage
+  d'écran, enregistrement audio de l'appel (bouton REC), TURN coturn pour les appels cross-réseaux
+- **Transcription des appels et notes vocales** : transcription brute déposée automatiquement dans
+  l'espace documentaire — indexée par le RAG ; boutons **Résumé** et **Compte-rendu** (LLM) sur chaque
+  transcription
+- **VPN WireGuard** intégré pour donner au PC et au téléphone une IP fixe (filtrage par IP possible)
 - **Commandes LLM** dans la chatroom : le résultat est posté par le bot « Assistant »
 
 | Commande | Effet |
@@ -36,7 +75,7 @@ choix pour faire des comptes-rendus de réunion ou proposer des solutions aux pr
 
 - **Backend** : Node.js 22 + TypeScript, Express (REST), `ws` (WebSocket), `node:sqlite`, `bcryptjs`, `jsonwebtoken`, `multer` (upload)
 - **Frontend** : React 18 + Vite + TypeScript + Material UI (`@mui/material`) + WebRTC natif (appels mesh)
-- **Déploiement** : un seul conteneur Docker (le serveur sert aussi l'UI compilée), HTTPS optionnel via Caddy + Let's Encrypt
+- **Déploiement** : conteneurs Docker (`chat` + `coturn` TURN + `wireguard` VPN + `caddy` optionnel HTTPS), volume `chat-data` pour les données
 
 ## Configuration du LLM
 
@@ -64,11 +103,31 @@ Autres variables : `LLM_TEMPERATURE` (0.4), `LLM_MAX_TOKENS` (1024), `LLM_CONTEX
 - Chaque appel LLM est enregistré (commande, modèle, tokens entrée/sortie, coût, erreurs) dans la
   table `llm_usage`.
 
+### VPN WireGuard (IP fixe pour le PC et le téléphone)
+
+Un service `wireguard` (image `linuxserver/wireguard`) tourne dans `docker-compose` :
+
+```bash
+# .env : WG_SERVERURL=chat.tonentreprise.fr   (ou IP publique ; auto = détection)
+docker compose up -d --build
+# récupérer la config du téléphone (QR code à scanner avec l'app WireGuard iOS/Android) :
+docker compose logs wireguard
+# ou dans le volume : wg-config/peer_telephone/peer_telephone.conf (+ .png)
+```
+
+- Réseau du tunnel : `10.66.66.0/24` (PC = 10.66.66.2, téléphone = 10.66.66.3, VM = 10.66.66.1), `ALLOWEDIPS=0.0.0.0/0` (tunnel complet : tout le trafic du téléphone sort par la VM).
+- **Security group** : ouvrir **UDP 51820** à 0.0.0.0/0 (le handshake WG doit être joignable de partout). Le trafic HTTPS du téléphone vers la VM arrive ensuite par l'interface `wg0` : il n'est **pas** re-filtré par le security group, donc la règle TCP 443 peut rester limitée à l'IP publique de ton PC (/32) — le téléphone y accède quand même via le VPN.
+- Garder TCP 80 ouvert à tous pour le renouvellement Let's Encrypt (défi HTTP-01 de Caddy).
+
 ### Appels, enregistrement et transcription (STT)
 
 - Appel WebRTC **mesh** (pair-à-pair) : le serveur ne relaie que la signalisation (`{type:"signal"}` sur le
   WebSocket) et l'état de l'appel (`{type:"call"}`). Conçu pour ~5-6 participants ; au-delà, prévoir un
   SFU (LiveKit, mediasoup, Jitsi). Le partage d'écran utilise `getDisplayMedia`.
+- **ICE** : `GET /api/rtc-config` renvoie les serveurs ICE (STUN public + TURN coturn si `TURN_URLS` est défini).
+  Le TURN est **indispensable** pour les appels entre réseaux différents (mobile 4G/5G ↔ box) : sans lui,
+  pas de média (son/image) même si la session démarre. `coturn` est déployé par `docker-compose`
+  (ports UDP 3478 + 49160-49200 à ouvrir dans le security group Scaleway).
 - L'enregistrement se fait **côté navigateur** (mix micro local + flux distants via MediaRecorder) puis
   envoyé au serveur à l'arrêt : pas de serveur d'enregistrement lourd. Le fichier audio est déposé dans
   l'espace documentaire et posté dans la chatroom. **Garder l'onglet ouvert pendant l'enregistrement.**
@@ -97,7 +156,8 @@ demande `response_format=verbose_json` à l'API pour récupérer la durée audio
 dans `llm_usage` (visible dans le dashboard admin).
 
 `STT_API_KEY` sinon `LLM_API_KEY` est réutilisée ; `STT_LANGUAGE=fr` pour forcer la langue.
-Sans STT configuré, l'audio reste déposé dans l'espace documentaire sans transcription.
+Tout fichier audio déposé (note vocale, enregistrement d'appel) est transcrit automatiquement si le STT est
+configuré ; sinon `POST /api/files/:id/transcribe` (bouton 🎙️ dans l'espace documentaire).
 La transcription brute est déposée automatiquement dans l'espace documentaire (indexée RAG) ; les boutons
 **Résumé** / **Compte-rendu** de l'espace documentaire appellent le LLM configuré (`POST /api/files/:id/derive`).
 
@@ -141,8 +201,13 @@ npm start            # http://localhost:4000
 
 1. **Créer l'instance** : console Scaleway → Compute → Instances → *Créer une instance*
    (ex. `DEV1-S`, image Ubuntu 24.04 LTS). Noter l'IP publique.
-2. **Security group** : autoriser en entrée TCP **22** (SSH), **80** et **443** (HTTP/HTTPS), et la plage
-   UDP **10000-20000** si vous prévoyez plus tard un SFU (pas nécessaire en mesh WebRTC direct).
+2. **Security group** : autoriser en entrée
+   - TCP **22** (SSH) ← IP publique de ton PC en /32 uniquement
+   - TCP **80** ← 0.0.0.0/0 (renouvellement Let's Encrypt, défi HTTP-01)
+   - TCP **443** ← IP publique de ton PC en /32 (le téléphone passe par le VPN WireGuard, voir ci-dessus)
+   - **UDP 51820** ← 0.0.0.0/0 (handshake WireGuard)
+   - **UDP 3478** et **UDP 49160-49200** ← 0.0.0.0/0 (TURN coturn, appels WebRTC cross-réseaux)
+   - tout le reste : DROP
 3. **Se connecter** : `ssh root@<IP_PUBLIQUE>`.
 4. **Installer Docker** :
    ```bash
@@ -153,30 +218,27 @@ npm start            # http://localhost:4000
    git clone https://github.com/canatac/chat.git && cd chat
    cp .env.example .env
    ```
-6. **Configurer `.env`** : `JWT_SECRET=$(openssl rand -hex 32)`, `ADMIN_NAMES`, puis `LLM_PROVIDER`,
-   `LLM_API_KEY`, `LLM_MODEL` (et `LLM_BASE_URL` si fournisseur personnalisé), `STT_*` pour la
-   transcription des appels (voir bloc Scaleway ci-dessus).
+6. **Configurer `.env`** : `JWT_SECRET=$(openssl rand -hex 32)`, `ADMIN_NAMES`, `WG_SERVERURL=<domaine ou IP publique>`,
+   `TURN_EXTERNAL_IP=<IP publique>`, `TURN_URLS=turn:<IP publique>:3478`, `TURN_USERNAME`, `TURN_CREDENTIAL`,
+   puis `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL`, `STT_*` (bloc Scaleway ci-dessus).
 7. **Lancer** :
    ```bash
    docker compose up -d --build
    ```
-   L'appli répond sur `http://<IP_PUBLIQUE>:4000`.
-8. **HTTPS (recommandé)** : acheter/pointer un nom de domaine vers l'IP de la VM, définir
-   `DOMAIN=chat.monentreprise.fr` dans `.env`, puis :
+8. **HTTPS (requis pour micro/caméra/écran côté navigateur)** : DNS `chat.tonentreprise.fr` → IP de la VM,
+   `DOMAIN=chat.tonentreprise.fr` dans `.env`, puis :
    ```bash
    docker compose --profile https up -d
    ```
-   Caddy obtient automatiquement un certificat Let's Encrypt et fait reverse-proxy vers le chat
-   (`deploy/Caddyfile`). Pour un accès strictement interne, laisser `CHAT_BIND=127.0.0.1` et
-   passer par un tunnel SSH (`ssh -L 4000:127.0.0.1:4000 root@<IP>`).
+   Caddy obtient automatiquement un certificat Let's Encrypt et fait reverse-proxy vers le chat.
 9. **Mises à jour** :
    ```bash
    git pull && docker compose up -d --build
    ```
-10. **Sauvegarde** : toute la base et les fichiers déposés tiennent dans le volume Docker `chat-data` :
+10. **Sauvegarde** : base + fichiers + config WireGuard dans les volumes Docker :
     ```bash
-    docker run --rm -v chat_chat-data:/data -v "$(pwd)":/backup alpine \
-      tar czf /backup/chat-data-$(date +%F).tgz -C /data .
+    docker run --rm -v chat_chat-data:/data -v chat_wg-config:/wg -v "$(pwd)":/backup alpine \
+      sh -c 'tar czf /backup/chat-data-$(date +%F).tgz -C /data . && tar czf /backup/wg-config-$(date +%F).tgz -C /wg .'
     ```
 
 ## API
@@ -187,11 +249,13 @@ npm start            # http://localhost:4000
 - `POST /api/auth/login` `{name, password}` → `{token, user}`
 - `GET /api/me` → `{user}` (avec `isAdmin`)
 - `GET /api/users` → `{users: [...]}` (avec `online`)
+- `GET /api/rtc-config` → `{iceServers: [...]}` (STUN + TURN) pour les appels WebRTC
 - `GET /api/messages?limit=50&before=<id>` → `{messages: [...]}` (ordre chronologique, avec `files`)
 - `POST /api/messages` `{content}` → `{message}`
-- `POST /api/files` (multipart : `file`, `message?`, `post=true|false`) → `{file, message?}`
+- `POST /api/files` (multipart : `file`, `message?`, `post=true|false`) → `{file, message?}` — **fichier audio transcrit automatiquement si STT configuré**
 - `GET /api/files?limit=&before=&query=` → `{files: [...]}` (espace documentaire)
 - `GET /api/files/:id/download` → téléchargement
+- `POST /api/files/:id/transcribe` → transcrit un fichier audio (STT) et dépose la transcription dans l'espace documentaire
 - `POST /api/files/:id/derive` `{kind: "resume"|"cr"}` → génère un résumé / compte-rendu (LLM) déposé dans l'espace documentaire
 - `GET /api/calls/active`, `POST /api/calls/start|join|leave|end` → cycle de vie de l'appel
 - `POST /api/calls/:id/recording` (multipart `file`) → enregistre l'appel + transcription STT automatique
@@ -212,15 +276,17 @@ server/   API REST + WebSocket, SQLite, upload, appels, RAG, STT, suivi de conso
   src/llm/ providers (OpenAI-compatible, Anthropic) + pricing + rag + stt + derive + commandes
 web/      Interface React + Material UI (Vite) : chat, présence, espace documentaire, appels WebRTC, dashboard admin
 deploy/   Caddyfile pour le HTTPS
-docker-compose.yml / Dockerfile / .env.example
+docker-compose.yml (chat + coturn + wireguard + caddy) / Dockerfile / .env.example
 ```
 
 ## Notes de sécurité
 
 - Mots de passe hashés (bcrypt), tokens JWT signés (30 jours), `.env` jamais commité (`.gitignore`)
+- Security group restrictif (voir déploiement) : 22/443 limités à l'IP du PC, 80/51820/UDP TURN ouverts, reste en DROP ; le téléphone accède via le VPN WireGuard
 - Les commandes LLM envoient les `LLM_CONTEXT_MESSAGES` derniers messages **et** les `RAG_TOP_K`
   extraits de documents au fournisseur choisi : en hébergement interne pur, préférez Ollama/vLLM local
 - Les transcriptions d'appels partent vers le fournisseur STT choisi : préférez un Whisper local pour
   que l'audio ne quitte jamais votre VM (Scaleway MaaS = données hébergées à Paris, conforme EU)
+- Le TURN coturn et WireGuard ont des credentials dans le `.env` (`TURN_CREDENTIAL`) : ne les partagez pas
 - `GET /api/admin/stats` est réservé aux noms de `ADMIN_NAMES` (403 sinon)
-- Toujours exposer l'appli derrière **HTTPS** (profil `https` fourni) si elle est reachable depuis Internet
+- Toujours exposer l'appli derrière **HTTPS** (profil `https` fourni) — obligatoire pour micro/caméra/partage d'écran côté navigateur

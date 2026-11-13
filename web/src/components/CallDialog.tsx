@@ -6,6 +6,8 @@ import PhoneIcon from '@mui/icons-material/Phone';
 import ScreenShareIcon from '@mui/icons-material/ScreenShare';
 import StopIcon from '@mui/icons-material/Stop';
 import StopScreenShareIcon from '@mui/icons-material/StopScreenShare';
+import VideocamIcon from '@mui/icons-material/Videocam';
+import VideocamOffIcon from '@mui/icons-material/VideocamOff';
 import {
   Alert,
   Avatar,
@@ -41,11 +43,25 @@ interface RemoteStream {
   stream: MediaStream;
 }
 
+function normalizeMediaError(err: unknown): Error {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/not allowed|permission|denied|secure context|insecure|notfound|notreadable/i.test(msg)) {
+    return new Error(
+      "Accès micro/écran bloqué par le navigateur (contexte non sécurisé ou permission refusée). " +
+        "Ouvre l'app en HTTPS (DOMAIN=chat.tondomaine.fr dans .env + docker compose --profile https up -d) " +
+        "ou via http://localhost:4000 (tunnel SSH : ssh -L 4000:127.0.0.1:4000 root@<IP_VM>). " +
+        "Vérifie aussi que le micro est autorisé pour ce site (icône 🔒 dans la barre d'adresse).",
+    );
+  }
+  return err instanceof Error ? err : new Error(msg);
+}
+
 export default function CallDialog({ open, onClose, user, socket, call, onCallChange }: Props) {
   const [title, setTitle] = useState('');
   const [joined, setJoined] = useState(false);
   const [muted, setMuted] = useState(false);
   const [sharing, setSharing] = useState(false);
+  const [camera, setCamera] = useState(false);
   const [recording, setRecording] = useState(false);
   const [remotes, setRemotes] = useState<RemoteStream[]>([]);
   const [busy, setBusy] = useState(false);
@@ -64,7 +80,12 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
       });
       sessionRef.current = session;
       knownPeersRef.current = new Set();
-      await session.start();
+      try {
+        await session.start();
+      } catch (err) {
+        sessionRef.current = null;
+        throw normalizeMediaError(err);
+      }
       for (const p of callInfo.participants) {
         if (p.id !== user.id) {
           knownPeersRef.current.add(p.id);
@@ -105,6 +126,7 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
       setRemotes([]);
       setMuted(false);
       setSharing(false);
+      setCamera(false);
       setRecording(false);
       setError(null);
       setNote(null);
@@ -174,6 +196,21 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
     setMuted(next);
   };
 
+  const toggleCamera = async () => {
+    setError(null);
+    try {
+      if (camera) {
+        await sessionRef.current?.stopCamera();
+        setCamera(false);
+      } else {
+        await sessionRef.current?.startCamera();
+        setCamera(true);
+      }
+    } catch (err) {
+      setError(normalizeMediaError(err).message);
+    }
+  };
+
   const toggleScreen = async () => {
     setError(null);
     try {
@@ -185,7 +222,7 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
         setSharing(true);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Partage d'écran refusé");
+      setError(normalizeMediaError(err).message);
     }
   };
 
@@ -215,6 +252,7 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
   };
 
   const screenStream = sessionRef.current?.getScreenStream() ?? null;
+  const videoStream = sessionRef.current?.getVideoStream() ?? null;
 
   return (
     <Dialog open={open} onClose={onClose} fullWidth maxWidth="md">
@@ -254,6 +292,20 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
             {joined && (
               <>
                 <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 1, mb: 2 }}>
+                  {camera && videoStream && (
+                    <Box>
+                      <Typography variant="caption">Votre caméra</Typography>
+                      <video
+                        ref={(el) => {
+                          if (el && el.srcObject !== videoStream) el.srcObject = videoStream;
+                        }}
+                        autoPlay
+                        playsInline
+                        muted
+                        style={{ width: '100%', borderRadius: 8, background: '#000' }}
+                      />
+                    </Box>
+                  )}
                   {sharing && screenStream && (
                     <Box>
                       <Typography variant="caption">Votre écran (partagé)</Typography>
@@ -271,7 +323,7 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
                   {remotes.map((r) =>
                     r.stream.getVideoTracks().length > 0 ? (
                       <Box key={r.userId}>
-                        <Typography variant="caption">Écran partagé (participant {r.userId})</Typography>
+                        <Typography variant="caption">Écran de {r.userId}</Typography>
                         <video
                           ref={(el) => {
                             if (el && el.srcObject !== r.stream) el.srcObject = r.stream;
@@ -284,8 +336,12 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
                     ) : (
                       <audio
                         key={r.userId}
+                        playsInline
                         ref={(el) => {
-                          if (el && el.srcObject !== r.stream) el.srcObject = r.stream;
+                          if (el) {
+                            if (el.srcObject !== r.stream) el.srcObject = r.stream;
+                            el.play().catch(() => {});
+                          }
                         }}
                         autoPlay
                       />
@@ -296,6 +352,11 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
                   <Tooltip title={muted ? 'Activer le micro' : 'Couper le micro'}>
                     <IconButton color={muted ? 'error' : 'primary'} onClick={toggleMute}>
                       {muted ? <MicOffIcon /> : <MicIcon />}
+                    </IconButton>
+                  </Tooltip>
+                  <Tooltip title={camera ? 'Éteindre la caméra' : 'Activer la caméra'}>
+                    <IconButton color={camera ? 'error' : 'primary'} onClick={() => void toggleCamera()}>
+                      {camera ? <VideocamOffIcon /> : <VideocamIcon />}
                     </IconButton>
                   </Tooltip>
                   <Tooltip title={sharing ? "Arrêter le partage d'écran" : "Partager mon écran"}>

@@ -30,6 +30,10 @@ export function sttConfigured(cfg: Config): boolean {
   return Boolean(stt.baseUrl || stt.apiKey);
 }
 
+export function isAudioMime(mime: string, name: string): boolean {
+  return mime.startsWith('audio/') || /\.(webm|mp3|wav|m4a|ogg|oga|mp4|flac)$/i.test(name);
+}
+
 export function resolveSttBaseUrl(stt: SttConfig): string {
   if (stt.baseUrl) return stt.baseUrl.replace(/\/+$/, '');
   const known = STT_BASES[stt.provider.toLowerCase()];
