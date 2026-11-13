@@ -339,6 +339,7 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
                         playsInline
                         ref={(el) => {
                           if (el) {
+                            el.muted = false;
                             if (el.srcObject !== r.stream) el.srcObject = r.stream;
                             el.play().catch(() => {});
                           }
