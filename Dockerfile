@@ -15,6 +15,7 @@ COPY package.json ./
 COPY server/package.json server/package.json
 COPY web/package.json web/package.json
 RUN npm install --omit=dev --no-audit --no-fund
+RUN apk add --no-cache ffmpeg
 COPY --from=build /app/server/dist server/dist
 COPY --from=build /app/web/dist web/dist
 RUN mkdir -p /app/data
