@@ -32,6 +32,7 @@ export class CallSession {
   private recordCtx: AudioContext | null = null;
   private unlockCtx: AudioContext | null = null;
   private lastMimeType = '';
+  private onStopCallback: ((blob: Blob) => void) | null = null;
   private readonly ws: ChatSocket;
   private readonly userId: number;
   private readonly handlers: CallSessionHandlers;
@@ -263,11 +264,20 @@ export class CallSession {
     this.recorder.ondataavailable = (e) => {
       if (e.data.size > 0) this.recordedChunks.push(e.data);
     };
+    this.onStopCallback = onBlob;
     this.recorder.onstop = () => {
-      onBlob(new Blob(this.recordedChunks, { type: this.lastMimeType || 'audio/webm' }));
+      const cb = this.onStopCallback;
+      this.onStopCallback = null;
+      const blob = new Blob(this.recordedChunks, { type: this.lastMimeType || 'audio/webm' });
       this.recordedChunks = [];
+      if (cb) cb(blob);
     };
     this.recorder.start(1000);
+  }
+
+  stopRecordingWith(onBlob: (blob: Blob) => void): void {
+    this.onStopCallback = onBlob;
+    this.stopRecording();
   }
 
   stopRecording(): void {
