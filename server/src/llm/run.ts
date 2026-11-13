@@ -3,6 +3,7 @@ import type { DB } from '../db.js';
 import { askLLM, llmConfigured } from './index.js';
 import { buildSystemPrompt, buildUserPrompt, formatContext, parseCommand, COMMAND_HELP } from './commands.js';
 import { buildDocsSection, retrieveRelevantChunks } from './rag.js';
+import { handleLinkCommand, maybeAutoLink } from './link.js';
 import { costUsd, type Usage } from './pricing.js';
 import type { ChatMessage } from './providers.js';
 
@@ -19,6 +20,11 @@ export async function handleCommand(
 ): Promise<void> {
   const cmd = parseCommand(msg.content);
   if (!cmd) return;
+  if (cmd.name === 'lien') {
+    void handleLinkCommand(deps, msg, cmd.arg);
+    return;
+  }
+  if (!cmd && (await maybeAutoLink(deps, msg))) return;
   if (cmd.name === 'help') {
     deps.postBot(COMMAND_HELP);
     return;
