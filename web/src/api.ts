@@ -120,4 +120,5 @@ export const api = {
     req<{ file: FileItem }>(`/api/files/${fileId}/derive`, { method: 'POST', body: JSON.stringify({ kind }) }),
   transcribe: (fileId: number) =>
     req<{ file: FileItem }>(`/api/files/${fileId}/transcribe`, { method: 'POST' }),
+  rtcConfig: () => req<{ iceServers: RTCIceServer[] }>('/api/rtc-config'),
 };
