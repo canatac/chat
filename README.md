@@ -61,6 +61,7 @@ choix pour faire des comptes-rendus de réunion ou proposer des solutions aux pr
 - **Transcription des appels et notes vocales** : transcription brute déposée automatiquement dans
   l'espace documentaire — indexée par le RAG ; boutons **Résumé** et **Compte-rendu** (LLM) sur chaque
   transcription
+- **VPN WireGuard** intégré pour donner au PC et au téléphone une IP fixe (filtrage par IP possible)
 - **Commandes LLM** dans la chatroom : le résultat est posté par le bot « Assistant »
 
 | Commande | Effet |
@@ -74,7 +75,7 @@ choix pour faire des comptes-rendus de réunion ou proposer des solutions aux pr
 
 - **Backend** : Node.js 22 + TypeScript, Express (REST), `ws` (WebSocket), `node:sqlite`, `bcryptjs`, `jsonwebtoken`, `multer` (upload)
 - **Frontend** : React 18 + Vite + TypeScript + Material UI (`@mui/material`) + WebRTC natif (appels mesh)
-- **Déploiement** : conteneurs Docker (`chat` + `coturn` TURN + `caddy` optionnel pour le HTTPS), volume `chat-data` pour les données
+- **Déploiement** : conteneurs Docker (`chat` + `coturn` TURN + `wireguard` VPN + `caddy` optionnel HTTPS), volume `chat-data` pour les données
 
 ## Configuration du LLM
 
@@ -101,6 +102,22 @@ Autres variables : `LLM_TEMPERATURE` (0.4), `LLM_MAX_TOKENS` (1024), `LLM_CONTEX
   sinon définir `LLM_INPUT_PRICE_PER_1M` et `LLM_OUTPUT_PRICE_PER_1M` (USD / million de tokens).
 - Chaque appel LLM est enregistré (commande, modèle, tokens entrée/sortie, coût, erreurs) dans la
   table `llm_usage`.
+
+### VPN WireGuard (IP fixe pour le PC et le téléphone)
+
+Un service `wireguard` (image `linuxserver/wireguard`) tourne dans `docker-compose` :
+
+```bash
+# .env : WG_SERVERURL=chat.tonentreprise.fr   (ou IP publique ; auto = détection)
+docker compose up -d --build
+# récupérer la config du téléphone (QR code à scanner avec l'app WireGuard iOS/Android) :
+docker compose logs wireguard
+# ou dans le volume : wg-config/peer_telephone/peer_telephone.conf (+ .png)
+```
+
+- Réseau du tunnel : `10.66.66.0/24` (PC = 10.66.66.2, téléphone = 10.66.66.3, VM = 10.66.66.1), `ALLOWEDIPS=0.0.0.0/0` (tunnel complet : tout le trafic du téléphone sort par la VM).
+- **Security group** : ouvrir **UDP 51820** à 0.0.0.0/0 (le handshake WG doit être joignable de partout). Le trafic HTTPS du téléphone vers la VM arrive ensuite par l'interface `wg0` : il n'est **pas** re-filtré par le security group, donc la règle TCP 443 peut rester limitée à l'IP publique de ton PC (/32) — le téléphone y accède quand même via le VPN.
+- Garder TCP 80 ouvert à tous pour le renouvellement Let's Encrypt (défi HTTP-01 de Caddy).
 
 ### Appels, enregistrement et transcription (STT)
 
@@ -184,8 +201,13 @@ npm start            # http://localhost:4000
 
 1. **Créer l'instance** : console Scaleway → Compute → Instances → *Créer une instance*
    (ex. `DEV1-S`, image Ubuntu 24.04 LTS). Noter l'IP publique.
-2. **Security group** : autoriser en entrée TCP **22** (SSH), **80** et **443** (HTTP/HTTPS), plus
-   **UDP 3478** et **UDP 49160-49200** (TURN coturn pour les appels WebRTC entre réseaux différents).
+2. **Security group** : autoriser en entrée
+   - TCP **22** (SSH) ← IP publique de ton PC en /32 uniquement
+   - TCP **80** ← 0.0.0.0/0 (renouvellement Let's Encrypt, défi HTTP-01)
+   - TCP **443** ← IP publique de ton PC en /32 (le téléphone passe par le VPN WireGuard, voir ci-dessus)
+   - **UDP 51820** ← 0.0.0.0/0 (handshake WireGuard)
+   - **UDP 3478** et **UDP 49160-49200** ← 0.0.0.0/0 (TURN coturn, appels WebRTC cross-réseaux)
+   - tout le reste : DROP
 3. **Se connecter** : `ssh root@<IP_PUBLIQUE>`.
 4. **Installer Docker** :
    ```bash
@@ -196,31 +218,27 @@ npm start            # http://localhost:4000
    git clone https://github.com/canatac/chat.git && cd chat
    cp .env.example .env
    ```
-6. **Configurer `.env`** : `JWT_SECRET=$(openssl rand -hex 32)`, `ADMIN_NAMES`, `TURN_EXTERNAL_IP=<IP publique>`,
-   `TURN_URLS=turn:<IP publique>:3478`, `TURN_USERNAME`, `TURN_CREDENTIAL`, puis `LLM_PROVIDER`,
-   `LLM_API_KEY`, `LLM_MODEL` (et `LLM_BASE_URL` si fournisseur personnalisé), `STT_*` pour la
-   transcription des appels (voir bloc Scaleway ci-dessus).
+6. **Configurer `.env`** : `JWT_SECRET=$(openssl rand -hex 32)`, `ADMIN_NAMES`, `WG_SERVERURL=<domaine ou IP publique>`,
+   `TURN_EXTERNAL_IP=<IP publique>`, `TURN_URLS=turn:<IP publique>:3478`, `TURN_USERNAME`, `TURN_CREDENTIAL`,
+   puis `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL`, `STT_*` (bloc Scaleway ci-dessus).
 7. **Lancer** :
    ```bash
    docker compose up -d --build
    ```
-   L'appli répond sur `http://<IP_PUBLIQUE>:4000`.
-8. **HTTPS (recommandé — requis pour micro/caméra/écran dans le navigateur)** : acheter/pointer un nom de
-   domaine vers l'IP de la VM, définir `DOMAIN=chat.monentreprise.fr` dans `.env`, puis :
+8. **HTTPS (requis pour micro/caméra/écran côté navigateur)** : DNS `chat.tonentreprise.fr` → IP de la VM,
+   `DOMAIN=chat.tonentreprise.fr` dans `.env`, puis :
    ```bash
    docker compose --profile https up -d
    ```
-   Caddy obtient automatiquement un certificat Let's Encrypt et fait reverse-proxy vers le chat
-   (`deploy/Caddyfile`). Sans domaine, utiliser un tunnel SSH depuis le poste client
-   (`ssh -L 4000:127.0.0.1:4000 root@<IP>` puis ouvrir `http://localhost:4000`).
+   Caddy obtient automatiquement un certificat Let's Encrypt et fait reverse-proxy vers le chat.
 9. **Mises à jour** :
    ```bash
    git pull && docker compose up -d --build
    ```
-10. **Sauvegarde** : toute la base et les fichiers déposés tiennent dans le volume Docker `chat-data` :
+10. **Sauvegarde** : base + fichiers + config WireGuard dans les volumes Docker :
     ```bash
-    docker run --rm -v chat_chat-data:/data -v "$(pwd)":/backup alpine \
-      tar czf /backup/chat-data-$(date +%F).tgz -C /data .
+    docker run --rm -v chat_chat-data:/data -v chat_wg-config:/wg -v "$(pwd)":/backup alpine \
+      sh -c 'tar czf /backup/chat-data-$(date +%F).tgz -C /data . && tar czf /backup/wg-config-$(date +%F).tgz -C /wg .'
     ```
 
 ## API
@@ -258,17 +276,17 @@ server/   API REST + WebSocket, SQLite, upload, appels, RAG, STT, suivi de conso
   src/llm/ providers (OpenAI-compatible, Anthropic) + pricing + rag + stt + derive + commandes
 web/      Interface React + Material UI (Vite) : chat, présence, espace documentaire, appels WebRTC, dashboard admin
 deploy/   Caddyfile pour le HTTPS
-docker-compose.yml (chat + coturn + caddy) / Dockerfile / .env.example
+docker-compose.yml (chat + coturn + wireguard + caddy) / Dockerfile / .env.example
 ```
 
 ## Notes de sécurité
 
 - Mots de passe hashés (bcrypt), tokens JWT signés (30 jours), `.env` jamais commité (`.gitignore`)
+- Security group restrictif (voir déploiement) : 22/443 limités à l'IP du PC, 80/51820/UDP TURN ouverts, reste en DROP ; le téléphone accède via le VPN WireGuard
 - Les commandes LLM envoient les `LLM_CONTEXT_MESSAGES` derniers messages **et** les `RAG_TOP_K`
   extraits de documents au fournisseur choisi : en hébergement interne pur, préférez Ollama/vLLM local
 - Les transcriptions d'appels partent vers le fournisseur STT choisi : préférez un Whisper local pour
   que l'audio ne quitte jamais votre VM (Scaleway MaaS = données hébergées à Paris, conforme EU)
-- Le TURN coturn a des credentials dans le `.env` (`TURN_USERNAME`/`TURN_CREDENTIAL`) : ne les partagez pas
+- Le TURN coturn et WireGuard ont des credentials dans le `.env` (`TURN_CREDENTIAL`) : ne les partagez pas
 - `GET /api/admin/stats` est réservé aux noms de `ADMIN_NAMES` (403 sinon)
-- Toujours exposer l'appli derrière **HTTPS** (profil `https` fourni) si elle est reachable depuis Internet
-  (obligatoire pour micro/caméra/partage d'écran côté navigateur)
+- Toujours exposer l'appli derrière **HTTPS** (profil `https` fourni) — obligatoire pour micro/caméra/partage d'écran côté navigateur
