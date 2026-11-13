@@ -64,12 +64,18 @@ export function serializeMessage(db: DB, row: MessageRow): SerializedMessage {
   };
 }
 
+export interface CallRecording {
+  startedBy: PublicUser;
+  startedAt: number;
+}
+
 export interface CallInfo {
   id: number;
   title: string;
   startedBy: PublicUser;
   participants: PublicUser[];
   active: boolean;
+  recording: CallRecording | null;
 }
 
 export interface ServerContext {
@@ -94,7 +100,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     return [...online.keys()];
   }
 
-  let activeCall: { row: CallRow; participants: Set<number> } | null = null;
+  let activeCall: { row: CallRow; participants: Set<number>; recording: { startedBy: number; startedAt: number } | null } | null = null;
 
   function serializeCall(): CallInfo | null {
     if (!activeCall) return null;
@@ -105,6 +111,9 @@ export function createServer(config: Config, dataDir: string): ServerContext {
       startedBy: toPublicUser(startedBy),
       participants: [...activeCall.participants].map((id) => toPublicUser(db.getUserById(id) as UserRow)),
       active: true,
+      recording: activeCall.recording
+        ? { startedBy: toPublicUser(db.getUserById(activeCall.recording.startedBy) as UserRow), startedAt: activeCall.recording.startedAt }
+        : null,
     };
   }
 
@@ -308,7 +317,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     const parsed = callTitleSchema.safeParse(req.body ?? {});
     const title = parsed.success ? parsed.data.title ?? '' : '';
     const row = db.startCall(req.user?.id ?? -1, title);
-    activeCall = { row, participants: new Set([req.user?.id ?? -1]) };
+    activeCall = { row, participants: new Set([req.user?.id ?? -1]), recording: null };
     broadcastCall();
     res.status(201).json({ call: serializeCall() });
   });
@@ -346,6 +355,30 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     activeCall = null;
     broadcastCall();
     res.json({ ok: true });
+  });
+
+  app.post('/api/calls/:id/recording/start', auth, (req, res) => {
+    if (!activeCall || activeCall.row.id !== Number(req.params.id)) {
+      res.status(404).json({ error: 'Aucun appel en cours' });
+      return;
+    }
+    if (activeCall.recording) {
+      res.status(409).json({ error: 'Enregistrement déjà en cours', call: serializeCall() });
+      return;
+    }
+    activeCall.recording = { startedBy: req.user?.id ?? -1, startedAt: Date.now() };
+    broadcastCall();
+    res.json({ call: serializeCall() });
+  });
+
+  app.post('/api/calls/:id/recording/stop', auth, (req, res) => {
+    if (!activeCall || activeCall.row.id !== Number(req.params.id)) {
+      res.status(404).json({ error: 'Aucun appel en cours' });
+      return;
+    }
+    activeCall.recording = null;
+    broadcastCall();
+    res.json({ call: serializeCall() });
   });
 
   const listQuerySchema = z.object({
