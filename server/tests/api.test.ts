@@ -19,6 +19,7 @@ before(async () => {
     JWT_SECRET: 'test-secret-123456',
     LLM_MODEL: '',
     ADMIN_NAMES: 'Alice',
+    LINK_FETCH_ALLOW_PRIVATE: '1',
   });
   ctx = createServer(config, dir);
   await new Promise<void>((resolve) => ctx.server.listen(0, '127.0.0.1', resolve));
@@ -415,6 +416,42 @@ test('enregistrement partagé d\u2019un appel : start/stop diffusé dans l\u2019
   assert.equal(rtBody.call.recording, null);
 
   await api('/api/calls/end', { method: 'POST', headers: auth });
+});
+
+test('commande /lien : télécharge un média depuis une URL, le dépose, poste le récap bot', async () => {
+  const alice = await loginAs('Alice', 'motdepasse1');
+  const port = (ctx.server.address() as { port: number }).port;
+
+  const http = await import('node:http');
+  const payload = Buffer.alloc(2048, 7);
+  const srv = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'audio/mp4', 'Content-Length': payload.length });
+    res.end(payload);
+  });
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  srv.unref();
+  const srvPort = (srv.address() as { port: number }).port;
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${alice}`);
+  const done = waitForEvent(ws, (e) => {
+    const m = (e as { message?: { user?: { isBot?: boolean }; content?: string } }).message;
+    return e.type === 'message' && Boolean(m?.user?.isBot) && m?.content?.includes('Original :') === true;
+  });
+  await new Promise<void>((resolve, reject) => {
+    ws.once('open', resolve);
+    ws.once('error', reject);
+  });
+  ws.send(JSON.stringify({ type: 'message', content: `/lien http://127.0.0.1:${srvPort}/emission.m4a ITEMA du 13/11` }));
+  await done;
+  const files = ctx.db.listFiles(10);
+  const fetched = files.find((f) => f.name === 'emission.m4a');
+  assert.ok(fetched, 'fichier téléchargé présent en base');
+  assert.equal(fetched!.size, payload.length);
+  assert.equal(fetched!.mime, 'audio/mp4');
+  assert.ok(fetched!.message_id !== null);
+  ws.close();
+  srv.closeAllConnections?.();
+  srv.close();
 });
 
 test('rtc-config : STUN public par défaut, TURN ajouté si TURN_URLS configuré', async () => {
