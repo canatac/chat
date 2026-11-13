@@ -1,3 +1,17 @@
+# Port 80 (HTTP) : UNIQUEMENT le défi ACME Let's Encrypt (géré en interne par Caddy)
+# + redirection 301 vers HTTPS. L'application n'est JAMAIS servie en clair sur le port 80.
+# Vérification : curl -I http://{$DOMAIN} doit répondre 301 Location: https://...
+http://{$DOMAIN} {
+	redir https://{$DOMAIN}{uri} permanent
+}
+
+# Port 443 (HTTPS) : l'application, avec en-têtes de sécurité
 {$DOMAIN} {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+	}
 	reverse_proxy chat:4000
 }
