@@ -339,7 +339,7 @@ test('upload d\u2019un enregistrement d\u2019appel + dérivation sans LLM (503)'
   assert.ok(ctx.db.getFileById(upBody.file.id)?.call_id === call.id);
 
   const txtFd = new FormData();
-  txtFd.append('file', new Blob(['Transcription test : décision de livrer vendredi.'], { type: 'text/plain' }), 'transcription-appel.txt');
+  txtFd.append('file', new Blob(['Transcription test longue : décision de livrer le projet Alpha vendredi prochain, avec revue de code jeudi matin et démonstration à toute l equipe vendredi après-midi.'], { type: 'text/plain' }), 'transcription-appel.txt');
   txtFd.append('post', 'false');
   const upTxt = await fetch(`${baseUrl}/api/files`, { method: 'POST', headers: auth, body: txtFd });
   const txtBody = (await upTxt.json()) as { file: { id: number } };
@@ -376,6 +376,22 @@ test('fichier audio déposé à la main : pas de transcription sans STT, endpoin
   const txtBody = (await upTxt.json()) as { file: { id: number } };
   const trTxt = await api(`/api/files/${txtBody.file.id}/transcribe`, { method: 'POST', headers: auth });
   assert.equal(trTxt.status, 400);
+});
+
+test('derive : 422 si la transcription est trop courte (garde-fou anti-hallucination)', async () => {
+  const alice = await loginAs('Alice', 'motdepasse1');
+  const auth = { Authorization: `Bearer ${alice}` };
+  const fd = new FormData();
+  fd.append('file', new Blob(['trop court'], { type: 'text/plain' }), 'transcription-mini.txt');
+  fd.append('post', 'false');
+  const up = await fetch(`${baseUrl}/api/files`, { method: 'POST', headers: auth, body: fd });
+  const upBody = (await up.json()) as { file: { id: number } };
+  const res = await api(`/api/files/${upBody.file.id}/derive`, {
+    method: 'POST',
+    headers: { ...auth, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind: 'cr' }),
+  });
+  assert.equal(res.status, 422);
 });
 
 test('rtc-config : STUN public par défaut, TURN ajouté si TURN_URLS configuré', async () => {
