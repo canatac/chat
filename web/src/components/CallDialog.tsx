@@ -62,7 +62,6 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
   const [muted, setMuted] = useState(false);
   const [sharing, setSharing] = useState(false);
   const [camera, setCamera] = useState(false);
-  const [recording, setRecording] = useState(false);
   const [remotes, setRemotes] = useState<RemoteStream[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -119,6 +118,21 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
   }, [call, joined, user.id]);
 
   useEffect(() => {
+    const rec = call?.recording ?? null;
+    const session = sessionRef.current;
+    if (!session || !joined) return;
+    if (rec && !session.isRecording()) {
+      try {
+        session.startRecording(() => {});
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Erreur d'enregistrement");
+      }
+    } else if (!rec && session.isRecording()) {
+      session.stopRecording();
+    }
+  }, [call?.recording, joined]);
+
+  useEffect(() => {
     if (!open) {
       sessionRef.current?.leave();
       sessionRef.current = null;
@@ -127,7 +141,6 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
       setMuted(false);
       setSharing(false);
       setCamera(false);
-      setRecording(false);
       setError(null);
       setNote(null);
     }
@@ -168,7 +181,6 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
     setJoined(false);
     setRemotes([]);
     setSharing(false);
-    setRecording(false);
     try {
       const r = await api.calls.leave();
       onCallChange(r.call);
@@ -227,13 +239,14 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
   };
 
   const toggleRecord = () => {
-    const session = sessionRef.current;
-    if (!session || !call) return;
-    try {
-      if (recording) {
-        session.stopRecording();
-        setRecording(false);
+    if (!call) return;
+    setError(null);
+    const rec = call.recording;
+    if (rec) {
+      const session = sessionRef.current;
+      if (session?.isRecording()) {
         const ext = session.recordingExtension();
+        session.stopRecording();
         session.startRecording((blob) => {
           void api
             .uploadRecording(call.id, blob, `appel-${call.id}-${Date.now()}.${ext}`)
@@ -246,20 +259,16 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
             )
             .catch((e) => setError(e instanceof Error ? e.message : "Erreur d'envoi"))
         });
-      } else {
-        session.startRecording(() => {});
-        setRecording(true);
-        setNote(null);
       }
-    } catch (err) {
-      setRecording(false);
-      setError(
-        err instanceof Error && /MediaRecorder|NotSupported/i.test(err.message)
-          ? "Enregistrement non supporté par ce navigateur (MediaRecorder indisponible). Essaie Safari ou Chrome."
-          : err instanceof Error
-            ? err.message
-            : "Erreur d'enregistrement",
-      );
+      api.calls
+        .recordingStop(call.id)
+        .then((r) => onCallChange(r.call))
+        .catch((e) => setError(e instanceof Error ? e.message : "Erreur"));
+    } else {
+      api.calls
+        .recordingStart(call.id)
+        .then((r) => onCallChange(r.call))
+        .catch((e) => setError(e instanceof Error ? e.message : "Erreur"));
     }
   };
 
@@ -377,12 +386,14 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
                       {sharing ? <StopScreenShareIcon /> : <ScreenShareIcon />}
                     </IconButton>
                   </Tooltip>
-                  <Tooltip title={recording ? "Arrêter l'enregistrement" : "Enregistrer l'appel"}>
-                    <IconButton color={recording ? 'error' : 'primary'} onClick={toggleRecord}>
-                      {recording ? <StopIcon /> : <FiberManualRecordIcon />}
+                  <Tooltip title={call?.recording ? "Arrêter l'enregistrement (partagé)" : "Enregistrer l'appel (partagé)"}>
+                    <IconButton color={call?.recording ? 'error' : 'primary'} onClick={toggleRecord}>
+                      {call?.recording ? <StopIcon /> : <FiberManualRecordIcon />}
                     </IconButton>
                   </Tooltip>
-                  {recording && <Chip size="small" color="error" label="REC" />}
+                  {call?.recording && (
+                    <Chip size="small" color="error" label={`REC — ${call.recording.startedBy.name}`} />
+                  )}
                 </Box>
               </>
             )}
