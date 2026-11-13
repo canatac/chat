@@ -246,8 +246,11 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
       const session = sessionRef.current;
       if (session?.isRecording()) {
         const ext = session.recordingExtension();
-        session.stopRecording();
-        session.startRecording((blob) => {
+        session.stopRecordingWith((blob) => {
+          if (blob.size === 0) {
+            setError("Enregistrement vide (0 s) — aucun échantillon audio capturé.");
+            return;
+          }
           void api
             .uploadRecording(call.id, blob, `appel-${call.id}-${Date.now()}.${ext}`)
             .then((r) =>
