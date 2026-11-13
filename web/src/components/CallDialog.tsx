@@ -4,6 +4,7 @@ import MicIcon from '@mui/icons-material/Mic';
 import MicOffIcon from '@mui/icons-material/MicOff';
 import PhoneIcon from '@mui/icons-material/Phone';
 import ScreenShareIcon from '@mui/icons-material/ScreenShare';
+import SoundIcon from '@mui/icons-material/VolumeUp';
 import StopIcon from '@mui/icons-material/Stop';
 import StopScreenShareIcon from '@mui/icons-material/StopScreenShare';
 import VideocamIcon from '@mui/icons-material/Videocam';
@@ -26,7 +27,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import type { CallInfo, User } from '../types';
-import { CallSession } from '../webrtc';
+import { CallSession, loadIceServers } from '../webrtc';
 import type { ChatSocket } from '../ws';
 
 interface Props {
@@ -38,20 +39,33 @@ interface Props {
   onCallChange: (call: CallInfo | null) => void;
 }
 
-interface RemoteStream {
-  userId: number;
+interface PeerAudio {
+  peerId: number;
   stream: MediaStream;
 }
 
+interface PeerVideo {
+  peerId: number;
+  track: MediaStreamTrack;
+  key: string;
+}
+
+type RecStatus = 'idle' | 'recording' | 'uploading' | 'done' | 'error';
+
 function normalizeMediaError(err: unknown): Error {
   const msg = err instanceof Error ? err.message : String(err);
-  if (/not allowed|permission|denied|secure context|insecure|notfound|notreadable/i.test(msg)) {
+  if (/not allowed|permission|denied/i.test(msg)) {
     return new Error(
-      "Accès micro/écran bloqué par le navigateur (contexte non sécurisé ou permission refusée). " +
-        "Ouvre l'app en HTTPS (DOMAIN=chat.tondomaine.fr dans .env + docker compose --profile https up -d) " +
-        "ou via http://localhost:4000 (tunnel SSH : ssh -L 4000:127.0.0.1:4000 root@<IP_VM>). " +
-        "Vérifie aussi que le micro est autorisé pour ce site (icône 🔒 dans la barre d'adresse).",
+      'Micro/caméra refusé par le navigateur. Autorise le micro pour ce site (icône 🔒 dans la barre d\'adresse), puis réessaie.',
     );
+  }
+  if (/secure context|insecure|not allowed by the user agent/i.test(msg)) {
+    return new Error(
+      'Contexte non sécurisé : ouvre l\'app en HTTPS (https://…) ou via http://localhost:4000 (tunnel SSH).',
+    );
+  }
+  if (/notfound|notreadable/i.test(msg)) {
+    return new Error('Aucun micro/caméra détecté sur cet appareil.');
   }
   return err instanceof Error ? err : new Error(msg);
 }
@@ -62,29 +76,47 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
   const [muted, setMuted] = useState(false);
   const [sharing, setSharing] = useState(false);
   const [camera, setCamera] = useState(false);
-  const [remotes, setRemotes] = useState<RemoteStream[]>([]);
+  const [peerAudios, setPeerAudios] = useState<PeerAudio[]>([]);
+  const [peerVideos, setPeerVideos] = useState<PeerVideo[]>([]);
+  const [peerStates, setPeerStates] = useState<Record<number, string>>({});
+  const [audioBlocked, setAudioBlocked] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  const [recStatus, setRecStatus] = useState<RecStatus>('idle');
   const sessionRef = useRef<CallSession | null>(null);
   const knownPeersRef = useRef<Set<number>>(new Set());
+  const audioElsRef = useRef<Map<number, HTMLAudioElement>>(new Map());
+  const lastRecordingIdRef = useRef<string | null>(null);
+
+  const rec = call?.recording ?? null;
 
   const enterSession = useCallback(
-    async (callInfo: CallInfo) => {
+    async (callInfo: CallInfo, stream: MediaStream) => {
       if (!socket) return;
-      const session = new CallSession(socket, user.id, {
-        onRemoteStream: (userId, stream) =>
-          setRemotes((prev) => [...prev.filter((r) => r.userId !== userId), { userId, stream }]),
-        onPeerRemoved: (userId) => setRemotes((prev) => prev.filter((r) => r.userId !== userId)),
+      const session = new CallSession(socket, user.id, callInfo.id, {
+        onAudioTrack: (peerId, _track, stream) =>
+          setPeerAudios((prev) => [...prev.filter((p) => p.peerId !== peerId), { peerId, stream }]),
+        onVideoTrack: (peerId, track, _s) =>
+          setPeerVideos((prev) => [
+            ...prev.filter((p) => p.key !== `${peerId}-${track.id}`),
+            { peerId, track, key: `${peerId}-${track.id}` },
+          ]),
+        onPeerRemoved: (peerId) => {
+          setPeerAudios((prev) => prev.filter((p) => p.peerId !== peerId));
+          setPeerVideos((prev) => prev.filter((p) => p.peerId !== peerId));
+          setPeerStates((prev) => {
+            const next = { ...prev };
+            delete next[peerId];
+            return next;
+          });
+        },
+        onPeerState: (peerId, state) =>
+          setPeerStates((prev) => ({ ...prev, [peerId]: state })),
       });
+      session.attachLocalStream(stream);
       sessionRef.current = session;
       knownPeersRef.current = new Set();
-      try {
-        await session.start();
-      } catch (err) {
-        sessionRef.current = null;
-        throw normalizeMediaError(err);
-      }
       for (const p of callInfo.participants) {
         if (p.id !== user.id) {
           knownPeersRef.current.add(p.id);
@@ -94,6 +126,28 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
       setJoined(true);
     },
     [socket, user.id],
+  );
+
+  const startOrJoin = useCallback(
+    async (isStart: boolean) => {
+      if (!socket) return;
+      setBusy(true);
+      setError(null);
+      try {
+        const micPromise = navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        const icePromise = loadIceServers();
+        const stream = await micPromise;
+        await icePromise;
+        const result = isStart ? await api.calls.start(title.trim()) : await api.calls.join();
+        onCallChange(result.call);
+        await enterSession(result.call, stream);
+      } catch (err) {
+        setError(normalizeMediaError(err).message);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [socket, title, enterSession, onCallChange],
   );
 
   useEffect(() => {
@@ -109,6 +163,7 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
   useEffect(() => {
     if (!call || !sessionRef.current || !joined) return;
     const session = sessionRef.current;
+    session.setCallId(call.id);
     for (const p of call.participants) {
       if (p.id !== user.id && !knownPeersRef.current.has(p.id)) {
         knownPeersRef.current.add(p.id);
@@ -118,69 +173,79 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
   }, [call, joined, user.id]);
 
   useEffect(() => {
-    const rec = call?.recording ?? null;
+    const recNow = call?.recording ?? null;
     const session = sessionRef.current;
     if (!session || !joined) return;
-    if (rec && !session.isRecording()) {
-      try {
-        session.startRecording(() => {});
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Erreur d'enregistrement");
+    if (recNow) {
+      lastRecordingIdRef.current = recNow.id;
+      if (recNow.startedBy.id === user.id && !session.isRecording()) {
+        try {
+          session.startRecording(() => {});
+          setRecStatus('recording');
+        } catch (err) {
+          setError(err instanceof Error ? err.message : "Erreur d'enregistrement");
+        }
       }
-    } else if (!rec && session.isRecording()) {
-      session.stopRecording();
+    } else if (lastRecordingIdRef.current && session.isRecording() && rec?.startedBy.id === user.id) {
+      const rid = lastRecordingIdRef.current;
+      lastRecordingIdRef.current = null;
+      if (call && call.id) {
+        const ext = session.recordingExtension();
+        session.stopRecordingWith((blob) => {
+          if (!call) return;
+          if (blob.size === 0) {
+            setError('Enregistrement vide (0 s) — aucun échantillon audio capturé.');
+            setRecStatus('error');
+            return;
+          }
+          setRecStatus('uploading');
+          void api
+            .uploadRecording(call.id, blob, `appel-${call.id}-${Date.now()}.${ext}`, rid)
+            .then((r) => {
+              setRecStatus('done');
+              setNote(
+                r.duplicate
+                  ? 'Fichier déjà déposé (renvoi ignoré — idempotent).'
+                  : r.transcriptPending
+                    ? 'Enregistrement déposé — transcription en cours, à retrouver dans l’espace documentaire'
+                    : 'Enregistrement déposé dans l’espace documentaire (STT non configuré : pas de transcription)',
+              );
+            })
+            .catch((e) => {
+              setRecStatus('error');
+              setError(e instanceof Error ? e.message : "Erreur d'envoi — le fichier reste dispo pour un nouvel essai");
+            });
+        });
+      }
     }
-  }, [call?.recording, joined]);
+  }, [call?.recording, joined, user.id, rec?.startedBy.id, call]);
 
   useEffect(() => {
-    if (!open) {
+    return () => {
       sessionRef.current?.leave();
       sessionRef.current = null;
-      setJoined(false);
-      setRemotes([]);
-      setMuted(false);
-      setSharing(false);
-      setCamera(false);
-      setError(null);
-      setNote(null);
-    }
-  }, [open]);
+    };
+  }, []);
 
-  const start = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const r = await api.calls.start(title.trim());
-      onCallChange(r.call);
-      await enterSession(r.call);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Erreur');
-    } finally {
-      setBusy(false);
+  const playAllAudio = useCallback(() => {
+    let blocked = false;
+    for (const el of audioElsRef.current.values()) {
+      el.muted = false;
+      const p = el.play();
+      if (p) p.catch(() => (blocked = true));
     }
-  };
-
-  const join = async () => {
-    if (!call) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const r = await api.calls.join();
-      onCallChange(r.call);
-      await enterSession(r.call);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Erreur');
-    } finally {
-      setBusy(false);
-    }
-  };
+    setAudioBlocked(blocked);
+  }, []);
 
   const leave = async () => {
     sessionRef.current?.leave();
     sessionRef.current = null;
     setJoined(false);
-    setRemotes([]);
+    setPeerAudios([]);
+    setPeerVideos([]);
+    setPeerStates({});
     setSharing(false);
+    setRecStatus('idle');
     try {
       const r = await api.calls.leave();
       onCallChange(r.call);
@@ -193,7 +258,10 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
     sessionRef.current?.leave();
     sessionRef.current = null;
     setJoined(false);
-    setRemotes([]);
+    setPeerAudios([]);
+    setPeerVideos([]);
+    setPeerStates({});
+    setRecStatus('idle');
     try {
       await api.calls.end();
       onCallChange(null);
@@ -241,45 +309,36 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
   const toggleRecord = () => {
     if (!call) return;
     setError(null);
-    const rec = call.recording;
     if (rec) {
-      const session = sessionRef.current;
-      if (session?.isRecording()) {
-        const ext = session.recordingExtension();
-        session.stopRecordingWith((blob) => {
-          if (blob.size === 0) {
-            setError("Enregistrement vide (0 s) — aucun échantillon audio capturé.");
-            return;
-          }
-          void api
-            .uploadRecording(call.id, blob, `appel-${call.id}-${Date.now()}.${ext}`)
-            .then((r) =>
-              setNote(
-                r.transcriptPending
-                  ? "Enregistrement envoyé — transcription en cours, à retrouver dans l'espace documentaire"
-                  : "Enregistrement déposé dans l'espace documentaire (STT non configuré : pas de transcription)",
-              ),
-            )
-            .catch((e) => setError(e instanceof Error ? e.message : "Erreur d'envoi"))
-        });
-      }
       api.calls
-        .recordingStop(call.id)
+        .recordingStop(call.id, rec.id)
         .then((r) => onCallChange(r.call))
-        .catch((e) => setError(e instanceof Error ? e.message : "Erreur"));
+        .catch((e) => setError(e instanceof Error ? e.message : 'Erreur'));
     } else {
+      if (typeof MediaRecorder === 'undefined') {
+        setError('Enregistrement non supporté par ce navigateur (MediaRecorder indisponible). Essaie Safari ou Chrome.');
+        return;
+      }
       api.calls
         .recordingStart(call.id)
         .then((r) => onCallChange(r.call))
-        .catch((e) => setError(e instanceof Error ? e.message : "Erreur"));
+        .catch((e) => setError(e instanceof Error ? e.message : 'Erreur'));
     }
   };
 
   const screenStream = sessionRef.current?.getScreenStream() ?? null;
   const videoStream = sessionRef.current?.getVideoStream() ?? null;
 
+  const recChip = () => {
+    if (!rec) return null;
+    if (recStatus === 'uploading') return <Chip size="small" color="warning" label="Envoi en cours…" />;
+    if (recStatus === 'done') return <Chip size="small" color="success" label="Déposé ✓" />;
+    if (recStatus === 'error') return <Chip size="small" color="error" label="Échec" />;
+    return <Chip size="small" color="error" label={`REC — ${rec.startedBy.name}`} />;
+  };
+
   return (
-    <Dialog open={open} onClose={onClose} fullWidth maxWidth="md">
+    <Dialog open={open} onClose={onClose} fullWidth maxWidth="md" keepMounted>
       <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
         <PhoneIcon color="primary" />
         {call ? `Appel en cours${call.title ? ` — ${call.title}` : ''}` : "Appel d'équipe"}
@@ -287,6 +346,19 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
       <DialogContent dividers>
         {error && <Alert severity="error" sx={{ mb: 1 }}>{error}</Alert>}
         {note && <Alert severity="success" sx={{ mb: 1 }}>{note}</Alert>}
+        {audioBlocked && joined && (
+          <Alert
+            severity="warning"
+            sx={{ mb: 1 }}
+            action={
+              <Button color="inherit" size="small" startIcon={<SoundIcon />} onClick={playAllAudio}>
+                Activer le son
+              </Button>
+            }
+          >
+            Lecture audio bloquée par le navigateur (autoplay).
+          </Alert>
+        )}
         {!call && (
           <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
             <TextField
@@ -296,20 +368,31 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
               value={title}
               onChange={(e) => setTitle(e.target.value)}
             />
-            <Button variant="contained" startIcon={<PhoneIcon />} onClick={start} disabled={busy}>
+            <Button variant="contained" startIcon={<PhoneIcon />} onClick={() => void startOrJoin(true)} disabled={busy}>
               Démarrer l'appel
             </Button>
           </Box>
         )}
         {call && (
           <>
-            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mb: 2 }}>
+            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mb: 2, alignItems: 'center' }}>
               {call.participants.map((p) => (
-                <Chip key={p.id} avatar={<Avatar>{p.name.slice(0, 1).toUpperCase()}</Avatar>} label={p.name} color={p.id === call.startedBy.id ? 'primary' : 'default'} size="small" />
+                <Chip
+                  key={p.id}
+                  avatar={<Avatar>{p.name.slice(0, 1).toUpperCase()}</Avatar>}
+                  label={p.name}
+                  color={p.id === call.startedBy.id ? 'primary' : 'default'}
+                  size="small"
+                />
               ))}
+              {Object.entries(peerStates)
+                .filter(([, st]) => st === 'failed' || st === 'disconnected')
+                .map(([peerId, st]) => (
+                  <Chip key={`st-${peerId}`} size="small" color="warning" label={`pair ${peerId}: ${st}`} />
+                ))}
             </Box>
             {!joined && (
-              <Button variant="contained" startIcon={<PhoneIcon />} onClick={join} disabled={busy}>
+              <Button variant="contained" startIcon={<PhoneIcon />} onClick={() => void startOrJoin(false)} disabled={busy}>
                 Rejoindre l'appel
               </Button>
             )}
@@ -344,36 +427,39 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
                       />
                     </Box>
                   )}
-                  {remotes.map((r) =>
-                    r.stream.getVideoTracks().length > 0 ? (
-                      <Box key={r.userId}>
-                        <Typography variant="caption">Écran de {r.userId}</Typography>
-                        <video
-                          ref={(el) => {
-                            if (el && el.srcObject !== r.stream) el.srcObject = r.stream;
-                          }}
-                          autoPlay
-                          playsInline
-                          style={{ width: '100%', borderRadius: 8, background: '#000' }}
-                        />
-                      </Box>
-                    ) : (
-                      <audio
-                        key={r.userId}
-                        playsInline
+                  {peerVideos.map((pv) => (
+                    <Box key={pv.key}>
+                      <Typography variant="caption">Vidéo de {pv.peerId}</Typography>
+                      <video
                         ref={(el) => {
                           if (el) {
-                            el.muted = false;
-                            if (el.srcObject !== r.stream) el.srcObject = r.stream;
-                            el.play().catch(() => {});
+                            const s = new MediaStream([pv.track]);
+                            if (el.srcObject !== s) el.srcObject = s;
                           }
                         }}
                         autoPlay
+                        playsInline
+                        style={{ width: '100%', borderRadius: 8, background: '#000' }}
                       />
-                    )
-                  )}
+                    </Box>
+                  ))}
+                  {peerAudios.map((pa) => (
+                    <audio
+                      key={pa.peerId}
+                      playsInline
+                      ref={(el) => {
+                        if (!el) return;
+                        audioElsRef.current.set(pa.peerId, el);
+                        el.muted = false;
+                        if (el.srcObject !== pa.stream) el.srcObject = pa.stream;
+                        const p = el.play();
+                        if (p) p.catch(() => setAudioBlocked(true));
+                      }}
+                      autoPlay
+                    />
+                  ))}
                 </Box>
-                <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', alignItems: 'center' }}>
                   <Tooltip title={muted ? 'Activer le micro' : 'Couper le micro'}>
                     <IconButton color={muted ? 'error' : 'primary'} onClick={toggleMute}>
                       {muted ? <MicOffIcon /> : <MicIcon />}
@@ -384,19 +470,17 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
                       {camera ? <VideocamOffIcon /> : <VideocamIcon />}
                     </IconButton>
                   </Tooltip>
-                  <Tooltip title={sharing ? "Arrêter le partage d'écran" : "Partager mon écran"}>
+                  <Tooltip title={sharing ? "Arrêter le partage d'écran" : 'Partager mon écran'}>
                     <IconButton color={sharing ? 'error' : 'primary'} onClick={() => void toggleScreen()}>
                       {sharing ? <StopScreenShareIcon /> : <ScreenShareIcon />}
                     </IconButton>
                   </Tooltip>
-                  <Tooltip title={call?.recording ? "Arrêter l'enregistrement (partagé)" : "Enregistrer l'appel (partagé)"}>
-                    <IconButton color={call?.recording ? 'error' : 'primary'} onClick={toggleRecord}>
-                      {call?.recording ? <StopIcon /> : <FiberManualRecordIcon />}
+                  <Tooltip title={rec ? "Arrêter l'enregistrement (partagé)" : "Enregistrer l'appel (partagé)"}>
+                    <IconButton color={rec ? 'error' : 'primary'} onClick={toggleRecord}>
+                      {rec ? <StopIcon /> : <FiberManualRecordIcon />}
                     </IconButton>
                   </Tooltip>
-                  {call?.recording && (
-                    <Chip size="small" color="error" label={`REC — ${call.recording.startedBy.name}`} />
-                  )}
+                  {recChip()}
                 </Box>
               </>
             )}
