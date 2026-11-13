@@ -15,11 +15,22 @@ choix pour faire des comptes-rendus de réunion ou proposer des solutions aux pr
    configuré → la transcription `.txt` apparaît dans l'espace documentaire. Sinon, bouton
    **🎙️ Transcrire** sur la ligne du fichier dans l'espace documentaire.
 
-**Démarrer / rejoindre un appel audio avec partage d'écran**
+**Démarrer / rejoindre un appel (audio + caméra optionnelle + partage d'écran)**
 1. Bouton **📞 téléphone** en haut → « Démarrer l'appel » (titre optionnel). Les autres voient une
    pastille rouge sur le 📞 et peuvent « Rejoindre l'appel ».
-2. Dans l'appel : micro on/off, **partage d'écran**, **REC** (enregistrement de tout l'appel),
-   « Quitter l'appel » ou « Terminer l'appel » (pour tout le monde).
+2. Dans l'appel : micro on/off, **📷 caméra** (optionnelle), **🖥️ partage d'écran**, **REC**
+   (enregistrement de tout l'appel), « Quitter l'appel » ou « Terminer l'appel » (pour tout le monde).
+
+> **Appels depuis un téléphone / entre réseaux différents (4G ↔ box)** : le serveur **TURN (coturn)**
+> tourne dans `docker-compose`. Réglage obligatoire dans le `.env` de la VM :
+> `TURN_EXTERNAL_IP=<IP publique de la VM>`, `TURN_URLS=turn:<IP publique>:3478`,
+> `TURN_USERNAME` / `TURN_CREDENTIAL`. Security group Scaleway : ouvrir **UDP 3478** et **UDP 49160-49200**.
+> Sans TURN, la signalisation passe (la session « démarre ») mais **aucun média ne circule** (pas de son ni
+> d'image) entre deux réseaux NAT différents — symptôme classique.
+> **iOS** : Safari iPhone/iPad ne supporte pas `getDisplayMedia` → partage d'écran impossible depuis un iPhone
+> (message explicite affiché) ; PC ou Android requis pour partager son écran. Caméra et audio OK sur iOS.
+> **Contexte sécurisé requis** : micro/caméra/écran exigent HTTPS (`https://…`) ou `http://localhost`
+> (tunnel SSH `ssh -L 4000:127.0.0.1:4000 root@<IP>`).
 
 **Enregistrer → transcrire → archiver → résumer → relire**
 1. REC pendant l'appel, second clic pour arrêter : l'audio est envoyé au serveur, posté dans la chat
@@ -45,8 +56,8 @@ choix pour faire des comptes-rendus de réunion ou proposer des solutions aux pr
 - **Dashboard d'administration** (réservé aux noms de `ADMIN_NAMES`) : volume de tokens
   (entrée/sortie/total), **estimation du coût** en USD, activité par jour/commande/modèle, volumétrie
   messages/membres/documents/appels
-- **Appels d'équipe avec partage d'écran** (bouton téléphone en haut) : WebRTC en mesh, un appel à la
-  fois, micro coupable, partage d'écran, enregistrement audio de l'appel (bouton REC)
+- **Appels d'équipe** (bouton téléphone en haut) : WebRTC en mesh, audio + caméra optionnelle + partage
+  d'écran, enregistrement audio de l'appel (bouton REC), TURN coturn pour les appels cross-réseaux
 - **Transcription des appels et notes vocales** : transcription brute déposée automatiquement dans
   l'espace documentaire — indexée par le RAG ; boutons **Résumé** et **Compte-rendu** (LLM) sur chaque
   transcription
@@ -63,7 +74,7 @@ choix pour faire des comptes-rendus de réunion ou proposer des solutions aux pr
 
 - **Backend** : Node.js 22 + TypeScript, Express (REST), `ws` (WebSocket), `node:sqlite`, `bcryptjs`, `jsonwebtoken`, `multer` (upload)
 - **Frontend** : React 18 + Vite + TypeScript + Material UI (`@mui/material`) + WebRTC natif (appels mesh)
-- **Déploiement** : un seul conteneur Docker (le serveur sert aussi l'UI compilée), HTTPS optionnel via Caddy + Let's Encrypt
+- **Déploiement** : conteneurs Docker (`chat` + `coturn` TURN + `caddy` optionnel pour le HTTPS), volume `chat-data` pour les données
 
 ## Configuration du LLM
 
@@ -96,6 +107,10 @@ Autres variables : `LLM_TEMPERATURE` (0.4), `LLM_MAX_TOKENS` (1024), `LLM_CONTEX
 - Appel WebRTC **mesh** (pair-à-pair) : le serveur ne relaie que la signalisation (`{type:"signal"}` sur le
   WebSocket) et l'état de l'appel (`{type:"call"}`). Conçu pour ~5-6 participants ; au-delà, prévoir un
   SFU (LiveKit, mediasoup, Jitsi). Le partage d'écran utilise `getDisplayMedia`.
+- **ICE** : `GET /api/rtc-config` renvoie les serveurs ICE (STUN public + TURN coturn si `TURN_URLS` est défini).
+  Le TURN est **indispensable** pour les appels entre réseaux différents (mobile 4G/5G ↔ box) : sans lui,
+  pas de média (son/image) même si la session démarre. `coturn` est déployé par `docker-compose`
+  (ports UDP 3478 + 49160-49200 à ouvrir dans le security group Scaleway).
 - L'enregistrement se fait **côté navigateur** (mix micro local + flux distants via MediaRecorder) puis
   envoyé au serveur à l'arrêt : pas de serveur d'enregistrement lourd. Le fichier audio est déposé dans
   l'espace documentaire et posté dans la chatroom. **Garder l'onglet ouvert pendant l'enregistrement.**
@@ -169,8 +184,8 @@ npm start            # http://localhost:4000
 
 1. **Créer l'instance** : console Scaleway → Compute → Instances → *Créer une instance*
    (ex. `DEV1-S`, image Ubuntu 24.04 LTS). Noter l'IP publique.
-2. **Security group** : autoriser en entrée TCP **22** (SSH), **80** et **443** (HTTP/HTTPS), et la plage
-   UDP **10000-20000** si vous prévoyez plus tard un SFU (pas nécessaire en mesh WebRTC direct).
+2. **Security group** : autoriser en entrée TCP **22** (SSH), **80** et **443** (HTTP/HTTPS), plus
+   **UDP 3478** et **UDP 49160-49200** (TURN coturn pour les appels WebRTC entre réseaux différents).
 3. **Se connecter** : `ssh root@<IP_PUBLIQUE>`.
 4. **Installer Docker** :
    ```bash
@@ -181,7 +196,8 @@ npm start            # http://localhost:4000
    git clone https://github.com/canatac/chat.git && cd chat
    cp .env.example .env
    ```
-6. **Configurer `.env`** : `JWT_SECRET=$(openssl rand -hex 32)`, `ADMIN_NAMES`, puis `LLM_PROVIDER`,
+6. **Configurer `.env`** : `JWT_SECRET=$(openssl rand -hex 32)`, `ADMIN_NAMES`, `TURN_EXTERNAL_IP=<IP publique>`,
+   `TURN_URLS=turn:<IP publique>:3478`, `TURN_USERNAME`, `TURN_CREDENTIAL`, puis `LLM_PROVIDER`,
    `LLM_API_KEY`, `LLM_MODEL` (et `LLM_BASE_URL` si fournisseur personnalisé), `STT_*` pour la
    transcription des appels (voir bloc Scaleway ci-dessus).
 7. **Lancer** :
@@ -189,14 +205,14 @@ npm start            # http://localhost:4000
    docker compose up -d --build
    ```
    L'appli répond sur `http://<IP_PUBLIQUE>:4000`.
-8. **HTTPS (recommandé)** : acheter/pointer un nom de domaine vers l'IP de la VM, définir
-   `DOMAIN=chat.monentreprise.fr` dans `.env`, puis :
+8. **HTTPS (recommandé — requis pour micro/caméra/écran dans le navigateur)** : acheter/pointer un nom de
+   domaine vers l'IP de la VM, définir `DOMAIN=chat.monentreprise.fr` dans `.env`, puis :
    ```bash
    docker compose --profile https up -d
    ```
    Caddy obtient automatiquement un certificat Let's Encrypt et fait reverse-proxy vers le chat
-   (`deploy/Caddyfile`). Pour un accès strictement interne, laisser `CHAT_BIND=127.0.0.1` et
-   passer par un tunnel SSH (`ssh -L 4000:127.0.0.1:4000 root@<IP>`).
+   (`deploy/Caddyfile`). Sans domaine, utiliser un tunnel SSH depuis le poste client
+   (`ssh -L 4000:127.0.0.1:4000 root@<IP>` puis ouvrir `http://localhost:4000`).
 9. **Mises à jour** :
    ```bash
    git pull && docker compose up -d --build
@@ -215,6 +231,7 @@ npm start            # http://localhost:4000
 - `POST /api/auth/login` `{name, password}` → `{token, user}`
 - `GET /api/me` → `{user}` (avec `isAdmin`)
 - `GET /api/users` → `{users: [...]}` (avec `online`)
+- `GET /api/rtc-config` → `{iceServers: [...]}` (STUN + TURN) pour les appels WebRTC
 - `GET /api/messages?limit=50&before=<id>` → `{messages: [...]}` (ordre chronologique, avec `files`)
 - `POST /api/messages` `{content}` → `{message}`
 - `POST /api/files` (multipart : `file`, `message?`, `post=true|false`) → `{file, message?}` — **fichier audio transcrit automatiquement si STT configuré**
@@ -241,7 +258,7 @@ server/   API REST + WebSocket, SQLite, upload, appels, RAG, STT, suivi de conso
   src/llm/ providers (OpenAI-compatible, Anthropic) + pricing + rag + stt + derive + commandes
 web/      Interface React + Material UI (Vite) : chat, présence, espace documentaire, appels WebRTC, dashboard admin
 deploy/   Caddyfile pour le HTTPS
-docker-compose.yml / Dockerfile / .env.example
+docker-compose.yml (chat + coturn + caddy) / Dockerfile / .env.example
 ```
 
 ## Notes de sécurité
@@ -251,5 +268,7 @@ docker-compose.yml / Dockerfile / .env.example
   extraits de documents au fournisseur choisi : en hébergement interne pur, préférez Ollama/vLLM local
 - Les transcriptions d'appels partent vers le fournisseur STT choisi : préférez un Whisper local pour
   que l'audio ne quitte jamais votre VM (Scaleway MaaS = données hébergées à Paris, conforme EU)
+- Le TURN coturn a des credentials dans le `.env` (`TURN_USERNAME`/`TURN_CREDENTIAL`) : ne les partagez pas
 - `GET /api/admin/stats` est réservé aux noms de `ADMIN_NAMES` (403 sinon)
 - Toujours exposer l'appli derrière **HTTPS** (profil `https` fourni) si elle est reachable depuis Internet
+  (obligatoire pour micro/caméra/partage d'écran côté navigateur)
