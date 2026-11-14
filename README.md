@@ -166,6 +166,16 @@ valoriser chaque transcription dans `llm_usage` (visible dans le dashboard admin
 `STT_API_KEY` sinon `LLM_API_KEY` est réutilisée ; `STT_LANGUAGE=fr` pour forcer la langue.
 Tout fichier audio déposé (note vocale, enregistrement d'appel, média téléchargé via `/lien`) est transcrit
 automatiquement si le STT est configuré ; sinon `POST /api/files/:id/transcribe` (bouton 🎙️ dans l'espace documentaire).
+
+> **Dépannage « STT non configuré » alors que le `.env` contient `STT_*`** : le `.env` est monté en lecture
+> seule dans le conteneur et **relu à chaque démarrage de l'app**. Après modification du `.env` :
+> ```bash
+> docker compose restart chat
+> docker compose logs chat | grep '\[config\]'
+> ```
+> la log doit afficher `[config] STT : configuré (...)`. Sinon, vérifiez que les lignes `STT_*` ne sont
+> pas commentées (`#`) dans le `.env`.
+
 La transcription brute est déposée automatiquement dans l'espace documentaire (indexée RAG) ; les boutons
 **Résumé** / **Compte-rendu** de l'espace documentaire appellent le LLM configuré (`POST /api/files/:id/derive`).
 
@@ -256,6 +266,14 @@ npm start            # http://localhost:4000
    ```bash
    git pull && docker compose up -d --build
    ```
+   Après une **modification du `.env`**, redémarrer le conteneur pour que l'app relise le fichier
+   (monté en lecture seule dans le conteneur) :
+   ```bash
+   docker compose restart chat
+   docker compose logs chat | grep '\[config\]'   # contrôle : STT/LLM vus par l'app
+   ```
+   (`up -d` seul peut laisser l'ancien conteneur tourner avec l'ancien `.env` si l'image n'a pas changé —
+   c'est le piège classique « STT non configuré » alors que le `.env` est bon.)
 10. **Sauvegarde** : base + fichiers + config WireGuard dans les volumes Docker :
     ```bash
     docker run --rm -v chat_chat-data:/data -v chat_wg-config:/wg -v "$(pwd)":/backup alpine \
@@ -287,8 +305,7 @@ npm start            # http://localhost:4000
 
 - Client → serveur : `{type: "message", content}`, `{type: "history", before?, limit?}`,
   `{type: "signal", to, data}` (relayé vers l'utilisateur `to`, pour WebRTC)
-- Serveur → client : `{type: "hello", user}`, `{type: "message", message}`,
-  `{type: "history", messages}`, `{type: "presence", online: [ids]}`, `{type: "call", call}`,
+- Serveur → client : `{type: "hello", user}`, `{type: "message", message}`, `{type: "history", messages}`, `{type: "presence", online: [ids]}`, `{type: "call", call}`,
   `{type: "signal", from, data}`, `{type: "error", error}`
 
 ## Structure du projet
