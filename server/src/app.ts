@@ -138,6 +138,11 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     broadcast({ type: 'presence', online: onlineUserIds() });
   }
 
+  function postBotMessage(text: string): void {
+    const botRow = db.insertMessage(db.getBot().id, text);
+    broadcast({ type: 'message', message: serializeMessage(db, botRow) });
+  }
+
   function postMessage(userId: number, content: string): SerializedMessage {
     const row = db.insertMessage(userId, content);
     const msg = serializeMessage(db, row);
@@ -168,7 +173,24 @@ export function createServer(config: Config, dataDir: string): ServerContext {
   ): Promise<FileRow | null> {
     if (!sttConfigured(config)) return null;
     try {
-      const result = await transcribeFile(config, path.join(uploadsDir, fileRow.path), displayName, mime);
+      const bigFile = fileRow.size > (config.STT_MAX_FILE_MB ?? 24) * 1048576;
+      if (bigFile) {
+        postBotMessage(
+          `⚙️ « ${displayName} » (${(fileRow.size / 1048576).toFixed(0)} Mo) : compression + découpage en segments avant transcription — cela peut prendre plusieurs minutes.`,
+        );
+      }
+      const result = await transcribeFile(
+        config,
+        path.join(uploadsDir, fileRow.path),
+        displayName,
+        mime,
+        bigFile
+          ? (p) => {
+              if (p.phase === 'prepare') postBotMessage(`⚙️ « ${displayName} » : compression 16 kHz mono en cours…`);
+              else if (p.phase === 'segment') postBotMessage(`🎙️ « ${displayName} » : segment ${p.segment}/${p.totalSegments} transcrit…`);
+            }
+          : undefined,
+      );
       const text = result.text;
       if (!text) return null;
       const costPerMin = config.STT_COST_PER_AUDIO_MIN ?? 0;
@@ -216,11 +238,9 @@ export function createServer(config: Config, dataDir: string): ServerContext {
       // remonter l'erreur réelle dans la chat (sinon on ne voit que le silence) — le fichier reste réessayable (🎙️)
       try {
         const errMsg = (err instanceof Error ? err.message : String(err)).slice(0, 300);
-        const botRow = db.insertMessage(
-          db.getBot().id,
+        postBotMessage(
           `⚠️ Transcription échouée pour « ${displayName} » : ${errMsg} — le fichier reste disponible, réessaie avec le bouton 🎙️ dans l'espace documentaire.`,
         );
-        broadcast({ type: 'message', message: serializeMessage(db, botRow) });
       } catch {
         // ignore
       }

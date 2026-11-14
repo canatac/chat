@@ -7,7 +7,7 @@ import { deriveDocument } from './derive.js';
 import { llmConfigured } from './index.js';
 import { chunkText } from './rag.js';
 import { costUsd } from './pricing.js';
-import { isAudioMime, sttConfigured, transcribeFile } from './stt.js';
+import { isAudioMime, sttConfigured, transcribeFile, type SttProgressCb } from './stt.js';
 
 export interface LinkDeps {
   db: DB;
@@ -64,7 +64,12 @@ export function guessMimeFromUrl(url: URL, contentType?: string | null): string 
   return map[ext] ?? 'application/octet-stream';
 }
 
-export async function fetchToFile(url: URL, destPath: string, maxMb: number): Promise<{ size: number; contentType: string | null }> {
+export async function fetchToFile(
+  url: URL,
+  destPath: string,
+  maxMb: number,
+  onProgress?: (doneBytes: number, totalBytes: number | null) => void,
+): Promise<{ size: number; contentType: string | null }> {
   const res = await fetch(url, { signal: AbortSignal.timeout(600000), redirect: 'follow' });
   if (!res.ok || !res.body) throw new Error(`Téléchargement échoué (HTTP ${res.status})`);
   const declared = Number(res.headers.get('content-length') ?? 0);
@@ -76,6 +81,7 @@ export async function fetchToFile(url: URL, destPath: string, maxMb: number): Pr
     size += chunk.byteLength;
     if (size > cap) throw new Error(`Fichier trop gros (> ${maxMb} Mo pendant le téléchargement)`);
     chunks.push(Buffer.from(chunk));
+    onProgress?.(size, declared > 0 ? declared : null);
   }
   fs.writeFileSync(destPath, Buffer.concat(chunks));
   return { size, contentType: res.headers.get('content-type') };
@@ -109,10 +115,11 @@ async function transcribeAndStore(
   fileRow: FileRow,
   displayName: string,
   mime: string,
+  onProgress?: SttProgressCb,
 ): Promise<{ row: FileRow | null; error: string | null }> {
   if (!sttConfigured(deps.config)) return { row: null, error: null };
   try {
-    const result = await transcribeFile(deps.config, path.join(uploadsDir, fileRow.path), displayName, mime);
+    const result = await transcribeFile(deps.config, path.join(uploadsDir, fileRow.path), displayName, mime, onProgress);
     const text = result.text;
     if (!text) return { row: null, error: 'Réponse STT vide' };
     const costPerMin = deps.config.STT_COST_PER_AUDIO_MIN ?? 0;
@@ -187,12 +194,24 @@ export async function handleLinkCommand(deps: LinkDeps, msg: { id: number; conte
   }
   const label = title || url.hostname + url.pathname;
   deps.postBot(`🔗 Téléchargement de « ${label} »…`);
+  // messages d'avancement postés par le bot (throttlés à 1 toutes les 15 s, forcés aux jalons)
+  let lastProgressPost = 0;
+  const postProgress = (text: string, force = false) => {
+    const now = Date.now();
+    if (force || now - lastProgressPost >= 15000) {
+      lastProgressPost = now;
+      deps.postBot(text);
+    }
+  };
   try {
     const baseName = path.basename(url.pathname) || 'media';
     const safeBase = baseName.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-100) || 'media';
     const storedName = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safeBase}`;
     const dest = path.join(uploadsDir, storedName);
-    const { size, contentType } = await fetchToFile(url, dest, deps.config.MAX_LINK_FETCH_MB);
+    const { size, contentType } = await fetchToFile(url, dest, deps.config.MAX_LINK_FETCH_MB, (done, total) => {
+      const pct = total ? Math.round((done / total) * 100) : null;
+      postProgress(`⬇️ Téléchargement… ${(done / 1048576).toFixed(0)} Mo${pct !== null ? ` (${pct} %)` : ''}`, pct === 100);
+    });
     const mime = guessMimeFromUrl(url, contentType);
     const displayName = safeBase;
     const fileRow = deps.db.insertFile(deps.userId, msg.id, displayName, mime, size, storedName);
@@ -208,7 +227,15 @@ export async function handleLinkCommand(deps: LinkDeps, msg: { id: number; conte
           ? `🎙️ « ${label} » téléchargé (${(size / 1048576).toFixed(1)} Mo). Transcription STT en cours…`
           : `🎙️ « ${label} » téléchargé (${(size / 1048576).toFixed(1)} Mo). STT non configuré : pas de transcription (voir STT_* dans le .env, puis redémarrer le conteneur)`,
       );
-      const tr = await transcribeAndStore(deps, uploadsDir, fileRow, displayName, mime);
+      const tr = await transcribeAndStore(deps, uploadsDir, fileRow, displayName, mime, (p) => {
+        if (p.phase === 'start') {
+          postProgress(`🎙️ Transcription STT en cours (${p.sizeMb?.toFixed(0)} Mo — un long audio peut prendre plusieurs minutes)…`, true);
+        } else if (p.phase === 'prepare') {
+          postProgress(`⚙️ Compression 16 kHz mono avant envoi (${p.sizeMb?.toFixed(0)} Mo)…`, true);
+        } else if (p.phase === 'segment') {
+          postProgress(`🎙️ Transcription : segment ${p.segment}/${p.totalSegments} OK…`, true);
+        }
+      });
       transcriptRow = tr.row;
       sttError = tr.error;
       if (transcriptRow && ffmpegAvailable()) {

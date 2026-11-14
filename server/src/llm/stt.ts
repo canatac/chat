@@ -71,6 +71,16 @@ export interface TranscriptionResult {
   durationSeconds: number | null;
 }
 
+export interface SttProgress {
+  phase: 'start' | 'prepare' | 'segment' | 'done';
+  sizeMb?: number;
+  segment?: number;
+  totalSegments?: number;
+  durationSeconds?: number | null;
+}
+
+export type SttProgressCb = (p: SttProgress) => void;
+
 export function parseTranscriptionVerboseJson(json: unknown): TranscriptionResult {
   const j = json as { text?: string; duration?: number; usage?: { duration?: number; seconds?: number; input_tokens?: number } };
   const durationSeconds = j.duration ?? j.usage?.duration ?? j.usage?.seconds ?? null;
@@ -155,13 +165,23 @@ async function transcribeOneFile(
  * ~25 Mo), il est d'abord compressé en 16 kHz mono opus 32k via ffmpeg (présent dans l'image Docker) ;
  * s'il reste trop gros (audio très long), il est découpé en segments de STT_CHUNK_MINUTES transcrits
  * un par un et recousus, chaque segment recevant comme `prompt` les derniers mots du précédent.
+ * `onProgress` (optionnel) reçoit les jalons start / prepare / segment i/N / done.
  */
-export async function transcribeFile(cfg: Config, filePath: string, filename: string, mime: string): Promise<TranscriptionResult> {
+export async function transcribeFile(
+  cfg: Config,
+  filePath: string,
+  filename: string,
+  mime: string,
+  onProgress?: SttProgressCb,
+): Promise<TranscriptionResult> {
   const stt = toSttConfig(cfg);
   const sizeBytes = fs.statSync(filePath).size;
   const maxBytes = (cfg.STT_MAX_FILE_MB ?? 24) * 1048576;
   if (sizeBytes <= maxBytes) {
-    return transcribeOneFile(cfg, stt, filePath, filename, mime, null);
+    onProgress?.({ phase: 'start', sizeMb: sizeBytes / 1048576 });
+    const r = await transcribeOneFile(cfg, stt, filePath, filename, mime, null);
+    onProgress?.({ phase: 'done', durationSeconds: r.durationSeconds });
+    return r;
   }
   if (!ffmpegAvailable()) {
     throw new Error(
@@ -170,10 +190,13 @@ export async function transcribeFile(cfg: Config, filePath: string, filename: st
   }
   const tmp = path.join(os.tmpdir(), `stt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.webm`);
   try {
+    onProgress?.({ phase: 'prepare', sizeMb: sizeBytes / 1048576 });
     await runFfmpeg(['-y', '-i', filePath, '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'libopus', '-b:a', '32k', tmp]);
     const tmpSize = fs.statSync(tmp).size;
     if (tmpSize <= maxBytes) {
-      return await transcribeOneFile(cfg, stt, tmp, filename.replace(/\.[^.]+$/i, '') + '.webm', 'audio/webm', null);
+      const r = await transcribeOneFile(cfg, stt, tmp, filename.replace(/\.[^.]+$/i, '') + '.webm', 'audio/webm', null);
+      onProgress?.({ phase: 'done', durationSeconds: r.durationSeconds });
+      return r;
     }
     const duration = await ffprobeDurationSeconds(tmp);
     const chunkSec = Math.max(60, (cfg.STT_CHUNK_MINUTES ?? 10) * 60);
@@ -207,13 +230,16 @@ export async function transcribeFile(cfg: Config, filePath: string, filename: st
         parts.push(r.text.trim());
         totalDuration += r.durationSeconds ?? 0;
         prompt = r.text.trim() ? lastWords(r.text, 30) : null;
+        onProgress?.({ phase: 'segment', segment: i + 1, totalSegments: nChunks });
       } finally {
         fs.rmSync(seg, { force: true });
       }
     }
     const text = parts.filter(Boolean).join('\n\n').trim();
     if (!text) throw new Error('Réponse STT invalide (pas de texte)');
-    return { text, durationSeconds: totalDuration > 0 ? totalDuration : null };
+    const result: TranscriptionResult = { text, durationSeconds: totalDuration > 0 ? totalDuration : null };
+    onProgress?.({ phase: 'done', durationSeconds: result.durationSeconds });
+    return result;
   } finally {
     fs.rmSync(tmp, { force: true });
   }
