@@ -85,11 +85,15 @@ export async function transcribeFile(cfg: Config, filePath: string, filename: st
   fd.append('model', req.model);
   fd.append('response_format', req.responseFormat);
   if (req.language) fd.append('language', req.language);
+  // Timeout dimensionné à la taille du fichier (gros médias, ex. 1 h d'émission ~ 80 Mo) :
+  // 5 min de base + ~6 s par Mo, minimum 5 min.
+  const sizeMb = fs.statSync(filePath).size / 1048576;
+  const timeoutMs = Math.max(300_000, 300_000 + Math.round(sizeMb) * 6_000);
   const res = await fetch(req.url, {
     method: 'POST',
     headers: req.headers,
     body: fd,
-    signal: AbortSignal.timeout(300000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
