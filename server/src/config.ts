@@ -25,6 +25,8 @@ const envSchema = z.object({
   STT_LANGUAGE: z.string().optional(),
   RECORDING_MAX_MB: z.coerce.number().int().min(1).max(2000).default(200),
   STT_COST_PER_AUDIO_MIN: z.coerce.number().min(0).optional(),
+  STT_MAX_FILE_MB: z.coerce.number().min(1).max(5000).default(24),
+  STT_CHUNK_MINUTES: z.coerce.number().int().min(1).max(180).default(10),
   TURN_URLS: z.string().default(''),
   TURN_USERNAME: z.string().default(''),
   TURN_CREDENTIAL: z.string().default(''),

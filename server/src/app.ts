@@ -213,6 +213,17 @@ export function createServer(config: Config, dataDir: string): ServerContext {
         costUsd: 0,
         error: err instanceof Error ? err.message : String(err),
       });
+      // remonter l'erreur réelle dans la chat (sinon on ne voit que le silence) — le fichier reste réessayable (🎙️)
+      try {
+        const errMsg = (err instanceof Error ? err.message : String(err)).slice(0, 300);
+        const botRow = db.insertMessage(
+          db.getBot().id,
+          `⚠️ Transcription échouée pour « ${displayName} » : ${errMsg} — le fichier reste disponible, réessaie avec le bouton 🎙️ dans l'espace documentaire.`,
+        );
+        broadcast({ type: 'message', message: serializeMessage(db, botRow) });
+      } catch {
+        // ignore
+      }
       return null;
     }
   }
