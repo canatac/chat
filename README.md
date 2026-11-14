@@ -176,6 +176,14 @@ automatiquement si le STT est configuré ; sinon `POST /api/files/:id/transcribe
 > la log doit afficher `[config] STT : configuré (...)`. Sinon, vérifiez que les lignes `STT_*` ne sont
 > pas commentées (`#`) dans le `.env`.
 
+Les **gros fichiers sont gérés automatiquement** : au-delà de `STT_MAX_FILE_MB` (24 Mo par défaut, limite
+usuelle des API STT type OpenAI ~25 Mo), l'audio est d'abord compressé en 16 kHz mono opus 32k via ffmpeg
+(présent dans l'image Docker), puis si besoin découpé en segments de `STT_CHUNK_MINUTES` (10 min) transcrits
+un par un et recousus (chaque segment reçoit comme `prompt` les derniers mots du précédent). Une 1 h
+d'émission (~80 Mo de m4a) passe donc sans 413. En cas d'échec STT (clé invalide, réseau…), le bot poste
+**l'erreur réelle** dans la chat, la ligne `stt` de `llm_usage` (dashboard admin) la trace, et le fichier
+reste réessayable avec le bouton 🎙️ de l'espace documentaire.
+
 La transcription brute est déposée automatiquement dans l'espace documentaire (indexée RAG) ; les boutons
 **Résumé** / **Compte-rendu** de l'espace documentaire appellent le LLM configuré (`POST /api/files/:id/derive`).
 
