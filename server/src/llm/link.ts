@@ -109,12 +109,12 @@ async function transcribeAndStore(
   fileRow: FileRow,
   displayName: string,
   mime: string,
-): Promise<FileRow | null> {
-  if (!sttConfigured(deps.config)) return null;
+): Promise<{ row: FileRow | null; error: string | null }> {
+  if (!sttConfigured(deps.config)) return { row: null, error: null };
   try {
     const result = await transcribeFile(deps.config, path.join(uploadsDir, fileRow.path), displayName, mime);
     const text = result.text;
-    if (!text) return null;
+    if (!text) return { row: null, error: 'Réponse STT vide' };
     const costPerMin = deps.config.STT_COST_PER_AUDIO_MIN ?? 0;
     const sttCost = result.durationSeconds ? (result.durationSeconds / 60) * costPerMin : 0;
     const date = new Date().toLocaleString('fr-FR');
@@ -143,7 +143,7 @@ async function transcribeAndStore(
       costUsd: sttCost,
       error: null,
     });
-    return transcriptRow;
+    return { row: transcriptRow, error: null };
   } catch (err) {
     deps.db.insertUsage({
       userId: deps.userId,
@@ -157,7 +157,7 @@ async function transcribeAndStore(
       costUsd: 0,
       error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return { row: null, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -198,6 +198,7 @@ export async function handleLinkCommand(deps: LinkDeps, msg: { id: number; conte
     const fileRow = deps.db.insertFile(deps.userId, msg.id, displayName, mime, size, storedName);
 
     let transcriptRow: FileRow | null = null;
+    let sttError: string | null = null;
     let webmRow: FileRow | null = null;
     let crRow: FileRow | null = null;
 
@@ -207,7 +208,9 @@ export async function handleLinkCommand(deps: LinkDeps, msg: { id: number; conte
           ? `🎙️ « ${label} » téléchargé (${(size / 1048576).toFixed(1)} Mo). Transcription STT en cours…`
           : `🎙️ « ${label} » téléchargé (${(size / 1048576).toFixed(1)} Mo). STT non configuré : pas de transcription (voir STT_* dans le .env, puis redémarrer le conteneur)`,
       );
-      transcriptRow = await transcribeAndStore(deps, uploadsDir, fileRow, displayName, mime);
+      const tr = await transcribeAndStore(deps, uploadsDir, fileRow, displayName, mime);
+      transcriptRow = tr.row;
+      sttError = tr.error;
       if (transcriptRow && ffmpegAvailable()) {
         try {
           const webmName = `${Date.now()}-webm-${Math.random().toString(36).slice(2, 8)}.webm`;
@@ -234,7 +237,13 @@ export async function handleLinkCommand(deps: LinkDeps, msg: { id: number; conte
       url.href,
     ];
     if (transcriptRow) lines.push(`Transcription : ${transcriptRow.name} (espace documentaire, indexée RAG)`);
-    else if (isAudioMime(mime, displayName)) lines.push('Transcription : STT non configuré (voir STT_* dans .env)');
+    else if (isAudioMime(mime, displayName)) {
+      lines.push(
+        sttError
+          ? `Transcription : échec STT — ${sttError} (le fichier reste disponible, réessaie avec 🎙️ dans l'espace documentaire)`
+          : 'Transcription : STT non configuré (voir STT_* dans le .env, puis redémarrer le conteneur)',
+      );
+    }
     if (webmRow) lines.push(`Copie webm (opus 64k) : ${webmRow.name} — ${(webmRow.size / 1048576).toFixed(1)} Mo`);
     if (crRow) lines.push(`Compte-rendu généré : ${crRow.name}`);
     deps.postBot(lines.join('\n'));
