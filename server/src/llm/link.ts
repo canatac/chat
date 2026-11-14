@@ -65,7 +65,7 @@ export function guessMimeFromUrl(url: URL, contentType?: string | null): string 
 }
 
 export async function fetchToFile(url: URL, destPath: string, maxMb: number): Promise<{ size: number; contentType: string | null }> {
-  const res = await fetch(url, { signal: AbortSignal.timeout(240000), redirect: 'follow' });
+  const res = await fetch(url, { signal: AbortSignal.timeout(600000), redirect: 'follow' });
   if (!res.ok || !res.body) throw new Error(`Téléchargement échoué (HTTP ${res.status})`);
   const declared = Number(res.headers.get('content-length') ?? 0);
   if (declared > maxMb * 1024 * 1024) throw new Error(`Fichier trop gros (${Math.round(declared / 1048576)} Mo > ${maxMb} Mo)`);
@@ -202,7 +202,11 @@ export async function handleLinkCommand(deps: LinkDeps, msg: { id: number; conte
     let crRow: FileRow | null = null;
 
     if (isAudioMime(mime, displayName)) {
-      deps.postBot(`🎙️ « ${label} » téléchargé (${(size / 1048576).toFixed(1)} Mo). Transcription STT en cours…`);
+      deps.postBot(
+        sttConfigured(deps.config)
+          ? `🎙️ « ${label} » téléchargé (${(size / 1048576).toFixed(1)} Mo). Transcription STT en cours…`
+          : `🎙️ « ${label} » téléchargé (${(size / 1048576).toFixed(1)} Mo). STT non configuré : pas de transcription (voir STT_* dans le .env, puis redémarrer le conteneur)`,
+      );
       transcriptRow = await transcribeAndStore(deps, uploadsDir, fileRow, displayName, mime);
       if (transcriptRow && ffmpegAvailable()) {
         try {

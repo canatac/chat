@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import { z } from 'zod';
 
 const envSchema = z.object({
@@ -36,6 +37,69 @@ export type Config = z.infer<typeof envSchema>;
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return envSchema.parse(env);
+}
+
+const ENV_LINE = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
+
+/**
+ * Parse un fichier .env (format dotenv minimal) : lignes `CLE=valeur`, commentaires `#`,
+ * préfixe `export ` accepté, valeurs entre quotes simples/doubles protégées (le `#` y est conservé),
+ * commentaire en ligne ` # ...` retiré pour les valeurs non quotées, CRLF géré.
+ */
+export function parseEnvFileContent(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const rawLine of text.split(/\r?\n/)) {
+    let line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    if (line.startsWith('export ')) line = line.slice('export '.length).trimStart();
+    const m = line.match(ENV_LINE);
+    if (!m) continue;
+    let value = m[2].trim();
+    if (
+      value.length >= 2 &&
+      ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))
+    ) {
+      value = value.slice(1, -1);
+    } else {
+      const hash = value.indexOf(' #');
+      if (hash >= 0) value = value.slice(0, hash).trimEnd();
+    }
+    out[m[1]] = value;
+  }
+  return out;
+}
+
+/**
+ * Cherche un fichier .env : chemin explicite, ou `ENV_FILE`, ou `/app/.env` (conteneur Docker),
+ * ou `.env` (lancement local). Retourne null si aucun fichier lisible.
+ */
+export function loadEnvFile(filePath?: string): { path: string; vars: Record<string, string> } | null {
+  const candidates = (filePath ? [filePath] : [process.env.ENV_FILE, '/app/.env', '.env'].filter(Boolean)) as string[];
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+        return { path: candidate, vars: parseEnvFileContent(fs.readFileSync(candidate, 'utf8')) };
+      }
+    } catch {
+      // candidat illisible : on essaie le suivant
+    }
+  }
+  return null;
+}
+
+/**
+ * Charge la config en lisant un fichier .env au démarrage. Les variables du fichier **priment**
+ * sur l'environnement du processus : dans Docker, `env_file` n'est relu que lors d'une
+ * recréation du conteneur, donc un simple `docker compose restart chat` après édition du .env
+ * suffit à appliquer la nouvelle config (le .env est monté en lecture seule dans le conteneur).
+ */
+export function loadConfigWithEnvFile(
+  filePath?: string,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): { config: Config; envFile: { path: string; vars: Record<string, string> } | null } {
+  const envFile = loadEnvFile(filePath);
+  const env = { ...baseEnv, ...(envFile?.vars ?? {}) };
+  return { config: loadConfig(env), envFile };
 }
 
 export function isAdminUser(cfg: Config, name: string): boolean {

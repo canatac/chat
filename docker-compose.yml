@@ -9,6 +9,9 @@ services:
       - .env
     volumes:
       - chat-data:/app/data
+      # .env monté en lecture seule et relu par l'app à chaque démarrage :
+      # après édition du .env, `docker compose restart chat` suffit (pas besoin de recréer le conteneur)
+      - ./.env:/app/.env:ro
 
   coturn:
     image: coturn/coturn:4.6.2
