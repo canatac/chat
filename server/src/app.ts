@@ -1,5 +1,6 @@
 import express from 'express';
 import fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -65,6 +66,7 @@ export function serializeMessage(db: DB, row: MessageRow): SerializedMessage {
 }
 
 export interface CallRecording {
+  id: string;
   startedBy: PublicUser;
   startedAt: number;
 }
@@ -100,7 +102,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     return [...online.keys()];
   }
 
-  let activeCall: { row: CallRow; participants: Set<number>; recording: { startedBy: number; startedAt: number } | null } | null = null;
+  let activeCall: { row: CallRow; participants: Set<number>; recording: { id: string; startedBy: number; startedAt: number } | null } | null = null;
 
   function serializeCall(): CallInfo | null {
     if (!activeCall) return null;
@@ -112,7 +114,11 @@ export function createServer(config: Config, dataDir: string): ServerContext {
       participants: [...activeCall.participants].map((id) => toPublicUser(db.getUserById(id) as UserRow)),
       active: true,
       recording: activeCall.recording
-        ? { startedBy: toPublicUser(db.getUserById(activeCall.recording.startedBy) as UserRow), startedAt: activeCall.recording.startedAt }
+        ? {
+            id: activeCall.recording.id,
+            startedBy: toPublicUser(db.getUserById(activeCall.recording.startedBy) as UserRow),
+            startedAt: activeCall.recording.startedAt,
+          }
         : null,
     };
   }
@@ -152,6 +158,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     }
     return msg;
   }
+
 
   async function transcribeAndStore(
     fileRow: FileRow,
@@ -357,30 +364,6 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     res.json({ ok: true });
   });
 
-  app.post('/api/calls/:id/recording/start', auth, (req, res) => {
-    if (!activeCall || activeCall.row.id !== Number(req.params.id)) {
-      res.status(404).json({ error: 'Aucun appel en cours' });
-      return;
-    }
-    if (activeCall.recording) {
-      res.status(409).json({ error: 'Enregistrement déjà en cours', call: serializeCall() });
-      return;
-    }
-    activeCall.recording = { startedBy: req.user?.id ?? -1, startedAt: Date.now() };
-    broadcastCall();
-    res.json({ call: serializeCall() });
-  });
-
-  app.post('/api/calls/:id/recording/stop', auth, (req, res) => {
-    if (!activeCall || activeCall.row.id !== Number(req.params.id)) {
-      res.status(404).json({ error: 'Aucun appel en cours' });
-      return;
-    }
-    activeCall.recording = null;
-    broadcastCall();
-    res.json({ call: serializeCall() });
-  });
-
   const listQuerySchema = z.object({
     limit: z.coerce.number().int().min(1).max(200).default(50),
     before: z.coerce.number().int().optional(),
@@ -509,6 +492,36 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     limits: { fileSize: config.RECORDING_MAX_MB * 1024 * 1024 },
   });
 
+  app.post('/api/calls/:id/recording/start', auth, (req, res) => {
+    if (!activeCall || activeCall.row.id !== Number(req.params.id)) {
+      res.status(404).json({ error: 'Aucun appel en cours' });
+      return;
+    }
+    if (activeCall.recording) {
+      res.status(409).json({ error: 'Enregistrement déjà en cours', call: serializeCall() });
+      return;
+    }
+    activeCall.recording = { id: randomUUID(), startedBy: req.user?.id ?? -1, startedAt: Date.now() };
+    db.insertRecording({ id: activeCall.recording.id, callId: activeCall.row.id, userId: activeCall.recording.startedBy, fileId: null });
+    broadcastCall();
+    res.json({ call: serializeCall(), recordingId: activeCall.recording.id });
+  });
+
+  app.post('/api/calls/:id/recording/stop', auth, (req, res) => {
+    if (!activeCall || activeCall.row.id !== Number(req.params.id)) {
+      res.status(404).json({ error: 'Aucun appel en cours' });
+      return;
+    }
+    const body = z.object({ recordingId: z.string().optional() }).safeParse(req.body ?? {});
+    if (body.success && body.data.recordingId && activeCall.recording && body.data.recordingId !== activeCall.recording.id) {
+      res.status(409).json({ error: 'recordingId ne correspond pas à la prise en cours', call: serializeCall() });
+      return;
+    }
+    activeCall.recording = null;
+    broadcastCall();
+    res.json({ call: serializeCall() });
+  });
+
   app.post('/api/calls/:id/recording', auth, recordUpload.single('file'), (req, res) => {
     const call = db.getCallById(Number(req.params.id));
     if (!call) {
@@ -518,6 +531,29 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     if (!req.file) {
       res.status(400).json({ error: 'Champ "file" requis' });
       return;
+    }
+    const recordingId = typeof req.body.recordingId === 'string' && req.body.recordingId ? req.body.recordingId : null;
+    if (recordingId) {
+      const existing = db.getRecording(recordingId);
+      if (!existing) {
+        res.status(400).json({ error: 'recordingId inconnu' });
+        return;
+      }
+      if (existing.user_id !== (req.user?.id ?? -1)) {
+        res.status(403).json({ error: "Seul l'auteur de la prise peut déposer son fichier" });
+        return;
+      }
+      if (existing.file_id) {
+        const file = db.getFileById(existing.file_id);
+        const messageRow = file?.message_id ? db.getMessageById(file.message_id) : undefined;
+        res.status(200).json({
+          file: file ? toPublicFile(file) : null,
+          message: messageRow ? serializeMessage(db, messageRow) : null,
+          duplicate: true,
+          transcriptPending: false,
+        });
+        return;
+      }
     }
     const uploaded = req.file;
     const displayName = Buffer.from(uploaded.originalname, 'latin1').toString('utf8');
@@ -532,12 +568,13 @@ export function createServer(config: Config, dataDir: string): ServerContext {
       uploaded.filename,
       call.id,
     );
+    if (recordingId) db.setRecordingFile(recordingId, fileRow.id);
     const message = serializeMessage(db, messageRow);
     broadcast({ type: 'message', message });
 
     void transcribeAndStore(fileRow, displayName, uploaded.mimetype, req.user?.id ?? -1);
 
-    res.status(201).json({ file: toPublicFile(fileRow), message, transcriptPending: sttConfigured(config) });
+    res.status(201).json({ file: toPublicFile(fileRow), message, transcriptPending: sttConfigured(config), recordingId });
   });
 
   const deriveSchema = z.object({ kind: z.enum(['resume', 'cr']) });
@@ -556,13 +593,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     try {
       const kind: DeriveKind = parsed.data.kind;
       const row = await deriveDocument({ db, config, userId: req.user?.id ?? -1, uploadsDir }, file, kind);
-      res.status(201).json({
-        file: {
-          ...toPublicFile(row),
-          messageId: row.message_id,
-          user: { id: row.user_id, name: db.getUserById(row.user_id)?.name ?? '' },
-        },
-      });
+      res.status(201).json({ file: { ...toPublicFile(row), messageId: row.message_id, user: { id: row.user_id, name: db.getUserById(row.user_id)?.name ?? '' } } });
     } catch (err) {
       if (err instanceof HttpError) {
         res.status(err.statusCode).json({ error: err.message });
@@ -679,6 +710,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
       limit: z.number().optional(),
       to: z.number().optional(),
       data: z.unknown().optional(),
+      callId: z.number().optional(),
     });
 
     ws.on('message', (data) => {
@@ -699,9 +731,18 @@ export function createServer(config: Config, dataDir: string): ServerContext {
         const rows = db.listMessages(limit, typeof msg.data.before === 'number' ? msg.data.before : undefined);
         ws.send(JSON.stringify({ type: 'history', messages: rows.reverse().map((r) => serializeMessage(db, r)) }));
       } else if (msg.data.type === 'signal' && typeof msg.data.to === 'number') {
+        if (
+          msg.data.callId !== undefined &&
+          (!activeCall ||
+            activeCall.row.id !== msg.data.callId ||
+            !activeCall.participants.has(user.id) ||
+            !activeCall.participants.has(msg.data.to))
+        ) {
+          return;
+        }
         const target = online.get(msg.data.to);
         if (target) {
-          const payload = JSON.stringify({ type: 'signal', from: user.id, data: msg.data.data });
+          const payload = JSON.stringify({ type: 'signal', from: user.id, callId: msg.data.callId ?? null, data: msg.data.data });
           for (const c of target) {
             if (c.readyState === WebSocket.OPEN) c.send(payload);
           }
@@ -716,6 +757,10 @@ export function createServer(config: Config, dataDir: string): ServerContext {
         if (set.size === 0) {
           online.delete(user.id);
           broadcastPresence();
+          if (activeCall?.recording && activeCall.recording.startedBy === user.id) {
+            activeCall.recording = null;
+            broadcastCall();
+          }
         }
       }
     };
