@@ -150,6 +150,13 @@ async function transcribeAndStore(
       costUsd: sttCost,
       error: null,
     });
+    deps.db.insertFileEvent({
+      fileId: transcriptRow.id,
+      folderId: fileRow.folder_id ?? null,
+      action: 'file_transcribed',
+      detail: `« ${displayName} » transcrit via /lien (${text.length} caractères)`,
+      userId: deps.userId,
+    });
     return { row: transcriptRow, error: null };
   } catch (err) {
     deps.db.insertUsage({
@@ -215,6 +222,13 @@ export async function handleLinkCommand(deps: LinkDeps, msg: { id: number; conte
     const mime = guessMimeFromUrl(url, contentType);
     const displayName = safeBase;
     const fileRow = deps.db.insertFile(deps.userId, msg.id, displayName, mime, size, storedName);
+    deps.db.insertFileEvent({
+      fileId: fileRow.id,
+      folderId: null,
+      action: 'file_created',
+      detail: `« ${displayName} » téléchargé via /lien (${(size / 1048576).toFixed(1)} Mo, ${url.hostname})`,
+      userId: deps.userId,
+    });
 
     let transcriptRow: FileRow | null = null;
     let sttError: string | null = null;
