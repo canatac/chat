@@ -51,9 +51,10 @@ export const api = {
     req<{ messages: Message[] }>(`/api/messages?limit=${limit}${before !== undefined ? `&before=${before}` : ''}`),
   send: (content: string) =>
     req<{ message: Message }>('/api/messages', { method: 'POST', body: JSON.stringify({ content }) }),
-  files: (query = '', before?: number, limit = 100, folder?: number | null) =>
+  files: (query = '', before?: number, limit = 100, folder?: number | null, signal?: AbortSignal) =>
     req<{ files: FileItem[] }>(
       `/api/files?limit=${limit}${before !== undefined ? `&before=${before}` : ''}${query ? `&query=${encodeURIComponent(query)}` : ''}${folder !== undefined ? `&folder=${folder === null ? 'root' : folder}` : ''}`,
+      { signal },
     ),
   uploadFile: async (file: File, message: string, post: boolean, folderId?: number | null) => {
     const token = getToken();
@@ -130,7 +131,7 @@ export const api = {
   transcribe: (fileId: number) =>
     req<{ file: FileItem }>(`/api/files/${fileId}/transcribe`, { method: 'POST' }),
   // explorateur de documents
-  folders: () => req<{ folders: Folder[] }>('/api/folders'),
+  folders: (signal?: AbortSignal) => req<{ folders: Folder[] }>('/api/folders', { signal }),
   createFolder: (name: string, parentId: number | null) =>
     req<{ folder: Folder }>('/api/folders', { method: 'POST', body: JSON.stringify({ name, parentId }) }),
   patchFolder: (id: number, patch: { name?: string; parentId?: number | null }) =>
