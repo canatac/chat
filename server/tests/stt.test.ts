@@ -13,6 +13,7 @@ import {
   sttConfigured,
   toSttConfig,
   transcribeFile,
+  type SttProgress,
 } from '../src/llm/stt.js';
 
 const cfg = loadConfig({ LLM_API_KEY: '', STT_API_KEY: '' });
@@ -135,7 +136,7 @@ function sttCfg(baseUrl: string, extra: Record<string, string> = {}) {
   });
 }
 
-test('transcribeFile : fichier sous la limite = 1 appel direct vers le STT (mock)', async () => {
+test('transcribeFile : fichier sous la limite = 1 appel direct vers le STT (mock) + jalons start/done', async () => {
   let calls = 0;
   await withMockStt(
     (_req, res, c) => {
@@ -148,10 +149,14 @@ test('transcribeFile : fichier sous la limite = 1 appel direct vers le STT (mock
       try {
         const f = path.join(dir, 'note.webm');
         fs.writeFileSync(f, Buffer.alloc(1024, 1));
-        const r = await transcribeFile(sttCfg(baseUrl), f, 'note.webm', 'audio/webm');
+        const events: SttProgress[] = [];
+        const r = await transcribeFile(sttCfg(baseUrl), f, 'note.webm', 'audio/webm', (p) => events.push(p));
         assert.equal(calls, 1);
         assert.equal(r.text, 'transcription de test');
         assert.equal(r.durationSeconds, 12);
+        assert.equal(events[0]?.phase, 'start');
+        assert.equal(events[events.length - 1]?.phase, 'done');
+        assert.equal(events[events.length - 1]?.durationSeconds, 12);
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
       }
@@ -201,7 +206,7 @@ test('transcribeFile : gros fichier sans ffmpeg -> erreur explicite (pas de "non
   );
 });
 
-test('transcribeFile : gros fichier avec ffmpeg -> compression 16k mono puis segments recousus (5 appels pour 5 min avec STT_CHUNK_MINUTES=1)', async (t) => {
+test('transcribeFile : gros fichier avec ffmpeg -> compression 16k mono puis segments recousus (5 appels pour 5 min avec STT_CHUNK_MINUTES=1) + jalons prepare/segment/done', async (t) => {
   if (!ffmpegAvailable()) return t.skip('ffmpeg absent dans cet environnement');
   const { execFileSync } = await import('node:child_process');
   let calls = 0;
@@ -217,11 +222,18 @@ test('transcribeFile : gros fichier avec ffmpeg -> compression 16k mono puis seg
         const wav = path.join(dir, 'long.wav');
         // 300 s de silence 16 kHz mono = 9,6 Mo > STT_MAX_FILE_MB=1 -> downscale opus 32k (~1,2 Mo > 1 Mo) -> 5 segments de 60 s
         execFileSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'anullsrc=r=16000:cl=mono', '-t', '300', wav], { stdio: 'ignore' });
-        const r = await transcribeFile(sttCfg(baseUrl, { STT_MAX_FILE_MB: '1', STT_CHUNK_MINUTES: '1' }), wav, 'long.wav', 'audio/wav');
+        const events: SttProgress[] = [];
+        const r = await transcribeFile(sttCfg(baseUrl, { STT_MAX_FILE_MB: '1', STT_CHUNK_MINUTES: '1' }), wav, 'long.wav', 'audio/wav', (p) => events.push(p));
         assert.equal(calls, 5);
         assert.ok(r.text.includes('partie 1'));
         assert.ok(r.text.includes('partie 5'));
         assert.equal(r.durationSeconds, 300);
+        assert.ok(events.some((e) => e.phase === 'prepare'));
+        const segs = events.filter((e) => e.phase === 'segment');
+        assert.equal(segs.length, 5);
+        assert.deepEqual(segs.map((e) => e.segment), [1, 2, 3, 4, 5]);
+        assert.ok(segs.every((e) => e.totalSegments === 5));
+        assert.equal(events[events.length - 1]?.phase, 'done');
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
       }

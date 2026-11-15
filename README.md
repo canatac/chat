@@ -198,6 +198,10 @@ La transcription brute est déposée automatiquement dans l'espace documentaire 
    l'archivage léger (1 h de m4a ≈ 60-90 Mo → ~30 Mo en webm).
 4. Le bot poste un récap dans la chat avec les noms des fichiers créés (tous dans l'espace documentaire, indexés RAG).
 
+Pendant l'opération, le bot poste des **indicateurs d'avancement** dans la chat (utile pour les gros médias,
+1 h ≈ plusieurs minutes) : `⬇️ Téléchargement… X Mo (Y %)`, `⚙️ Compression 16 kHz mono…`,
+`🎙️ Transcription : segment i/N OK…`. En cas d'échec, il poste l'erreur réelle (HTTP …).
+
 Coût indicatif pour 1 h d'émission (Scaleway) : transcription 0,003 €/min ≈ **0,18 €** + CR LLM (quelques
 centimes selon le modèle), tracé dans le dashboard admin.
 
