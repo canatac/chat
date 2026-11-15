@@ -150,7 +150,6 @@ export class DB {
         updated_at INTEGER
       );
       CREATE INDEX IF NOT EXISTS idx_files_id ON files(id);
-      CREATE INDEX IF NOT EXISTS idx_files_folder ON files(folder_id);
       -- journal d'audit : PAS de clé étrangère sur file_id/folder_id (le journal doit survivre
       -- à la suppression du fichier/dossier ; foreign_keys est ON dans node:sqlite)
       CREATE TABLE IF NOT EXISTS file_events (
@@ -218,6 +217,7 @@ export class DB {
         this.db.exec(`ALTER TABLE files ADD COLUMN ${col} ${def}`);
       }
     }
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_files_folder ON files(folder_id)');
   }
 
   createUser(name: string, passHash: string): UserRow {

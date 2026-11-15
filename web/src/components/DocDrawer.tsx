@@ -126,7 +126,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
     try {
       const [f, r] = await Promise.all([
         api.folders(),
-        api.files(q, undefined, 300, q ? undefined : folderId),
+        api.files(q, undefined, 200, q ? undefined : folderId),
       ]);
       setFolders(f.folders);
       setFiles(r.files);
