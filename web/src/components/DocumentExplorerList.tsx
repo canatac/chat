@@ -8,16 +8,12 @@ import PictureAsPdfOutlinedIcon from '@mui/icons-material/PictureAsPdfOutlined';
 import SearchOffOutlinedIcon from '@mui/icons-material/SearchOffOutlined';
 import { Box, ButtonBase, CircularProgress, IconButton, Tooltip, Typography } from '@mui/material';
 import type { ReactNode } from 'react';
+import { chatColors } from '../theme';
+import { formatFileSize } from '../formatFileSize';
 import type { FileItem, Folder } from '../types';
 
 export const explorerColors = {
-  surface: '#ffffff',
-  background: '#f3f7f7',
-  border: '#dce7e7',
-  ink: '#142f33',
-  muted: '#50666b',
-  accent: '#11655c',
-  accentSoft: '#e5f3ef',
+  ...chatColors,
   folder: '#865917',
   folderSoft: '#fcf0dc',
 };
@@ -36,16 +32,8 @@ interface Props {
   onMenu: (target: DocumentItem, anchor: HTMLElement) => void;
 }
 
-const sizeFormatter = new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 1 });
 const dayFormatter = new Intl.DateTimeFormat('fr-FR', { day: 'numeric', month: 'short', year: 'numeric' });
 const fileColumns = 'minmax(0, 1fr) 106px 70px 94px';
-
-export function formatFileSize(bytes: number) {
-  if (bytes < 1024) return sizeFormatter.format(bytes) + ' o';
-  if (bytes < 1024 * 1024) return sizeFormatter.format(bytes / 1024) + ' Ko';
-  if (bytes < 1024 * 1024 * 1024) return sizeFormatter.format(bytes / (1024 * 1024)) + ' Mo';
-  return sizeFormatter.format(bytes / (1024 * 1024 * 1024)) + ' Go';
-}
 
 const actionStyle = {
   color: explorerColors.muted,
