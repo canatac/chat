@@ -31,6 +31,35 @@ export interface FileRow {
   path: string;
   call_id: number | null;
   created_at: number;
+  folder_id: number | null;
+  updated_at: number | null;
+}
+
+export interface FolderRow {
+  id: number;
+  name: string;
+  parent_id: number | null;
+  created_by: number;
+  created_at: number;
+  updated_at: number | null;
+}
+
+export interface FolderListRow extends FolderRow {
+  user_name: string;
+}
+
+export interface FileEventRow {
+  id: number;
+  file_id: number | null;
+  folder_id: number | null;
+  action: string;
+  detail: string;
+  user_id: number;
+  created_at: number;
+}
+
+export interface FileEventListRow extends FileEventRow {
+  user_name: string;
 }
 
 export interface RecordingRow {
@@ -98,6 +127,15 @@ export class DB {
         created_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_messages_id ON messages(id);
+      CREATE TABLE IF NOT EXISTS folders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        parent_id INTEGER REFERENCES folders(id) ON DELETE CASCADE,
+        created_by INTEGER NOT NULL REFERENCES users(id),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id);
       CREATE TABLE IF NOT EXISTS files (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL REFERENCES users(id),
@@ -107,9 +145,25 @@ export class DB {
         size INTEGER NOT NULL,
         path TEXT NOT NULL,
         call_id INTEGER REFERENCES calls(id),
-        created_at INTEGER NOT NULL
+        folder_id INTEGER REFERENCES folders(id) ON DELETE SET NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER
       );
       CREATE INDEX IF NOT EXISTS idx_files_id ON files(id);
+      CREATE INDEX IF NOT EXISTS idx_files_folder ON files(folder_id);
+      -- journal d'audit : PAS de clé étrangère sur file_id/folder_id (le journal doit survivre
+      -- à la suppression du fichier/dossier ; foreign_keys est ON dans node:sqlite)
+      CREATE TABLE IF NOT EXISTS file_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_id INTEGER,
+        folder_id INTEGER,
+        action TEXT NOT NULL,
+        detail TEXT NOT NULL DEFAULT '',
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_file_events_file ON file_events(file_id);
+      CREATE INDEX IF NOT EXISTS idx_file_events_folder ON file_events(folder_id);
       CREATE TABLE IF NOT EXISTS calls (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         title TEXT NOT NULL DEFAULT '',
@@ -154,6 +208,15 @@ export class DB {
     const fileCols = this.db.prepare('PRAGMA table_info(files)').all() as unknown as { name: string }[];
     if (!fileCols.some((c) => c.name === 'call_id')) {
       this.db.exec('ALTER TABLE files ADD COLUMN call_id INTEGER REFERENCES calls(id)');
+    }
+    // migrations idempotentes (bases existantes) : dossiers + updated_at sur files
+    for (const [col, def] of [
+      ['folder_id', 'INTEGER REFERENCES folders(id) ON DELETE SET NULL'],
+      ['updated_at', 'INTEGER'],
+    ] as const) {
+      if (!fileCols.some((c) => c.name === col)) {
+        this.db.exec(`ALTER TABLE files ADD COLUMN ${col} ${def}`);
+      }
     }
   }
 
@@ -216,10 +279,11 @@ export class DB {
     size: number,
     relPath: string,
     callId: number | null = null,
+    folderId: number | null = null,
   ): FileRow {
     const info = this.db
-      .prepare('INSERT INTO files (user_id, message_id, name, mime, size, path, call_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(userId, messageId, name, mime, size, relPath, callId, Date.now());
+      .prepare('INSERT INTO files (user_id, message_id, name, mime, size, path, call_id, folder_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(userId, messageId, name, mime, size, relPath, callId, folderId, Date.now());
     return this.getFileById(Number(info.lastInsertRowid)) as FileRow;
   }
 
@@ -227,7 +291,7 @@ export class DB {
     return this.db.prepare('SELECT * FROM files WHERE id = ?').get(id) as unknown as FileRow | undefined;
   }
 
-  listFiles(limit: number, before?: number, query?: string): FileListRow[] {
+  listFiles(limit: number, before?: number, query?: string, folderId?: number | null): FileListRow[] {
     let sql = 'SELECT f.*, u.name AS user_name FROM files f JOIN users u ON u.id = f.user_id';
     const params: (string | number)[] = [];
     const conds: string[] = [];
@@ -239,10 +303,25 @@ export class DB {
       conds.push('f.name LIKE ?');
       params.push(`%${query}%`);
     }
+    if (folderId !== undefined) {
+      if (folderId === null) conds.push('f.folder_id IS NULL');
+      else {
+        conds.push('f.folder_id = ?');
+        params.push(folderId);
+      }
+    }
     if (conds.length) sql += ' WHERE ' + conds.join(' AND ');
-    sql += ' ORDER BY f.id DESC LIMIT ?';
+    sql += ' ORDER BY f.name COLLATE NOCASE, f.id DESC LIMIT ?';
     params.push(limit);
     return this.db.prepare(sql).all(...params) as unknown as FileListRow[];
+  }
+
+  listFilesInFolders(folderIds: number[]): FileListRow[] {
+    if (!folderIds.length) return [];
+    const marks = folderIds.map(() => '?').join(',');
+    return this.db
+      .prepare(`SELECT f.*, u.name AS user_name FROM files f JOIN users u ON u.id = f.user_id WHERE f.folder_id IN (${marks})`)
+      .all(...folderIds) as unknown as FileListRow[];
   }
 
   listFilesByMessage(messageId: number): FileRow[] {
@@ -354,6 +433,138 @@ export class DB {
         "SELECT date(created_at / 1000, 'unixepoch') AS day, COUNT(*) AS calls, COALESCE(SUM(total_tokens), 0) AS tokens, COALESCE(SUM(cost_usd), 0) AS costUsd FROM llm_usage GROUP BY day ORDER BY day DESC LIMIT 30",
       )
       .all() as unknown as { day: string; calls: number; tokens: number; costUsd: number }[];
+  }
+
+  // ---------- dossiers ----------
+  createFolder(userId: number, name: string, parentId: number | null): FolderRow {
+    const info = this.db
+      .prepare('INSERT INTO folders (name, parent_id, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, NULL)')
+      .run(name, parentId, userId, Date.now());
+    return this.getFolderById(Number(info.lastInsertRowid)) as FolderRow;
+  }
+
+  getFolderById(id: number): FolderRow | undefined {
+    return this.db.prepare('SELECT * FROM folders WHERE id = ?').get(id) as unknown as FolderRow | undefined;
+  }
+
+  listFolders(): FolderListRow[] {
+    return this.db
+      .prepare('SELECT f.*, u.name AS user_name FROM folders f JOIN users u ON u.id = f.created_by ORDER BY f.name COLLATE NOCASE, f.id')
+      .all() as unknown as FolderListRow[];
+  }
+
+  folderExistsWithSiblingName(parentId: number | null, name: string, excludeId?: number): boolean {
+    const row =
+      excludeId !== undefined
+        ? (this.db
+            .prepare('SELECT COUNT(*) AS n FROM folders WHERE parent_id IS ? AND lower(name) = lower(?) AND id != ?')
+            .get(parentId, name, excludeId) as { n: number })
+        : (this.db
+            .prepare('SELECT COUNT(*) AS n FROM folders WHERE parent_id IS ? AND lower(name) = lower(?)')
+            .get(parentId, name) as { n: number });
+    return row.n > 0;
+  }
+
+  updateFolder(id: number, patch: { name?: string; parentId?: number | null }): void {
+    if (patch.name !== undefined && patch.parentId !== undefined) {
+      this.db.prepare('UPDATE folders SET name = ?, parent_id = ?, updated_at = ? WHERE id = ?').run(patch.name, patch.parentId, Date.now(), id);
+    } else if (patch.name !== undefined) {
+      this.db.prepare('UPDATE folders SET name = ?, updated_at = ? WHERE id = ?').run(patch.name, Date.now(), id);
+    } else if (patch.parentId !== undefined) {
+      this.db.prepare('UPDATE folders SET parent_id = ?, updated_at = ? WHERE id = ?').run(patch.parentId, Date.now(), id);
+    }
+  }
+
+  isFolderDescendant(folderId: number, ancestorId: number): boolean {
+    let cur: number | null = folderId;
+    const seen = new Set<number>();
+    while (cur !== null && !seen.has(cur)) {
+      if (cur === ancestorId) return true;
+      seen.add(cur);
+      const row = this.db.prepare('SELECT parent_id FROM folders WHERE id = ?').get(cur) as { parent_id: number | null } | undefined;
+      cur = row?.parent_id ?? null;
+    }
+    return false;
+  }
+
+  listSubfolderIds(folderId: number): number[] {
+    const childrenOf = new Map<number | null, number[]>();
+    for (const f of this.listFolders()) {
+      const arr = childrenOf.get(f.parent_id) ?? [];
+      arr.push(f.id);
+      childrenOf.set(f.parent_id, arr);
+    }
+    const out: number[] = [];
+    const stack = [...(childrenOf.get(folderId) ?? [])];
+    while (stack.length) {
+      const id = stack.pop() as number;
+      out.push(id);
+      stack.push(...(childrenOf.get(id) ?? []));
+    }
+    return out;
+  }
+
+  folderCounts(folderId: number): { folders: number; files: number } {
+    const folders = this.db.prepare('SELECT COUNT(*) AS n FROM folders WHERE parent_id = ?').get(folderId) as { n: number };
+    const files = this.db.prepare('SELECT COUNT(*) AS n FROM files WHERE folder_id = ?').get(folderId) as { n: number };
+    return { folders: folders.n, files: files.n };
+  }
+
+  deleteFolder(id: number): void {
+    this.db.prepare('DELETE FROM folders WHERE id = ?').run(id);
+  }
+
+  // ---------- fichiers : renommer / déplacer / supprimer ----------
+  renameFile(id: number, name: string): void {
+    this.db.prepare('UPDATE files SET name = ?, updated_at = ? WHERE id = ?').run(name, Date.now(), id);
+  }
+
+  moveFile(id: number, folderId: number | null): void {
+    this.db.prepare('UPDATE files SET folder_id = ?, updated_at = ? WHERE id = ?').run(folderId, Date.now(), id);
+  }
+
+  fileNameExistsInFolder(folderId: number | null, name: string, excludeId?: number): boolean {
+    const row =
+      excludeId !== undefined
+        ? (this.db
+            .prepare('SELECT COUNT(*) AS n FROM files WHERE folder_id IS ? AND lower(name) = lower(?) AND id != ?')
+            .get(folderId, name, excludeId) as { n: number })
+        : (this.db
+            .prepare('SELECT COUNT(*) AS n FROM files WHERE folder_id IS ? AND lower(name) = lower(?)')
+            .get(folderId, name) as { n: number });
+    return row.n > 0;
+  }
+
+  deleteFile(id: number): void {
+    this.db.prepare('DELETE FROM doc_chunks WHERE file_id = ?').run(id);
+    this.db.prepare('UPDATE recordings SET file_id = NULL WHERE file_id = ?').run(id);
+    this.db.prepare('DELETE FROM files WHERE id = ?').run(id);
+  }
+
+  // ---------- journal de modifications ----------
+  insertFileEvent(e: { fileId: number | null; folderId: number | null; action: string; detail?: string; userId: number }): FileEventRow {
+    const info = this.db
+      .prepare('INSERT INTO file_events (file_id, folder_id, action, detail, user_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(e.fileId, e.folderId, e.action, e.detail ?? '', e.userId, Date.now());
+    return this.db.prepare('SELECT * FROM file_events WHERE id = ?').get(Number(info.lastInsertRowid)) as unknown as FileEventRow;
+  }
+
+  listFileEvents(opts: { fileId?: number; folderId?: number; limit?: number }): FileEventListRow[] {
+    const conds: string[] = [];
+    const params: (string | number)[] = [];
+    if (opts.fileId !== undefined) {
+      conds.push('e.file_id = ?');
+      params.push(opts.fileId);
+    }
+    if (opts.folderId !== undefined) {
+      conds.push('e.folder_id = ?');
+      params.push(opts.folderId);
+    }
+    let sql = 'SELECT e.*, u.name AS user_name FROM file_events e JOIN users u ON u.id = e.user_id';
+    if (conds.length) sql += ' WHERE ' + conds.join(' AND ');
+    sql += ' ORDER BY e.id DESC LIMIT ?';
+    params.push(opts.limit ?? 100);
+    return this.db.prepare(sql).all(...params) as unknown as FileEventListRow[];
   }
 
   close(): void {
