@@ -28,8 +28,11 @@ export class ChatSocket {
     this.token = token;
   }
 
-  onMessage(handler: MessageHandler): void {
+  onMessage(handler: MessageHandler): () => void {
     this.messageHandlers.add(handler);
+    return () => {
+      this.messageHandlers.delete(handler);
+    };
   }
 
   onStatus(handler: StatusHandler): void {

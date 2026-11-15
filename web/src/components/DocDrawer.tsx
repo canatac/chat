@@ -1,27 +1,26 @@
-import AudioFileIcon from '@mui/icons-material/AudioFile';
-import CreateNewFolderIcon from '@mui/icons-material/CreateNewFolder';
+import CloseIcon from '@mui/icons-material/Close';
+import CreateNewFolderOutlinedIcon from '@mui/icons-material/CreateNewFolderOutlined';
 import DeleteIcon from '@mui/icons-material/Delete';
 import DescriptionIcon from '@mui/icons-material/Description';
 import DownloadIcon from '@mui/icons-material/Download';
 import DriveFileMoveIcon from '@mui/icons-material/DriveFileMove';
-import FolderIcon from '@mui/icons-material/Folder';
+import FolderOpenOutlinedIcon from '@mui/icons-material/FolderOpenOutlined';
+import FolderOutlinedIcon from '@mui/icons-material/FolderOutlined';
 import HistoryIcon from '@mui/icons-material/History';
-import InsertDriveFileIcon from '@mui/icons-material/InsertDriveFile';
-import MoreVertIcon from '@mui/icons-material/MoreVert';
-import PictureAsPdfIcon from '@mui/icons-material/PictureAsPdf';
+import HomeOutlinedIcon from '@mui/icons-material/HomeOutlined';
 import RecordVoiceOverIcon from '@mui/icons-material/RecordVoiceOver';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import RenameIcon from '@mui/icons-material/DriveFileRenameOutline';
 import SearchIcon from '@mui/icons-material/Search';
 import SummarizeIcon from '@mui/icons-material/Summarize';
-import UploadFileIcon from '@mui/icons-material/UploadFile';
+import UploadFileOutlinedIcon from '@mui/icons-material/UploadFileOutlined';
 import {
-  Avatar,
+  Alert,
   Box,
   Breadcrumbs,
   Button,
   Checkbox,
-  Chip,
+  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -30,23 +29,26 @@ import {
   Drawer,
   FormControlLabel,
   IconButton,
+  InputAdornment,
+  LinearProgress,
   Link,
   List,
   ListItem,
-  ListItemAvatar,
   ListItemButton,
   ListItemIcon,
   ListItemText,
   Menu,
   MenuItem,
+  Skeleton,
   TextField,
   Tooltip,
   Typography,
 } from '@mui/material';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
+import type { FileItem, Folder } from '../types';
 import type { ChatSocket } from '../ws';
-import type { FileEvent, FileItem, Folder } from '../types';
+import DocumentExplorerList, { explorerColors, formatFileSize, type DocumentItem } from './DocumentExplorerList';
 
 interface Props {
   open: boolean;
@@ -54,430 +56,500 @@ interface Props {
   socket: ChatSocket | null;
 }
 
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} o`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} Ko`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} Mo`;
-}
+type NameEdit =
+  | { mode: 'new-folder' }
+  | { mode: 'rename-folder'; folder: Folder }
+  | { mode: 'rename-file'; file: FileItem };
 
-function formatDateTime(iso: string | null): string {
-  if (!iso) return '—';
-  return new Date(iso).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' });
-}
+type FileDetail = Awaited<ReturnType<typeof api.fileDetail>>;
 
-function fileIcon(f: FileItem) {
-  if (f.mime.startsWith('audio/')) return <AudioFileIcon />;
-  if (f.mime === 'application/pdf') return <PictureAsPdfIcon />;
-  return <InsertDriveFileIcon />;
-}
+const dateTime = new Intl.DateTimeFormat('fr-FR', { dateStyle: 'medium', timeStyle: 'short' });
+const FILE_LIMIT = 200;
 
 const ACTION_LABELS: Record<string, string> = {
   file_created: 'Déposé',
   file_renamed: 'Renommé',
   file_moved: 'Déplacé',
   file_deleted: 'Supprimé',
-  file_transcribed: 'Transcrit (STT)',
-  file_derived: 'Résumé / CR généré (LLM)',
-  folder_created: 'Dossier créé',
-  folder_renamed: 'Dossier renommé',
-  folder_moved: 'Dossier déplacé',
-  folder_deleted: 'Dossier supprimé',
+  file_transcribed: 'Transcrit',
+  file_derived: 'Résumé ou compte-rendu généré',
 };
 
-type MenuTarget =
-  | { kind: 'folder'; item: Folder }
-  | { kind: 'file'; item: FileItem }
-  | null;
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
+}
 
-type NameDialog =
-  | { mode: 'new-folder' }
-  | { mode: 'rename-folder'; folder: Folder }
-  | { mode: 'rename-file'; file: FileItem }
-  | null;
-
-type MoveDialog =
-  | { kind: 'folder'; item: Folder }
-  | { kind: 'file'; item: FileItem }
-  | null;
-
-type DeleteDialog =
-  | { kind: 'folder'; item: Folder; counts: { folders: number; files: number; directFiles: number } | null }
-  | { kind: 'file'; item: FileItem }
-  | null;
+const buttonStyle = {
+  textTransform: 'none',
+  fontWeight: 700,
+  whiteSpace: 'nowrap',
+  minHeight: 42,
+  borderRadius: '10px',
+  '@media (max-width:359px)': {
+    px: 0.75,
+    fontSize: '0.79rem',
+    '& .MuiButton-startIcon': { display: 'none' },
+  },
+};
+const primaryButtonStyle = {
+  ...buttonStyle,
+  bgcolor: explorerColors.accent,
+  '&:hover': { bgcolor: '#0d524b' },
+};
+const headerActionStyle = {
+  color: explorerColors.muted,
+  border: '1px solid ' + explorerColors.border,
+  borderRadius: '10px',
+  width: 40,
+  height: 40,
+};
+const horizontalPadding = { xs: 2, sm: 3.25 };
+const preparedDialogProps = { fullWidth: true, maxWidth: 'xs' as const };
 
 export default function DocDrawer({ open, onClose, socket }: Props) {
   const [folders, setFolders] = useState<Folder[]>([]);
-  const [files, setFiles] = useState<FileItem[]>([]);
+  const [listing, setListing] = useState<{ scope: string; files: FileItem[] } | null>(null);
   const [currentId, setCurrentId] = useState<number | null>(null);
   const [query, setQuery] = useState('');
+  const [revision, setRevision] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [listError, setListError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [menu, setMenu] = useState<{ anchor: HTMLElement; target: MenuTarget } | null>(null);
-  const [nameDialog, setNameDialog] = useState<NameDialog>(null);
+  const [downloading, setDownloading] = useState<ReadonlySet<number>>(new Set());
+
+  const [menu, setMenu] = useState<{ anchor: HTMLElement; target: DocumentItem } | null>(null);
+  const [nameDialog, setNameDialog] = useState<NameEdit | null>(null);
   const [nameValue, setNameValue] = useState('');
-  const [moveDialog, setMoveDialog] = useState<MoveDialog>(null);
+  const [moveDialog, setMoveDialog] = useState<DocumentItem | null>(null);
   const [moveTarget, setMoveTarget] = useState<number | null>(null);
-  const [deleteDialog, setDeleteDialog] = useState<DeleteDialog>(null);
+  const [deleteDialog, setDeleteDialog] = useState<DocumentItem | null>(null);
   const [deleteRecursive, setDeleteRecursive] = useState(false);
-  const [detail, setDetail] = useState<{ file: FileItem; folderPath: Folder[]; history: FileEvent[] } | null>(null);
+  const [dialogError, setDialogError] = useState<string | null>(null);
+  const [dialogBusy, setDialogBusy] = useState(false);
+  const [detail, setDetail] = useState<FileDetail | null>(null);
+
   const fileRef = useRef<HTMLInputElement>(null);
-
-  const load = useCallback(async (q: string, folderId: number | null) => {
-    try {
-      const [f, r] = await Promise.all([
-        api.folders(),
-        api.files(q, undefined, 200, q ? undefined : folderId),
-      ]);
-      setFolders(f.folders);
-      setFiles(r.files);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Erreur de chargement');
-    }
-  }, []);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const detailRequest = useRef(0);
+  const search = query.trim();
+  const scope = search ? 'search:' + search : 'folder:' + currentId;
+  const matchesScope = listing?.scope === scope;
+  const reload = useCallback(() => setRevision((previous) => previous + 1), []);
 
   useEffect(() => {
-    if (open) void load(query, currentId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, currentId]);
+    if (!open) return;
+    const request = new AbortController();
+    setLoading(true);
+    setListError(null);
 
-  useEffect(() => {
-    if (!socket) return;
-    const handler = (event: { type: string }) => {
-      if (event.type === 'docsChanged') void load(query, currentId);
+    const timer = window.setTimeout(async () => {
+      try {
+        const [directory, result] = await Promise.all([
+          api.folders(request.signal),
+          api.files(search, undefined, FILE_LIMIT, search ? undefined : currentId, request.signal),
+        ]);
+        if (request.signal.aborted) return;
+        setFolders(directory.folders);
+        if (currentId !== null && !directory.folders.some((folder) => folder.id === currentId)) {
+          setCurrentId(null);
+        }
+        setListing({ scope, files: result.files });
+      } catch (error) {
+        if (!request.signal.aborted) setListError(errorMessage(error, 'Impossible de charger les documents.'));
+      } finally {
+        if (!request.signal.aborted) setLoading(false);
+      }
+    }, search ? 230 : 0);
+
+    return () => {
+      window.clearTimeout(timer);
+      request.abort();
     };
-    socket.onMessage(handler);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [socket]);
+  }, [open, currentId, scope, search, revision]);
 
-  const breadcrumb = useMemo(() => {
+  useEffect(() => {
+    if (!open || !socket) return;
+    return socket.onMessage((event) => {
+      if (event.type === 'docsChanged') reload();
+    });
+  }, [open, reload, socket]);
+
+  useEffect(() => {
+    if (contentRef.current) contentRef.current.scrollTop = 0;
+  }, [scope]);
+
+  const folderById = useMemo(() => new Map(folders.map((folder) => [folder.id, folder])), [folders]);
+  const pathFor = useCallback((id: number | null) => {
     const path: Folder[] = [];
-    let cur: number | null = currentId;
     const seen = new Set<number>();
-    while (cur !== null && !seen.has(cur)) {
-      seen.add(cur);
-      const f = folders.find((x) => x.id === cur);
-      if (!f) break;
-      path.unshift(f);
-      cur = f.parentId;
+    for (let current = id; current !== null && !seen.has(current);) {
+      seen.add(current);
+      const folder = folderById.get(current);
+      if (!folder) break;
+      path.unshift(folder);
+      current = folder.parentId;
     }
     return path;
-  }, [folders, currentId]);
+  }, [folderById]);
 
-  const childFolders = useMemo(
-    () => folders.filter((f) => f.parentId === currentId).sort((a, b) => a.name.localeCompare(b.name, 'fr')),
-    [folders, currentId],
-  );
+  const breadcrumb = pathFor(currentId);
+  const childFolders = search ? [] : folders
+    .filter((folder) => folder.parentId === currentId)
+    .sort((left, right) => left.name.localeCompare(right.name, 'fr'));
 
-  const folderPathOf = useCallback(
-    (folderId: number | null): string => {
-      if (folderId === null) return 'Racine';
-      const parts: string[] = [];
-      let cur: number | null = folderId;
-      const seen = new Set<number>();
-      while (cur !== null && !seen.has(cur)) {
-        seen.add(cur);
-        const f = folders.find((x) => x.id === cur);
-        if (!f) break;
-        parts.unshift(f.name);
-        cur = f.parentId;
-      }
-      return parts.join(' / ') || 'Racine';
-    },
-    [folders],
-  );
+  const showFolder = (id: number | null) => {
+    setActionError(null);
+    setQuery('');
+    setCurrentId(id);
+  };
 
-  const onPick = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0];
-    e.target.value = '';
-    if (!f) return;
+  const onPick = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file || uploading) return;
+    setActionError(null);
     setUploading(true);
     try {
-      await api.uploadFile(f, '', false, query ? undefined : currentId);
-      await load(query, currentId);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Erreur d'envoi");
+      await api.uploadFile(file, '', false, currentId);
+      reload();
+    } catch (error) {
+      setActionError(errorMessage(error, 'Impossible de déposer le fichier.'));
     } finally {
       setUploading(false);
     }
   };
 
-  const download = async (f: FileItem) => {
-    try {
-      const blob = await api.downloadFile(f.id);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = f.name;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch {
-      // ignore
-    }
-  };
-
-  const derive = async (f: FileItem, kind: 'resume' | 'cr') => {
-    setError(null);
-    try {
-      await api.derive(f.id, kind);
-      await load(query, currentId);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Erreur de génération');
-    }
-  };
-
-  const transcribe = async (f: FileItem) => {
-    setError(null);
-    try {
-      await api.transcribe(f.id);
-      await load(query, currentId);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Erreur de transcription');
-    }
-  };
-
-  const openNameDialog = (d: NameDialog) => {
+  const download = async (file: FileItem) => {
     setMenu(null);
-    setNameDialog(d);
-    setNameValue(d?.mode === 'rename-folder' ? d.folder.name : d?.mode === 'rename-file' ? d.file.name : '');
+    if (downloading.has(file.id)) return;
+    setActionError(null);
+    setDownloading((previous) => new Set(previous).add(file.id));
+    try {
+      const url = URL.createObjectURL(await api.downloadFile(file.id));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = file.name;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    } catch (error) {
+      setActionError(errorMessage(error, 'Impossible de télécharger le fichier.'));
+    } finally {
+      setDownloading((previous) => {
+        const remaining = new Set(previous);
+        remaining.delete(file.id);
+        return remaining;
+      });
+    }
+  };
+
+  const runFileAction = async (action: () => Promise<unknown>, fallback: string) => {
+    setMenu(null);
+    setActionError(null);
+    try {
+      await action();
+      reload();
+    } catch (error) {
+      setActionError(errorMessage(error, fallback));
+    }
+  };
+
+  const derive = (file: FileItem, kind: 'resume' | 'cr') =>
+    runFileAction(() => api.derive(file.id, kind), 'Erreur de génération.');
+  const transcribe = (file: FileItem) =>
+    runFileAction(() => api.transcribe(file.id), 'Erreur de transcription.');
+
+  const runDialogAction = async (action: () => Promise<unknown>, close: () => void, fallback: string) => {
+    if (dialogBusy) return;
+    setDialogBusy(true);
+    setDialogError(null);
+    try {
+      await action();
+      close();
+      reload();
+    } catch (error) {
+      setDialogError(errorMessage(error, fallback));
+    } finally {
+      setDialogBusy(false);
+    }
+  };
+
+  const openNameDialog = (edit: NameEdit) => {
+    setMenu(null);
+    setDialogError(null);
+    setNameDialog(edit);
+    setNameValue(edit.mode === 'rename-folder' ? edit.folder.name : edit.mode === 'rename-file' ? edit.file.name : '');
   };
 
   const submitName = async () => {
     if (!nameDialog) return;
     const name = nameValue.trim();
     if (!name) return;
-    setError(null);
-    try {
+    await runDialogAction(async () => {
       if (nameDialog.mode === 'new-folder') await api.createFolder(name, currentId);
       else if (nameDialog.mode === 'rename-folder') await api.patchFolder(nameDialog.folder.id, { name });
-      else if (nameDialog.mode === 'rename-file') await api.patchFile(nameDialog.file.id, { name });
-      setNameDialog(null);
-      await load(query, currentId);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Erreur');
-    }
+      else await api.patchFile(nameDialog.file.id, { name });
+    }, () => setNameDialog(null), 'Impossible d’enregistrer ce nom.');
   };
 
-  const openMove = (d: MoveDialog) => {
+  const openMove = (target: DocumentItem) => {
     setMenu(null);
-    setMoveDialog(d);
-    setMoveTarget(d?.kind === 'folder' ? d.item.parentId : d?.kind === 'file' ? d.item.folderId : null);
+    setDialogError(null);
+    setMoveDialog(target);
+    setMoveTarget(target.kind === 'folder' ? target.item.parentId : target.item.folderId);
   };
 
   const submitMove = async () => {
     if (!moveDialog) return;
-    setError(null);
-    try {
-      if (moveDialog.kind === 'folder') await api.patchFolder(moveDialog.item.id, { parentId: moveTarget });
-      else await api.patchFile(moveDialog.item.id, { folderId: moveTarget });
-      setMoveDialog(null);
-      await load(query, currentId);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Erreur de déplacement');
-    }
+    await runDialogAction(
+      () => moveDialog.kind === 'folder'
+        ? api.patchFolder(moveDialog.item.id, { parentId: moveTarget })
+        : api.patchFile(moveDialog.item.id, { folderId: moveTarget }),
+      () => setMoveDialog(null),
+      'Déplacement impossible.',
+    );
   };
 
-  const openDelete = (d: DeleteDialog) => {
+  const openDelete = (target: DocumentItem) => {
     setMenu(null);
-    setDeleteDialog(d);
+    setDialogError(null);
+    setDeleteDialog(target);
     setDeleteRecursive(false);
   };
 
   const submitDelete = async () => {
     if (!deleteDialog) return;
-    setError(null);
-    try {
-      if (deleteDialog.kind === 'folder') {
-        await api.deleteFolder(deleteDialog.item.id, deleteRecursive);
-      } else {
-        await api.deleteFile(deleteDialog.item.id);
-      }
-      setDeleteDialog(null);
-      await load(query, currentId);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Erreur de suppression';
-      setError(msg);
-      // dossier non vide : le 409 porte les compteurs, la case récursif suffit à réessayer
-      if (deleteDialog.kind === 'folder' && /non vide/i.test(msg)) {
-        setDeleteDialog({ ...deleteDialog, counts: null });
-      }
-    }
+    await runDialogAction(
+      () => deleteDialog.kind === 'folder'
+        ? api.deleteFolder(deleteDialog.item.id, deleteRecursive)
+        : api.deleteFile(deleteDialog.item.id),
+      () => setDeleteDialog(null),
+      'Suppression impossible.',
+    );
   };
 
-  const openDetail = async (f: FileItem) => {
+  const openDetail = async (file: FileItem) => {
     setMenu(null);
+    setActionError(null);
+    const requestId = ++detailRequest.current;
     try {
-      setDetail(await api.fileDetail(f.id));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Erreur de chargement');
+      const loaded = await api.fileDetail(file.id);
+      if (requestId === detailRequest.current) setDetail(loaded);
+    } catch (error) {
+      if (requestId === detailRequest.current) setActionError(errorMessage(error, 'Impossible de charger les détails.'));
     }
   };
 
-  // arbre des dossiers pour le dialogue "Déplacer…" (avec indentation)
   const moveTree = useMemo(() => {
     if (!moveDialog) return [];
-    const blocked = new Set<number>();
-    if (moveDialog.kind === 'folder') {
-      blocked.add(moveDialog.item.id);
-      const stack = [moveDialog.item.id];
-      while (stack.length) {
-        const id = stack.pop() as number;
-        for (const f of folders) if (f.parentId === id) { blocked.add(f.id); stack.push(f.id); }
-      }
+    const tree = new Map<number | null, Folder[]>();
+    for (const folder of folders) {
+      const siblings = tree.get(folder.parentId) ?? [];
+      siblings.push(folder);
+      tree.set(folder.parentId, siblings);
     }
     const rows: { folder: Folder | null; depth: number }[] = [{ folder: null, depth: 0 }];
-    const build = (parentId: number | null, depth: number) => {
-      for (const f of folders.filter((x) => x.parentId === parentId).sort((a, b) => a.name.localeCompare(b.name, 'fr'))) {
-        if (blocked.has(f.id)) continue;
-        rows.push({ folder: f, depth: depth + 1 });
-        build(f.id, depth + 1);
+    const blockedId = moveDialog.kind === 'folder' ? moveDialog.item.id : null;
+    const addChildren = (parent: number | null, depth: number) => {
+      const siblings = tree.get(parent) ?? [];
+      siblings.sort((left, right) => left.name.localeCompare(right.name, 'fr'));
+      for (const folder of siblings) {
+        if (folder.id === blockedId) continue;
+        rows.push({ folder, depth });
+        addChildren(folder.id, depth + 1);
       }
     };
-    build(null, 0);
+    addChildren(null, 1);
     return rows;
   }, [moveDialog, folders]);
 
-  const menuTarget = menu?.target ?? null;
+  const closeExplorer = () => {
+    detailRequest.current += 1;
+    setDetail(null);
+    setMenu(null);
+    setActionError(null);
+    onClose();
+  };
+
+  const menuTarget = menu?.target;
+  const editingFile = nameDialog?.mode === 'rename-file';
+  const nameDialogTitle = nameDialog?.mode === 'new-folder' ? 'Nouveau dossier' : editingFile ? 'Renommer le fichier' : 'Renommer le dossier';
 
   return (
     <Drawer
       anchor="right"
       open={open}
-      onClose={onClose}
-      PaperProps={{ sx: { width: { xs: '100%', sm: 620 } } }}
+      onClose={closeExplorer}
+      slotProps={{
+        backdrop: { sx: { bgcolor: 'rgba(13, 34, 39, 0.42)' } },
+        paper: {
+          role: 'dialog',
+          'aria-modal': true,
+          'aria-labelledby': 'doc-explorer-title',
+          sx: {
+            width: { xs: '100%', sm: 'min(850px, calc(100% - 32px))' },
+            bgcolor: explorerColors.background,
+            color: explorerColors.ink,
+            borderLeft: { sm: '1px solid ' + explorerColors.border },
+          },
+        },
+      }}
     >
-      <Box sx={{ p: 2, display: 'flex', flexDirection: 'column', gap: 1.5, height: '100%' }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-          <Typography variant="h6" sx={{ flex: 1 }}>Espace documentaire</Typography>
+      <Box component="header" sx={{ px: horizontalPadding, pt: { xs: 2, sm: 3 }, pb: { xs: 2, sm: 2.5 }, bgcolor: explorerColors.surface, borderBottom: '1px solid ' + explorerColors.border }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: { xs: 1, sm: 1.5 }, mb: { xs: 1.75, sm: 2.4 } }}>
+          <Box
+            sx={{
+              width: { xs: 39, sm: 48 },
+              height: { xs: 39, sm: 48 },
+              flexShrink: 0,
+              borderRadius: '13px',
+              bgcolor: explorerColors.accentSoft,
+              color: explorerColors.accent,
+              display: 'grid',
+              placeItems: 'center',
+            }}
+          >
+            <FolderOpenOutlinedIcon />
+          </Box>
+          <Typography id="doc-explorer-title" component="h2" sx={{ fontSize: { xs: '1.17rem', sm: '1.55rem' }, fontWeight: 760, lineHeight: 1.15, flex: 1, minWidth: 0, letterSpacing: '-0.025em' }}>
+            Espace documentaire
+          </Typography>
           <Tooltip title="Rafraîchir">
-            <IconButton onClick={() => void load(query, currentId)}>
-              <RefreshIcon />
+            <IconButton aria-label="Rafraîchir les documents" onClick={reload} sx={headerActionStyle}>
+              <RefreshIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title="Fermer">
+            <IconButton aria-label="Fermer l’espace documentaire" onClick={closeExplorer} sx={headerActionStyle}>
+              <CloseIcon fontSize="small" />
             </IconButton>
           </Tooltip>
         </Box>
-
-        <Breadcrumbs maxItems={4}>
-          <Link component="button" underline="hover" onClick={() => setCurrentId(null)}>
-            Accueil
-          </Link>
-          {breadcrumb.map((f) => (
-            <Link key={f.id} component="button" underline="hover" onClick={() => setCurrentId(f.id)}>
-              {f.name}
-            </Link>
-          ))}
-        </Breadcrumbs>
-
-        <Box sx={{ display: 'flex', gap: 1 }}>
+        <Box sx={{ display: 'grid', gridTemplateColumns: { xs: 'minmax(0, 1fr)', md: 'minmax(0, 1fr) auto' }, gap: 1.2 }}>
           <TextField
             size="small"
             fullWidth
-            placeholder="Rechercher un document (tous les dossiers)…"
             value={query}
-            onChange={(e) => {
-              setQuery(e.target.value);
-              void load(e.target.value, currentId);
+            placeholder="Rechercher un fichier…"
+            onChange={(event) => setQuery(event.target.value)}
+            slotProps={{
+              htmlInput: { maxLength: 100, 'aria-label': 'Rechercher dans tous les dossiers' },
+              input: {
+                startAdornment: <InputAdornment position="start"><SearchIcon fontSize="small" sx={{ color: explorerColors.muted }} /></InputAdornment>,
+                endAdornment: query ? (
+                  <InputAdornment position="end">
+                    <IconButton aria-label="Effacer la recherche" size="small" onClick={() => setQuery('')}>
+                      <CloseIcon fontSize="small" />
+                    </IconButton>
+                  </InputAdornment>
+                ) : undefined,
+              },
+            }}
+            sx={{
+              '& .MuiOutlinedInput-root': { height: 42, borderRadius: '10px', bgcolor: '#f6f9f9' },
+              '& .MuiOutlinedInput-notchedOutline': { borderColor: explorerColors.border },
+              '& input::placeholder': { color: explorerColors.muted, opacity: 1 },
             }}
           />
-          <IconButton color="primary" onClick={() => void load(query, currentId)}>
-            <SearchIcon />
-          </IconButton>
-        </Box>
-
-        <Box sx={{ display: 'flex', gap: 1 }}>
-          <Button
-            variant="outlined"
-            size="small"
-            startIcon={<CreateNewFolderIcon />}
-            onClick={() => openNameDialog({ mode: 'new-folder' })}
-          >
-            Nouveau dossier
-          </Button>
-          <Button
-            variant="outlined"
-            size="small"
-            startIcon={<UploadFileIcon />}
-            disabled={uploading || Boolean(query)}
-            onClick={() => fileRef.current?.click()}
-          >
-            {uploading ? 'Envoi…' : 'Déposer ici'}
-          </Button>
-        </Box>
-        <input hidden type="file" ref={fileRef} onChange={onPick} />
-        {error && <Typography color="error" variant="caption">{error}</Typography>}
-
-        <List sx={{ overflowY: 'auto', flex: 1 }} dense>
-          {!query &&
-            childFolders.map((f) => (
-              <ListItem
-                key={`folder-${f.id}`}
-                disablePadding
-                secondaryAction={
-                  <IconButton
-                    edge="end"
-                    onClick={(e) => setMenu({ anchor: e.currentTarget, target: { kind: 'folder', item: f } })}
-                  >
-                    <MoreVertIcon />
-                  </IconButton>
-                }
-              >
-                <ListItemButton onClick={() => setCurrentId(f.id)}>
-                  <ListItemAvatar>
-                    <Avatar>
-                      <FolderIcon />
-                    </Avatar>
-                  </ListItemAvatar>
-                  <ListItemText
-                    primary={f.name}
-                    secondary={`dossier · créé par ${f.createdBy.name} le ${formatDateTime(f.createdAt)}${f.updatedAt ? ` · mod. ${formatDateTime(f.updatedAt)}` : ''}`}
-                  />
-                </ListItemButton>
-              </ListItem>
-            ))}
-
-          {files.map((f) => (
-            <ListItem
-              key={`file-${f.id}`}
-              disablePadding
-              secondaryAction={
-                <IconButton
-                  edge="end"
-                  onClick={(e) => setMenu({ anchor: e.currentTarget, target: { kind: 'file', item: f } })}
-                >
-                  <MoreVertIcon />
-                </IconButton>
-              }
+          <Box sx={{ display: 'grid', gridTemplateColumns: { xs: 'minmax(0, 1fr) minmax(0, 1fr)', sm: 'auto auto' }, justifyContent: { sm: 'end' }, gap: 1 }}>
+            <Button
+              variant="outlined"
+              startIcon={<CreateNewFolderOutlinedIcon />}
+              onClick={() => openNameDialog({ mode: 'new-folder' })}
+              disabled={Boolean(search)}
+              sx={{ ...buttonStyle, color: explorerColors.accent, borderColor: explorerColors.border }}
             >
-              <ListItemButton onDoubleClick={() => void download(f)}>
-                <ListItemAvatar>
-                  <Avatar>{fileIcon(f)}</Avatar>
-                </ListItemAvatar>
-                <ListItemText
-                  primary={
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                      <span>{f.name}</span>
-                      {query && <Chip size="small" variant="outlined" label={folderPathOf(f.folderId)} />}
-                    </Box>
-                  }
-                  secondary={`${formatSize(f.size)} · ${f.user.name} · créé ${formatDateTime(f.createdAt)}${f.updatedAt ? ` · mod. ${formatDateTime(f.updatedAt)}` : ''}`}
-                />
-              </ListItemButton>
-            </ListItem>
-          ))}
-
-          {childFolders.length === 0 && files.length === 0 && (
-            <ListItem>
-              <ListItemText primary={query ? 'Aucun résultat' : 'Dossier vide — déposez un fichier ou créez un sous-dossier'} />
-            </ListItem>
-          )}
-        </List>
-
-        <Typography variant="caption" color="text.secondary">
-          Les documents alimentent /ask et /solve (RAG). Fichiers audio transcrits automatiquement (STT) ; sur une
-          transcription, Résumé / CR génèrent un document (LLM). Clic ⋮ : renommer, déplacer, historique, supprimer.
-        </Typography>
+              Nouveau dossier
+            </Button>
+            <Button
+              disableElevation
+              variant="contained"
+              startIcon={uploading ? <CircularProgress color="inherit" size={16} /> : <UploadFileOutlinedIcon />}
+              disabled={uploading || Boolean(search)}
+              onClick={() => fileRef.current?.click()}
+              sx={primaryButtonStyle}
+            >
+              {uploading ? 'Dépôt en cours…' : 'Déposer un fichier'}
+            </Button>
+          </Box>
+          <input hidden type="file" ref={fileRef} onChange={onPick} />
+        </Box>
       </Box>
 
-      {/* menu contextuel ⋮ */}
+      <Box sx={{ position: 'relative', flexShrink: 0, px: horizontalPadding, py: 1.5, borderBottom: '1px solid ' + explorerColors.border }}>
+        {search ? (
+          <Typography component="h3" sx={{ fontSize: '0.85rem', fontWeight: 700 }}>Résultats dans tous les dossiers</Typography>
+        ) : (
+          <Breadcrumbs
+            aria-label="Chemin du dossier"
+            maxItems={4}
+            sx={{ '& .MuiBreadcrumbs-ol': { flexWrap: 'nowrap', minWidth: 0 }, '& .MuiBreadcrumbs-li': { minWidth: 0 }, '& .MuiBreadcrumbs-separator': { mx: 0.75 } }}
+          >
+            <Link
+              component="button"
+              aria-current={currentId === null ? 'page' : undefined}
+              onClick={() => showFolder(null)}
+              color="inherit"
+              underline="hover"
+              sx={{ display: 'flex', alignItems: 'center', gap: 0.65, fontSize: '0.85rem', fontWeight: 700 }}
+            >
+              <HomeOutlinedIcon fontSize="small" /> Racine
+            </Link>
+            {breadcrumb.map((folder) => (
+              <Link
+                key={folder.id}
+                component="button"
+                aria-current={currentId === folder.id ? 'page' : undefined}
+                onClick={() => showFolder(folder.id)}
+                title={folder.name}
+                underline="hover"
+                sx={{
+                  display: 'block',
+                  maxWidth: { xs: '34vw', sm: 210 },
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  color: currentId === folder.id ? explorerColors.ink : explorerColors.accent,
+                  fontSize: '0.85rem',
+                  fontWeight: currentId === folder.id ? 750 : 600,
+                }}
+              >
+                {folder.name}
+              </Link>
+            ))}
+          </Breadcrumbs>
+        )}
+        {loading && <LinearProgress aria-label="Actualisation des documents" sx={{ position: 'absolute', height: 2, left: 0, right: 0, bottom: 0 }} />}
+      </Box>
+
+      <Box ref={contentRef} sx={{ px: horizontalPadding, pt: { xs: 2, sm: 2.5 }, pb: 3, flex: 1, minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain' }} aria-busy={loading}>
+        {actionError && <Alert severity="error" onClose={() => setActionError(null)} sx={{ mb: 2 }}>{actionError}</Alert>}
+        {listError && (
+          <Alert severity="error" sx={{ mb: 2 }} action={<Button color="inherit" size="small" onClick={reload}>Réessayer</Button>}>
+            {listError}
+          </Alert>
+        )}
+        {matchesScope ? (
+          <DocumentExplorerList
+            folders={childFolders}
+            files={listing.files}
+            searching={Boolean(search)}
+            downloading={downloading}
+            folderPath={(id) => pathFor(id).map((folder) => folder.name).join(' / ') || 'Racine'}
+            onOpenFolder={showFolder}
+            onOpenFile={(file) => void openDetail(file)}
+            onDownload={(file) => void download(file)}
+            onMenu={(target, anchor) => setMenu({ target, anchor })}
+          />
+        ) : !listError && (
+          <Box aria-hidden="true" sx={{ display: 'grid', gap: 1.1 }}>
+            {[0, 1, 2].map((row) => <Skeleton key={row} variant="rounded" height={62} />)}
+          </Box>
+        )}
+      </Box>
+
       <Menu anchorEl={menu?.anchor ?? null} open={Boolean(menu)} onClose={() => setMenu(null)}>
         {menuTarget?.kind === 'file' && (
           <>
@@ -542,7 +614,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
             </MenuItem>
             <Divider />
             <MenuItem
-              onClick={() => openDelete({ kind: 'folder', item: menuTarget.item, counts: null })}
+              onClick={() => openDelete({ kind: 'folder', item: menuTarget.item })}
               sx={{ color: 'error.main' }}
             >
               <ListItemIcon><DeleteIcon fontSize="small" color="error" /></ListItemIcon>Supprimer
@@ -551,121 +623,129 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
         )}
       </Menu>
 
-      {/* dialogue nom (nouveau dossier / renommage) */}
-      <Dialog open={Boolean(nameDialog)} onClose={() => setNameDialog(null)} fullWidth maxWidth="xs">
-        <DialogTitle>
-          {nameDialog?.mode === 'new-folder' && 'Nouveau dossier'}
-          {nameDialog?.mode === 'rename-folder' && 'Renommer le dossier'}
-          {nameDialog?.mode === 'rename-file' && 'Renommer le fichier'}
-        </DialogTitle>
-        <DialogContent>
-          <TextField
-            autoFocus
-            fullWidth
-            size="small"
-            sx={{ mt: 1 }}
-            value={nameValue}
-            onChange={(e) => setNameValue(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') void submitName();
-            }}
-          />
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setNameDialog(null)}>Annuler</Button>
-          <Button variant="contained" onClick={() => void submitName()} disabled={!nameValue.trim()}>
-            OK
-          </Button>
-        </DialogActions>
+      <Dialog
+        {...preparedDialogProps}
+        open={Boolean(nameDialog)}
+        onClose={() => { if (!dialogBusy) setNameDialog(null); }}
+        aria-labelledby="doc-name-title"
+      >
+        <Box component="form" onSubmit={(event) => { event.preventDefault(); void submitName(); }}>
+          <DialogTitle id="doc-name-title">{nameDialogTitle}</DialogTitle>
+          <DialogContent>
+            <TextField
+              autoFocus
+              fullWidth
+              size="small"
+              label={editingFile ? 'Nom du fichier' : 'Nom du dossier'}
+              sx={{ mt: 1 }}
+              value={nameValue}
+              disabled={dialogBusy}
+              error={Boolean(dialogError)}
+              helperText={dialogError}
+              onChange={(event) => { setNameValue(event.target.value); setDialogError(null); }}
+              slotProps={{ htmlInput: { maxLength: editingFile ? 255 : 120 } }}
+            />
+          </DialogContent>
+          <DialogActions>
+            <Button disabled={dialogBusy} onClick={() => setNameDialog(null)}>Annuler</Button>
+            <Button type="submit" variant="contained" disableElevation sx={primaryButtonStyle} disabled={dialogBusy || !nameValue.trim()}>
+              {nameDialog?.mode === 'new-folder' ? 'Créer le dossier' : 'Enregistrer'}
+            </Button>
+          </DialogActions>
+        </Box>
       </Dialog>
 
-      {/* dialogue déplacer */}
-      <Dialog open={Boolean(moveDialog)} onClose={() => setMoveDialog(null)} fullWidth maxWidth="xs">
-        <DialogTitle>Déplacer vers…</DialogTitle>
-        <DialogContent sx={{ maxHeight: 360, overflowY: 'auto' }}>
-          <List dense>
-            {moveTree.map((row) => (
-              <ListItemButton
-                key={row.folder ? `f-${row.folder.id}` : 'root'}
-                selected={moveTarget === (row.folder?.id ?? null)}
-                onClick={() => setMoveTarget(row.folder?.id ?? null)}
-                sx={{ pl: 1 + row.depth * 2 }}
-              >
-                <ListItemIcon sx={{ minWidth: 32 }}>
-                  <FolderIcon fontSize="small" />
-                </ListItemIcon>
-                <ListItemText primary={row.folder ? row.folder.name : 'Racine (Espace documentaire)'} />
-              </ListItemButton>
-            ))}
+      <Dialog {...preparedDialogProps} open={Boolean(moveDialog)} onClose={() => { if (!dialogBusy) setMoveDialog(null); }} aria-labelledby="doc-move-title">
+        <DialogTitle id="doc-move-title">Déplacer vers</DialogTitle>
+        <DialogContent dividers>
+          {dialogError && <Alert severity="error" sx={{ mb: 1 }}>{dialogError}</Alert>}
+          <List dense disablePadding aria-label="Dossier de destination">
+            {moveTree.map((row) => {
+              const id = row.folder?.id ?? null;
+              return (
+                <ListItemButton
+                  key={id ?? 'root'}
+                  selected={id === moveTarget}
+                  aria-current={id === moveTarget ? 'true' : undefined}
+                  disabled={dialogBusy}
+                  onClick={() => setMoveTarget(id)}
+                  sx={{ pl: 1.5 + Math.min(5, row.depth) * 2, borderRadius: 2, minHeight: 42 }}
+                >
+                  <ListItemIcon sx={{ minWidth: 32, color: explorerColors.folder }}><FolderOutlinedIcon fontSize="small" /></ListItemIcon>
+                  <ListItemText primary={row.folder?.name ?? 'Racine'} sx={{ overflowWrap: 'anywhere' }} />
+                </ListItemButton>
+              );
+            })}
           </List>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setMoveDialog(null)}>Annuler</Button>
-          <Button variant="contained" onClick={() => void submitMove()}>
-            Déplacer
-          </Button>
+          <Button disabled={dialogBusy} onClick={() => setMoveDialog(null)}>Annuler</Button>
+          <Button variant="contained" disableElevation sx={primaryButtonStyle} disabled={dialogBusy} onClick={() => void submitMove()}>Déplacer</Button>
         </DialogActions>
       </Dialog>
 
-      {/* dialogue suppression */}
-      <Dialog open={Boolean(deleteDialog)} onClose={() => setDeleteDialog(null)} fullWidth maxWidth="xs">
-        {deleteDialog && (
-          <>
-            <DialogTitle sx={{ color: 'error.main' }}>Supprimer {deleteDialog.kind === 'folder' ? 'le dossier' : 'le fichier'} ?</DialogTitle>
-            <DialogContent>
-              <Typography variant="body2">
-                {deleteDialog.kind === 'folder'
-                  ? `« ${deleteDialog.item.name} » et tout son contenu seront supprimés définitivement.`
-                  : `« ${deleteDialog.item.name} » sera supprimé définitivement (le fichier disparaît du disque et de la chat).`}
-              </Typography>
-              {deleteDialog.kind === 'folder' && (
-                <FormControlLabel
-                  control={
-                    <Checkbox
-                      checked={deleteRecursive}
-                      onChange={(e) => setDeleteRecursive(e.target.checked)}
-                    />
-                  }
-                  label="Supprimer aussi tout le contenu (récursif)"
-                />
-              )}
-            </DialogContent>
-          </>
-        )}
+      <Dialog {...preparedDialogProps} open={Boolean(deleteDialog)} onClose={() => { if (!dialogBusy) setDeleteDialog(null); }} aria-labelledby="doc-delete-title">
+        <DialogTitle id="doc-delete-title">Supprimer {deleteDialog?.kind === 'folder' ? 'le dossier' : 'le fichier'} ?</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" sx={{ overflowWrap: 'anywhere' }}>
+            « {deleteDialog?.item.name} » sera supprimé définitivement.
+          </Typography>
+          {deleteDialog?.kind === 'folder' && (
+            <FormControlLabel
+              disabled={dialogBusy}
+              control={<Checkbox checked={deleteRecursive} onChange={(event) => setDeleteRecursive(event.target.checked)} />}
+              label="Supprimer aussi le contenu du dossier"
+            />
+          )}
+          {dialogError && <Alert severity="error" sx={{ mt: 1 }}>{dialogError}</Alert>}
+        </DialogContent>
         <DialogActions>
-          <Button onClick={() => setDeleteDialog(null)}>Annuler</Button>
-          <Button color="error" variant="contained" onClick={() => void submitDelete()}>
-            Supprimer
-          </Button>
+          <Button disabled={dialogBusy} onClick={() => setDeleteDialog(null)}>Annuler</Button>
+          <Button color="error" variant="contained" disableElevation disabled={dialogBusy} onClick={() => void submitDelete()}>Supprimer</Button>
         </DialogActions>
       </Dialog>
 
-      {/* dialogue détails + historique */}
-      <Dialog open={Boolean(detail)} onClose={() => setDetail(null)} fullWidth maxWidth="sm">
-        <DialogTitle>Détails du fichier</DialogTitle>
+      <Dialog open={Boolean(detail)} onClose={() => setDetail(null)} fullWidth maxWidth="sm" aria-labelledby="doc-detail-title">
+        <DialogTitle id="doc-detail-title">Détails du fichier</DialogTitle>
         <DialogContent dividers>
           {detail && (
             <>
-              <Typography variant="subtitle1">{detail.file.name}</Typography>
-              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                {formatSize(detail.file.size)} · {detail.file.mime || 'type inconnu'}
-              </Typography>
-              <Typography variant="body2">Dossier : {detail.folderPath.map((f) => f.name).join(' / ') || 'Racine'}</Typography>
-              <Typography variant="body2">Auteur : {detail.file.user.name}</Typography>
-              <Typography variant="body2">Créé le : {formatDateTime(detail.file.createdAt)}</Typography>
-              <Typography variant="body2">Dernière modification : {formatDateTime(detail.file.updatedAt)}</Typography>
-              <Divider sx={{ my: 1.5 }} />
-              <Typography variant="subtitle2">Journal de modifications</Typography>
+              <Typography variant="subtitle1" sx={{ fontWeight: 750, overflowWrap: 'anywhere', mb: 1.5 }}>{detail.file.name}</Typography>
+              <Box
+                component="dl"
+                sx={{
+                  display: 'grid',
+                  gridTemplateColumns: { xs: '96px minmax(0, 1fr)', sm: '136px minmax(0, 1fr)' },
+                  gap: 0.75,
+                  m: 0,
+                  mb: 2.5,
+                  p: 1.75,
+                  borderRadius: 2,
+                  bgcolor: explorerColors.background,
+                  fontSize: '0.86rem',
+                  '& dt': { color: explorerColors.muted },
+                  '& dd': { m: 0, minWidth: 0, overflowWrap: 'anywhere' },
+                }}
+              >
+                <dt>Dossier</dt><dd>{detail.folderPath.map((folder) => folder.name).join(' / ') || 'Racine'}</dd>
+                <dt>Auteur</dt><dd>{detail.file.user.name}</dd>
+                <dt>Taille</dt><dd>{formatFileSize(detail.file.size)}</dd>
+                <dt>Type</dt><dd>{detail.file.mime}</dd>
+                <dt>Créé le</dt><dd>{dateTime.format(new Date(detail.file.createdAt))}</dd>
+                {detail.file.updatedAt && <><dt>Modifié le</dt><dd>{dateTime.format(new Date(detail.file.updatedAt))}</dd></>}
+              </Box>
+              <Typography component="h3" variant="subtitle2" sx={{ fontWeight: 750 }}>Historique</Typography>
               <List dense>
-                {detail.history.map((e) => (
-                  <ListItem key={e.id} disableGutters>
+                {detail.history.map((entry) => (
+                  <ListItem key={entry.id} disableGutters>
                     <ListItemText
-                      primary={`${ACTION_LABELS[e.action] ?? e.action}${e.detail ? ` — ${e.detail}` : ''}`}
-                      secondary={`${e.user.name} · ${formatDateTime(e.createdAt)}`}
+                      sx={{ overflowWrap: 'anywhere' }}
+                      primary={ACTION_LABELS[entry.action] ?? entry.action}
+                      secondary={[entry.user.name, dateTime.format(new Date(entry.createdAt)), entry.detail].filter(Boolean).join(' · ')}
                     />
                   </ListItem>
                 ))}
-                {detail.history.length === 0 && <ListItem disableGutters><ListItemText primary="Aucun événement" /></ListItem>}
+                {detail.history.length === 0 && <ListItem disableGutters><ListItemText secondary="Aucun événement enregistré." /></ListItem>}
               </List>
             </>
           )}
