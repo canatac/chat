@@ -15,6 +15,19 @@ choix pour faire des comptes-rendus de réunion ou proposer des solutions aux pr
    configuré → la transcription `.txt` apparaît dans l'espace documentaire. Sinon, bouton
    **🎙️ Transcrire** sur la ligne du fichier dans l'espace documentaire.
 
+**Gérer les documents (explorateur de fichiers)** — icône **dossier** en haut à droite :
+- **Arborescence** de dossiers/sous-dossiers : bouton *Nouveau dossier*, clic pour entrer dans un dossier,
+  fil d'Ariane cliquable en haut, recherche globale dans tous les dossiers.
+- Menu **⋮** sur chaque dossier/fichier : *Renommer*, *Déplacer…* (sélecteur d'arborescence, anti-cycle),
+  *Supprimer* (dossier : case « récursif » si non vide, avec compteurs), *Télécharger*, *Transcrire* (audio),
+  *Résumé / Compte-rendu* (transcription), *Détails & historique*.
+- **Métadonnées** : auteur, date/heure de création **et de dernière modification**, taille, type, dossier courant.
+- **Journal de modifications** (table `file_events`, append-only) : déposer / renommer / déplacer / supprimer /
+  transcrire / dériver un fichier, créer / renommer / déplacer / supprimer un dossier — avec qui, quoi, quand.
+  Consultable par fichier (⋮ → *Détails & historique*) et via `GET /api/events`.
+- Les modifications sont **diffusées en temps réel** (`{type:"docsChanged"}` sur le WebSocket) : l'explorateur
+  des autres membres se rafraîchit tout seul.
+
 **Télécharger et résumer un média distant (émission radio, podcast…)**
 - Colle simplement le lien dans la chat (ex. un `.m4a` de 1 h) → il est téléchargé automatiquement, ou
   utilise la commande **`/lien <url> [titre]`**. Le bot poste un récap : média original déposé,
@@ -56,9 +69,9 @@ choix pour faire des comptes-rendus de réunion ou proposer des solutions aux pr
 - **Présence** : pastilles des membres en haut à droite (vert = en ligne, gris = hors ligne), avec détail au clic
 - Comptes simples : nom d'utilisateur + mot de passe (hash bcrypt, sessions JWT 30 jours)
 - Historique persistant en **SQLite** (fichier unique, sauvegardable)
-- **Fichiers** : pièce jointe à n'importe quel message (bouton trombone) + **espace documentaire** dédié
-  (bouton dossier en haut à droite : recherche, dépôt, téléchargement). Les fichiers texte/PDF sont
-  indexés automatiquement, les fichiers audio transcrits (STT)
+- **Fichiers** : pièce jointe à n'importe quel message (bouton trombone) + **espace documentaire façon explorateur**
+  (dossiers/sous-dossiers, renommer, déplacer, supprimer, métadonnées, journal de modifications, recherche).
+  Les fichiers texte/PDF sont indexés automatiquement, les fichiers audio transcrits (STT)
 - **/lien** : médias distants (émissions radio…) téléchargés, transcrits, CR auto, copie webm
 - **RAG** : `/ask` et `/solve` fouillent les documents déposés et citent leurs sources
 - **Dashboard d'administration** (réservé aux noms de `ADMIN_NAMES`) : volume de tokens
@@ -303,8 +316,14 @@ npm start            # http://localhost:4000
 - `GET /api/rtc-config` → `{iceServers: [...]}` (STUN + TURN) pour les appels WebRTC
 - `GET /api/messages?limit=50&before=<id>` → `{messages: [...]}` (ordre chronologique, avec `files`)
 - `POST /api/messages` `{content}` → `{message}`
-- `POST /api/files` (multipart : `file`, `message?`, `post=true|false`) → `{file, message?}` — **fichier audio transcrit automatiquement si STT configuré**
-- `GET /api/files?limit=&before=&query=` → `{files: [...]}` (espace documentaire)
+- `POST /api/files` (multipart : `file`, `message?`, `post=true|false`, `folderId?`) → `{file, message?}` — **fichier audio transcrit automatiquement si STT configuré**
+- `GET /api/files?limit=&before=&query=&folder=root|<id>` → `{files: [...]}` (espace documentaire ; `folder` filtre par dossier)
+- `GET /api/files/:id` → détail (métadonnées + `folderPath` + `history`)
+- `PATCH /api/files/:id` `{name?|folderId?}` → renommer / déplacer (409 si nom déjà pris dans le dossier cible)
+- `DELETE /api/files/:id` → supprime le fichier (disque + chunks + entrée)
+- `GET /api/folders` → `{folders: [...]}` (arbre aplati avec `parentId`)
+- `POST /api/folders` `{name, parentId?}` / `PATCH /api/folders/:id` `{name?|parentId?}` / `DELETE /api/folders/:id?recursive=1`
+- `GET /api/events?fileId=&folderId=&limit=` → journal de modifications
 - `GET /api/files/:id/download` → téléchargement
 - `POST /api/files/:id/transcribe` → transcrit un fichier audio (STT)
 - `POST /api/files/:id/derive` `{kind: "resume"|"cr"}` → résumé / CR (LLM) déposé dans l'espace documentaire
@@ -318,14 +337,14 @@ npm start            # http://localhost:4000
 - Client → serveur : `{type: "message", content}`, `{type: "history", before?, limit?}`,
   `{type: "signal", to, data}` (relayé vers l'utilisateur `to`, pour WebRTC)
 - Serveur → client : `{type: "hello", user}`, `{type: "message", message}`, `{type: "history", messages}`, `{type: "presence", online: [ids]}`, `{type: "call", call}`,
-  `{type: "signal", from, data}`, `{type: "error", error}`
+  `{type: "signal", from, data}`, `{type: "docsChanged"}` (mutation documentaire : l'explorateur se recharge), `{type: "error", error}`
 
 ## Structure du projet
 
 ```
-server/   API REST + WebSocket, SQLite, upload, appels, RAG, STT, /lien, suivi de conso LLM (Node.js/TypeScript)
+server/   API REST + WebSocket, SQLite, upload, appels, RAG, STT, /lien, explorateur de documents (folders + file_events), suivi de conso LLM (Node.js/TypeScript)
   src/llm/ providers (OpenAI-compatible, Anthropic) + pricing + rag + stt + derive + link + commandes
-web/      Interface React + Material UI (Vite) : chat, présence, espace documentaire, appels WebRTC, dashboard admin
+web/      Interface React + Material UI (Vite) : chat, présence, espace documentaire (explorateur), appels WebRTC, dashboard admin
 deploy/   Caddyfile + security-groups.md
 docker-compose.yml (chat + coturn + wireguard + caddy) / Dockerfile (avec ffmpeg) / .env.example
 ```
