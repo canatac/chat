@@ -9,7 +9,7 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { z } from 'zod';
 import { hashPassword, signToken, verifyPassword, verifyToken } from './auth.js';
 import { isAdminUser, type Config } from './config.js';
-import { DB, type CallRow, type FileListRow, type FileRow, type MessageRow, type UserRow } from './db.js';
+import { DB, type CallRow, type FileEventListRow, type FileListRow, type FileRow, type FolderRow, type MessageRow, type UserRow } from './db.js';
 import { deriveDocument, HttpError, type DeriveKind } from './llm/derive.js';
 import { handleCommand } from './llm/run.js';
 import { chunkText, extractText } from './llm/rag.js';
@@ -28,7 +28,28 @@ export interface PublicFile {
   size: number;
   mime: string;
   createdAt: string;
+  updatedAt: string | null;
   callId: number | null;
+  folderId: number | null;
+}
+
+export interface PublicFolder {
+  id: number;
+  name: string;
+  parentId: number | null;
+  createdAt: string;
+  updatedAt: string | null;
+  createdBy: PublicUser;
+}
+
+export interface PublicFileEvent {
+  id: number;
+  fileId: number | null;
+  folderId: number | null;
+  action: string;
+  detail: string;
+  createdAt: string;
+  user: PublicUser;
 }
 
 export interface SerializedMessage {
@@ -50,7 +71,9 @@ export function toPublicFile(f: FileRow): PublicFile {
     size: f.size,
     mime: f.mime,
     createdAt: new Date(f.created_at).toISOString(),
+    updatedAt: f.updated_at ? new Date(f.updated_at).toISOString() : null,
     callId: f.call_id,
+    folderId: f.folder_id ?? null,
   };
 }
 
@@ -143,6 +166,37 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     broadcast({ type: 'message', message: serializeMessage(db, botRow) });
   }
 
+  function toPublicFolder(r: FolderRow): PublicFolder {
+    return {
+      id: r.id,
+      name: r.name,
+      parentId: r.parent_id,
+      createdAt: new Date(r.created_at).toISOString(),
+      updatedAt: r.updated_at ? new Date(r.updated_at).toISOString() : null,
+      createdBy: toPublicUser(db.getUserById(r.created_by) as UserRow),
+    };
+  }
+
+  function toPublicEvent(r: FileEventListRow): PublicFileEvent {
+    return {
+      id: r.id,
+      fileId: r.file_id,
+      folderId: r.folder_id,
+      action: r.action,
+      detail: r.detail,
+      createdAt: new Date(r.created_at).toISOString(),
+      user: toPublicUser(db.getUserById(r.user_id) as UserRow),
+    };
+  }
+
+  function logDocEvent(userId: number, e: { fileId?: number | null; folderId?: number | null; action: string; detail?: string }): void {
+    db.insertFileEvent({ fileId: e.fileId ?? null, folderId: e.folderId ?? null, action: e.action, detail: e.detail, userId });
+  }
+
+  function docsChanged(): void {
+    broadcast({ type: 'docsChanged' });
+  }
+
   function postMessage(userId: number, content: string): SerializedMessage {
     const row = db.insertMessage(userId, content);
     const msg = serializeMessage(db, row);
@@ -221,6 +275,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
         costUsd: sttCost,
         error: null,
       });
+      logDocEvent(userId, { fileId: transcriptRow.id, folderId: fileRow.folder_id ?? null, action: 'file_transcribed', detail: `« ${displayName} » transcrit (${text.length} caractères)` });
       return transcriptRow;
     } catch (err) {
       db.insertUsage({
@@ -444,6 +499,14 @@ export function createServer(config: Config, dataDir: string): ServerContext {
       const displayName = Buffer.from(uploaded.originalname, 'latin1').toString('utf8');
       const post = req.body.post !== 'false';
       const text = typeof req.body.message === 'string' ? req.body.message.trim().slice(0, 4000) : '';
+      let folderId: number | null = null;
+      if (req.body.folderId !== undefined && req.body.folderId !== '' && req.body.folderId !== 'root') {
+        folderId = Number(req.body.folderId);
+        if (!Number.isInteger(folderId) || !db.getFolderById(folderId)) {
+          res.status(400).json({ error: 'folderId invalide' });
+          return;
+        }
+      }
       let messageId: number | null = null;
       if (post) {
         messageId = db.insertMessage(req.user?.id ?? -1, text || `📎 ${displayName}`).id;
@@ -455,7 +518,11 @@ export function createServer(config: Config, dataDir: string): ServerContext {
         uploaded.mimetype || 'application/octet-stream',
         uploaded.size,
         uploaded.filename,
+        null,
+        folderId,
       );
+      logDocEvent(req.user?.id ?? -1, { fileId: fileRow.id, folderId, action: 'file_created', detail: `« ${displayName} » déposé (${(uploaded.size / 1048576).toFixed(1)} Mo)` });
+      docsChanged();
       void (async () => {
         try {
           if (isAudioMime(uploaded.mimetype, displayName)) {
@@ -485,6 +552,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     limit: z.coerce.number().int().min(1).max(200).default(50),
     before: z.coerce.number().int().optional(),
     query: z.string().max(100).optional(),
+    folder: z.string().optional(), // absent = tout ; 'root' = racine ; sinon id de dossier
   });
 
   app.get('/api/files', auth, (req, res) => {
@@ -493,7 +561,18 @@ export function createServer(config: Config, dataDir: string): ServerContext {
       res.status(400).json({ error: 'Paramètres invalides' });
       return;
     }
-    const rows: FileListRow[] = db.listFiles(parsed.data.limit, parsed.data.before, parsed.data.query || undefined);
+    let folderId: number | null | undefined;
+    if (parsed.data.folder !== undefined) {
+      if (parsed.data.folder === 'root') folderId = null;
+      else {
+        folderId = Number(parsed.data.folder);
+        if (!Number.isInteger(folderId) || folderId <= 0) {
+          res.status(400).json({ error: "folder invalide (id ou 'root')" });
+          return;
+        }
+      }
+    }
+    const rows: FileListRow[] = db.listFiles(parsed.data.limit, parsed.data.before, parsed.data.query || undefined, folderId);
     res.json({
       files: rows.map((f) => ({
         ...toPublicFile(f),
@@ -501,6 +580,237 @@ export function createServer(config: Config, dataDir: string): ServerContext {
         user: { id: f.user_id, name: f.user_name },
       })),
     });
+  });
+
+  // ---------- explorateur de documents : dossiers ----------
+  app.get('/api/folders', auth, (req, res) => {
+    res.json({ folders: db.listFolders().map((f) => toPublicFolder(f)) });
+  });
+
+  app.post('/api/folders', auth, (req, res) => {
+    const parsed = z
+      .object({ name: z.string().trim().min(1).max(120), parentId: z.number().int().nullable().optional() })
+      .safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: 'name requis (1-120 caractères), parentId optionnel (null = racine)' });
+      return;
+    }
+    const parentId = parsed.data.parentId ?? null;
+    if (parentId !== null && !db.getFolderById(parentId)) {
+      res.status(404).json({ error: 'Dossier parent introuvable' });
+      return;
+    }
+    if (db.folderExistsWithSiblingName(parentId, parsed.data.name)) {
+      res.status(409).json({ error: 'Un dossier porte déjà ce nom à cet endroit' });
+      return;
+    }
+    const userId = req.user?.id ?? -1;
+    const folder = db.createFolder(userId, parsed.data.name, parentId);
+    logDocEvent(userId, { folderId: folder.id, action: 'folder_created', detail: `Dossier « ${folder.name} » créé${parentId === null ? ' à la racine' : ''}` });
+    docsChanged();
+    res.status(201).json({ folder: toPublicFolder(folder) });
+  });
+
+  app.patch('/api/folders/:id', auth, (req, res) => {
+    const id = Number(req.params.id);
+    const folder = db.getFolderById(id);
+    if (!folder) {
+      res.status(404).json({ error: 'Dossier introuvable' });
+      return;
+    }
+    const parsed = z
+      .object({ name: z.string().trim().min(1).max(120).optional(), parentId: z.number().int().nullable().optional() })
+      .safeParse(req.body ?? {});
+    if (!parsed.success || (parsed.data.name === undefined && parsed.data.parentId === undefined)) {
+      res.status(400).json({ error: 'name et/ou parentId requis' });
+      return;
+    }
+    const { name, parentId } = parsed.data;
+    if (parentId !== undefined && parentId !== null && !db.getFolderById(parentId)) {
+      res.status(404).json({ error: 'Dossier parent introuvable' });
+      return;
+    }
+    if (parentId !== undefined && parentId === id) {
+      res.status(409).json({ error: 'Un dossier ne peut pas être son propre parent' });
+      return;
+    }
+    if (parentId !== undefined && parentId !== null && db.isFolderDescendant(parentId, id)) {
+      res.status(409).json({ error: 'Déplacement impossible : la cible est un sous-dossier de ce dossier' });
+      return;
+    }
+    const newName = name ?? folder.name;
+    const newParent = parentId === undefined ? folder.parent_id : parentId;
+    if (newName.toLowerCase() !== folder.name.toLowerCase() && db.folderExistsWithSiblingName(newParent, newName, id)) {
+      res.status(409).json({ error: 'Un dossier porte déjà ce nom à cet endroit' });
+      return;
+    }
+    const userId = req.user?.id ?? -1;
+    const oldName = folder.name;
+    const oldParent = folder.parent_id;
+    db.updateFolder(id, { name, parentId });
+    if (name !== undefined && name !== oldName) {
+      logDocEvent(userId, { folderId: id, action: 'folder_renamed', detail: `« ${oldName} » renommé en « ${name} »` });
+    }
+    if (parentId !== undefined && parentId !== oldParent) {
+      const target = parentId === null ? 'la racine' : `le dossier « ${db.getFolderById(parentId)?.name ?? `#${parentId}`} »`;
+      logDocEvent(userId, { folderId: id, action: 'folder_moved', detail: `déplacé vers ${target}` });
+    }
+    docsChanged();
+    res.json({ folder: toPublicFolder(db.getFolderById(id) as FolderRow) });
+  });
+
+  app.delete('/api/folders/:id', auth, (req, res) => {
+    const id = Number(req.params.id);
+    const folder = db.getFolderById(id);
+    if (!folder) {
+      res.status(404).json({ error: 'Dossier introuvable' });
+      return;
+    }
+    const recursive = req.query.recursive === '1' || req.query.recursive === 'true';
+    const subIds = db.listSubfolderIds(id);
+    const allFolderIds = [id, ...subIds];
+    const filesToDelete = db.listFilesInFolders(allFolderIds);
+    const direct = db.folderCounts(id);
+    if (!recursive && (subIds.length > 0 || filesToDelete.length > 0)) {
+      res.status(409).json({
+        error: `Dossier non vide : ${subIds.length} sous-dossier(s), ${filesToDelete.length} fichier(s) au total (dont ${direct.files} directement) — passer recursive=1 pour tout supprimer`,
+        counts: { folders: subIds.length, files: filesToDelete.length, directFolders: direct.folders, directFiles: direct.files },
+      });
+      return;
+    }
+    const userId = req.user?.id ?? -1;
+    for (const f of filesToDelete) {
+      try {
+        fs.unlinkSync(path.join(uploadsDir, f.path));
+      } catch {
+        // fichier déjà absent du disque
+      }
+      logDocEvent(userId, { fileId: f.id, folderId: f.folder_id, action: 'file_deleted', detail: `fichier « ${f.name} » supprimé (suppression du dossier)` });
+      db.deleteFile(f.id);
+    }
+    for (const fid of [...allFolderIds].reverse()) {
+      const f = db.getFolderById(fid);
+      logDocEvent(userId, { folderId: fid, action: 'folder_deleted', detail: `dossier « ${f?.name ?? `#${fid}`} » supprimé` });
+      db.deleteFolder(fid);
+    }
+    docsChanged();
+    res.json({ ok: true, deletedFolders: allFolderIds.length, deletedFiles: filesToDelete.length });
+  });
+
+  // ---------- explorateur de documents : fichiers ----------
+  app.get('/api/files/:id', auth, (req, res) => {
+    const file = db.getFileById(Number(req.params.id));
+    if (!file) {
+      res.status(404).json({ error: 'Fichier introuvable' });
+      return;
+    }
+    const folderPath: PublicFolder[] = [];
+    let cur: number | null = file.folder_id ?? null;
+    const seen = new Set<number>();
+    while (cur !== null && !seen.has(cur)) {
+      seen.add(cur);
+      const f = db.getFolderById(cur);
+      if (!f) break;
+      folderPath.unshift(toPublicFolder(f));
+      cur = f.parent_id;
+    }
+    res.json({
+      file: {
+        ...toPublicFile(file),
+        messageId: file.message_id,
+        user: { id: file.user_id, name: db.getUserById(file.user_id)?.name ?? '' },
+      },
+      folderPath,
+      history: db.listFileEvents({ fileId: file.id, limit: 200 }).map(toPublicEvent),
+    });
+  });
+
+  app.patch('/api/files/:id', auth, (req, res) => {
+    const id = Number(req.params.id);
+    const file = db.getFileById(id);
+    if (!file) {
+      res.status(404).json({ error: 'Fichier introuvable' });
+      return;
+    }
+    const parsed = z
+      .object({ name: z.string().trim().min(1).max(255).optional(), folderId: z.number().int().nullable().optional() })
+      .safeParse(req.body ?? {});
+    if (!parsed.success || (parsed.data.name === undefined && parsed.data.folderId === undefined)) {
+      res.status(400).json({ error: 'name et/ou folderId requis (folderId: null = racine)' });
+      return;
+    }
+    const { name, folderId } = parsed.data;
+    const newFolder = folderId === undefined ? (file.folder_id ?? null) : folderId;
+    if (newFolder !== null && !db.getFolderById(newFolder)) {
+      res.status(404).json({ error: 'Dossier cible introuvable' });
+      return;
+    }
+    const newName = name ?? file.name;
+    if (db.fileNameExistsInFolder(newFolder, newName, id)) {
+      res.status(409).json({ error: 'Un fichier porte déjà ce nom dans ce dossier' });
+      return;
+    }
+    const userId = req.user?.id ?? -1;
+    const oldName = file.name;
+    const oldFolder = file.folder_id ?? null;
+    if (name !== undefined && name !== oldName) {
+      db.renameFile(id, name);
+      logDocEvent(userId, { fileId: id, folderId: newFolder, action: 'file_renamed', detail: `« ${oldName} » renommé en « ${name} »` });
+    }
+    if (folderId !== undefined && folderId !== oldFolder) {
+      db.moveFile(id, folderId);
+      const target = folderId === null ? 'la racine' : `le dossier « ${db.getFolderById(folderId)?.name ?? `#${folderId}`} »`;
+      logDocEvent(userId, { fileId: id, folderId, action: 'file_moved', detail: `déplacé vers ${target}` });
+    }
+    docsChanged();
+    res.json({
+      file: {
+        ...toPublicFile(db.getFileById(id) as FileRow),
+        messageId: file.message_id,
+        user: { id: file.user_id, name: db.getUserById(file.user_id)?.name ?? '' },
+      },
+    });
+  });
+
+  app.delete('/api/files/:id', auth, (req, res) => {
+    const id = Number(req.params.id);
+    const file = db.getFileById(id);
+    if (!file) {
+      res.status(404).json({ error: 'Fichier introuvable' });
+      return;
+    }
+    try {
+      fs.unlinkSync(path.join(uploadsDir, file.path));
+    } catch {
+      // déjà absent du disque
+    }
+    logDocEvent(req.user?.id ?? -1, {
+      fileId: id,
+      folderId: file.folder_id ?? null,
+      action: 'file_deleted',
+      detail: `fichier « ${file.name} » supprimé (${(file.size / 1048576).toFixed(1)} Mo)`,
+    });
+    db.deleteFile(id);
+    docsChanged();
+    res.json({ ok: true });
+  });
+
+  app.get('/api/events', auth, (req, res) => {
+    const fileIdRaw = req.query.fileId;
+    const folderIdRaw = req.query.folderId;
+    const limitRaw = Number(req.query.limit ?? 100);
+    const fileId = fileIdRaw !== undefined ? Number(fileIdRaw) : undefined;
+    const folderId = folderIdRaw !== undefined ? Number(folderIdRaw) : undefined;
+    if ((fileIdRaw !== undefined && !Number.isInteger(fileId)) || (folderIdRaw !== undefined && !Number.isInteger(folderId))) {
+      res.status(400).json({ error: 'fileId/folderId doivent être des entiers' });
+      return;
+    }
+    const events = db.listFileEvents({
+      fileId: fileId !== undefined && Number.isInteger(fileId) ? fileId : undefined,
+      folderId: folderId !== undefined && Number.isInteger(folderId) ? folderId : undefined,
+      limit: Math.min(Math.max(limitRaw || 100, 1), 500),
+    });
+    res.json({ events: events.map(toPublicEvent) });
   });
 
   app.get('/api/files/:id/download', auth, (req, res) => {
@@ -600,6 +910,8 @@ export function createServer(config: Config, dataDir: string): ServerContext {
       call.id,
     );
     if (recordingId) db.setRecordingFile(recordingId, fileRow.id);
+    logDocEvent(req.user?.id ?? -1, { fileId: fileRow.id, folderId: fileRow.folder_id ?? null, action: 'file_created', detail: `enregistrement d'appel « ${displayName} » déposé` });
+    docsChanged();
     const message = serializeMessage(db, messageRow);
     broadcast({ type: 'message', message });
 
@@ -624,6 +936,8 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     try {
       const kind: DeriveKind = parsed.data.kind;
       const row = await deriveDocument({ db, config, userId: req.user?.id ?? -1, uploadsDir }, file, kind);
+      logDocEvent(req.user?.id ?? -1, { fileId: row.id, folderId: row.folder_id ?? null, action: 'file_derived', detail: `${kind === 'cr' ? 'compte-rendu' : 'résumé'} généré depuis « ${file.name} »` });
+      docsChanged();
       res.status(201).json({ file: { ...toPublicFile(row), messageId: row.message_id, user: { id: row.user_id, name: db.getUserById(row.user_id)?.name ?? '' } } });
     } catch (err) {
       if (err instanceof HttpError) {

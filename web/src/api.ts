@@ -1,4 +1,4 @@
-import type { AdminStats, CallInfo, FileItem, Message, User } from './types';
+import type { AdminStats, CallInfo, FileEvent, FileItem, Folder, Message, User } from './types';
 
 const TOKEN_KEY = 'chat.token';
 
@@ -51,16 +51,17 @@ export const api = {
     req<{ messages: Message[] }>(`/api/messages?limit=${limit}${before !== undefined ? `&before=${before}` : ''}`),
   send: (content: string) =>
     req<{ message: Message }>('/api/messages', { method: 'POST', body: JSON.stringify({ content }) }),
-  files: (query = '', before?: number, limit = 100) =>
+  files: (query = '', before?: number, limit = 100, folder?: number | null) =>
     req<{ files: FileItem[] }>(
-      `/api/files?limit=${limit}${before !== undefined ? `&before=${before}` : ''}${query ? `&query=${encodeURIComponent(query)}` : ''}`,
+      `/api/files?limit=${limit}${before !== undefined ? `&before=${before}` : ''}${query ? `&query=${encodeURIComponent(query)}` : ''}${folder !== undefined ? `&folder=${folder === null ? 'root' : folder}` : ''}`,
     ),
-  uploadFile: async (file: File, message: string, post: boolean) => {
+  uploadFile: async (file: File, message: string, post: boolean, folderId?: number | null) => {
     const token = getToken();
     const fd = new FormData();
     fd.append('file', file);
     if (message) fd.append('message', message);
     fd.append('post', String(post));
+    if (folderId !== undefined && folderId !== null) fd.append('folderId', String(folderId));
     const res = await fetch('/api/files', {
       method: 'POST',
       headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -128,5 +129,21 @@ export const api = {
     req<{ file: FileItem }>(`/api/files/${fileId}/derive`, { method: 'POST', body: JSON.stringify({ kind }) }),
   transcribe: (fileId: number) =>
     req<{ file: FileItem }>(`/api/files/${fileId}/transcribe`, { method: 'POST' }),
+  // explorateur de documents
+  folders: () => req<{ folders: Folder[] }>('/api/folders'),
+  createFolder: (name: string, parentId: number | null) =>
+    req<{ folder: Folder }>('/api/folders', { method: 'POST', body: JSON.stringify({ name, parentId }) }),
+  patchFolder: (id: number, patch: { name?: string; parentId?: number | null }) =>
+    req<{ folder: Folder }>(`/api/folders/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  deleteFolder: (id: number, recursive: boolean) =>
+    req<{ ok: boolean; deletedFolders?: number; deletedFiles?: number }>(
+      `/api/folders/${id}?recursive=${recursive ? '1' : '0'}`,
+      { method: 'DELETE' },
+    ),
+  patchFile: (id: number, patch: { name?: string; folderId?: number | null }) =>
+    req<{ file: FileItem }>(`/api/files/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  deleteFile: (id: number) => req<{ ok: boolean }>(`/api/files/${id}`, { method: 'DELETE' }),
+  fileDetail: (id: number) => req<{ file: FileItem; folderPath: Folder[]; history: FileEvent[] }>(`/api/files/${id}`),
+  events: (limit = 100) => req<{ events: FileEvent[] }>(`/api/events?limit=${limit}`),
   rtcConfig: () => req<{ iceServers: RTCIceServer[] }>('/api/rtc-config'),
 };

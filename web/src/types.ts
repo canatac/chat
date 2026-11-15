@@ -28,8 +28,29 @@ export interface FileItem {
   size: number;
   mime: string;
   createdAt: string;
+  updatedAt: string | null;
   messageId: number | null;
+  folderId: number | null;
   user: { id: number; name: string };
+}
+
+export interface Folder {
+  id: number;
+  name: string;
+  parentId: number | null;
+  createdAt: string;
+  updatedAt: string | null;
+  createdBy: User;
+}
+
+export interface FileEvent {
+  id: number;
+  fileId: number | null;
+  folderId: number | null;
+  action: string;
+  detail: string;
+  createdAt: string;
+  user: User;
 }
 
 export interface CallParticipant {
