@@ -34,7 +34,7 @@ const PAGE_SIZE = 50;
 const COMMAND_HINTS: Record<string, string> = {
   '/resume': 'Compte-rendu des derniers messages',
   '/solve': 'Suggestions de solutions pour un problème',
-  '/ask': 'Question à l\u2019assistant (chatroom + documents déposés)',
+  '/ask': 'Question à l’assistant (chatroom + documents déposés)',
   '/aide': 'Liste des commandes disponibles',
 };
 
@@ -250,7 +250,7 @@ export default function Chat({ token, user, onLogout }: Props) {
         </Box>
       </Paper>
 
-      <DocDrawer open={docOpen} onClose={() => setDocOpen(false)} />
+      <DocDrawer open={docOpen} onClose={() => setDocOpen(false)} socket={socket} />
       <AdminDialog open={adminOpen} onClose={() => setAdminOpen(false)} />
       <CallDialog
         open={callOpen}
