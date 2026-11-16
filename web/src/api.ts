@@ -5,6 +5,7 @@ interface FileListRequest {
   folderId?: number | null;
   limit: number;
   before?: number;
+  recentSince?: number;
   sort: FileSort;
   filters: FileFilters;
 }
@@ -116,16 +117,19 @@ export const api = {
     req<{ messages: Message[] }>(`/api/messages?limit=${limit}${before !== undefined ? `&before=${before}` : ''}`, { signal }),
   send: (content: string) =>
     req<{ message: Message }>('/api/messages', { method: 'POST', body: JSON.stringify({ content }) }),
-  files: ({ query, folderId, limit, before, sort, filters }: FileListRequest, signal?: AbortSignal) => {
+  files: async ({ query, folderId, limit, before, recentSince, sort, filters }: FileListRequest, signal?: AbortSignal) => {
     const params = new URLSearchParams({ limit: String(limit), sort: sort.column, direction: sort.direction });
     if (before !== undefined) params.set('before', String(before));
     if (query) params.set('query', query);
     if (folderId !== undefined) params.set('folder', folderId === null ? 'root' : String(folderId));
     if (filters.name) params.set('name', filters.name);
-    if (filters.dateFrom) params.set('activityFrom', String(new Date(filters.dateFrom + 'T00:00:00').getTime()));
+    const dateFrom = filters.dateFrom ? new Date(filters.dateFrom + 'T00:00:00').getTime() : undefined;
+    const activityFrom = recentSince === undefined ? dateFrom : Math.max(recentSince, dateFrom ?? recentSince);
+    if (activityFrom !== undefined) params.set('activityFrom', String(activityFrom));
     if (filters.dateTo) {
       const nextDay = new Date(filters.dateTo + 'T00:00:00');
       nextDay.setDate(nextDay.getDate() + 1);
+      if (activityFrom !== undefined && activityFrom >= nextDay.getTime()) return { files: [], nextBefore: null };
       params.set('activityBefore', String(nextDay.getTime()));
     }
     if (filters.minSizeKiB !== undefined) params.set('minBytes', String(filters.minSizeKiB * 1024));

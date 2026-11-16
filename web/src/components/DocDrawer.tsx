@@ -1,3 +1,5 @@
+import ArrowBackIcon from '@mui/icons-material/ArrowBack';
+import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
 import CloseIcon from '@mui/icons-material/Close';
 import CreateNewFolderOutlinedIcon from '@mui/icons-material/CreateNewFolderOutlined';
 import DeleteIcon from '@mui/icons-material/Delete';
@@ -6,14 +8,17 @@ import DownloadIcon from '@mui/icons-material/Download';
 import DriveFileMoveIcon from '@mui/icons-material/DriveFileMove';
 import FolderOpenOutlinedIcon from '@mui/icons-material/FolderOpenOutlined';
 import FolderOutlinedIcon from '@mui/icons-material/FolderOutlined';
+import GridViewOutlinedIcon from '@mui/icons-material/GridViewOutlined';
 import HistoryIcon from '@mui/icons-material/History';
 import HomeOutlinedIcon from '@mui/icons-material/HomeOutlined';
+import MenuOutlinedIcon from '@mui/icons-material/MenuOutlined';
 import RecordVoiceOverIcon from '@mui/icons-material/RecordVoiceOver';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import RenameIcon from '@mui/icons-material/DriveFileRenameOutline';
 import SearchIcon from '@mui/icons-material/Search';
 import SummarizeIcon from '@mui/icons-material/Summarize';
 import UploadFileOutlinedIcon from '@mui/icons-material/UploadFileOutlined';
+import ViewListOutlinedIcon from '@mui/icons-material/ViewListOutlined';
 import {
   Alert,
   Box,
@@ -39,16 +44,22 @@ import {
   ListItemText,
   Menu,
   MenuItem,
+  Popover,
   TextField,
+  ToggleButton,
+  ToggleButtonGroup,
   Tooltip,
   Typography,
+  useMediaQuery,
 } from '@mui/material';
+import { useTheme } from '@mui/material/styles';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, saveFile } from '../api';
 import { formatFileSize } from '../formatFileSize';
 import type { FileFilters, FileItem, FileSort, Folder } from '../types';
 import type { ChatSocket } from '../ws';
-import DocumentExplorerList, { explorerColors, type DocumentItem } from './DocumentExplorerList';
+import DocumentExplorerList, { explorerColors, type DocumentItem, type DocumentView } from './DocumentExplorerList';
+import DocumentPlaces, { type DocumentPlace } from './DocumentPlaces';
 
 interface Props {
   open: boolean;
@@ -63,9 +74,12 @@ type NameEdit =
 
 type FileDetail = Awaited<ReturnType<typeof api.fileDetail>>;
 type FileListing = Awaited<ReturnType<typeof api.files>> & { scope: string };
+type NavigationHistory = { places: DocumentPlace[]; index: number };
 
 const dateTime = new Intl.DateTimeFormat('fr-FR', { dateStyle: 'medium', timeStyle: 'short' });
 const FILE_LIMIT = 200;
+const RECENT_DAYS = 30;
+const VIEW_STORAGE_KEY = 'chat.documents.view';
 
 const ACTION_LABELS: Record<string, string> = {
   file_created: 'Déposé',
@@ -108,11 +122,15 @@ const horizontalPadding = { xs: 2, sm: 3.25 };
 const preparedDialogProps = { fullWidth: true, maxWidth: 'xs' as const };
 
 export default function DocDrawer({ open, onClose, socket }: Props) {
+  const wide = useMediaQuery(useTheme().breakpoints.up('md'));
   const [folders, setFolders] = useState<Folder[]>([]);
   const [listing, setListing] = useState<FileListing | null>(null);
-  const [currentId, setCurrentId] = useState<number | null>(null);
+  const [history, setHistory] = useState<NavigationHistory>({ places: [null], index: 0 });
+  const [placesAnchor, setPlacesAnchor] = useState<HTMLButtonElement | null>(null);
+  const [view, setView] = useState<DocumentView>(() => localStorage.getItem(VIEW_STORAGE_KEY) === 'grid' ? 'grid' : 'list');
   const [query, setQuery] = useState('');
-  const [sort, setSort] = useState<FileSort>({ column: 'name', direction: 'asc' });
+  const [folderSort, setFolderSort] = useState<FileSort>({ column: 'name', direction: 'asc' });
+  const [recentSort, setRecentSort] = useState<FileSort>({ column: 'date', direction: 'desc' });
   const [filters, setFilters] = useState<FileFilters>({});
   const [revision, setRevision] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -137,11 +155,21 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
   const contentRef = useRef<HTMLDivElement>(null);
   const detailRequest = useRef(0);
   const moreFilesRequest = useRef<AbortController | null>(null);
+  const place = history.places[history.index];
+  const currentId = typeof place === 'number' ? place : null;
   const search = query.trim();
-  const folderScope = search ? 'search:' + search : 'folder:' + currentId;
+  const recent = !search && place === 'recent';
+  const showPaths = Boolean(search) || recent;
+  const folderScope = search ? 'search:' + search : 'place:' + place;
+  const sort = recent ? recentSort : folderSort;
   const fileRequest = useMemo(() => ({
-    query: search, folderId: search ? undefined : currentId, limit: FILE_LIMIT, sort, filters,
-  }), [currentId, filters, search, sort]);
+    query: search,
+    folderId: showPaths ? undefined : currentId,
+    recentSince: recent ? Date.now() - RECENT_DAYS * 86_400_000 : undefined,
+    limit: FILE_LIMIT,
+    sort,
+    filters,
+  }), [currentId, filters, open, recent, revision, search, showPaths, sort]);
   const scope = JSON.stringify(fileRequest);
   const visibleListing = listing?.scope === scope ? listing : null;
   const reload = useCallback(() => setRevision((previous) => previous + 1), []);
@@ -161,9 +189,16 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
         ]);
         if (request.signal.aborted) return;
         setFolders(directory.folders);
-        if (currentId !== null && !directory.folders.some((folder) => folder.id === currentId)) {
-          setCurrentId(null);
-        }
+        const existingFolders = new Set(directory.folders.map(({ id }) => id));
+        setHistory((previous) => {
+          const places: DocumentPlace[] = [];
+          let index = 0;
+          for (const [position, entry] of previous.places.entries()) {
+            if ((typeof entry !== 'number' || existingFolders.has(entry)) && places[places.length - 1] !== entry) places.push(entry);
+            if (position === previous.index) index = places.length - 1;
+          }
+          return places.length === previous.places.length ? previous : { places, index };
+        });
         setListing({ scope, ...result });
       } catch (error) {
         if (!request.signal.aborted) setListError(errorMessage(error, 'Impossible de charger les documents.'));
@@ -178,7 +213,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
       moreFilesRequest.current?.abort();
       moreFilesRequest.current = null;
     };
-  }, [open, currentId, fileRequest, scope, search, revision]);
+  }, [open, fileRequest, scope, search, revision]);
 
   useEffect(() => {
     if (!open || !socket) return;
@@ -234,21 +269,50 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
     return path;
   }, [folderById]);
 
-  const breadcrumb = pathFor(currentId);
-  const childFolders = search ? [] : folders
-    .filter((folder) => folder.parentId === currentId)
-    .sort((left, right) => left.name.localeCompare(right.name, 'fr'));
+  const foldersByParent = useMemo(() => {
+    const tree = new Map<number | null, Folder[]>();
+    for (const folder of folders) {
+      const siblings = tree.get(folder.parentId) ?? [];
+      siblings.push(folder);
+      tree.set(folder.parentId, siblings);
+    }
+    for (const siblings of tree.values()) siblings.sort((left, right) => left.name.localeCompare(right.name, 'fr'));
+    return tree;
+  }, [folders]);
 
-  const showFolder = (id: number | null) => {
+  const breadcrumb = useMemo(() => pathFor(currentId), [currentId, pathFor]);
+  const childFolders = showPaths ? [] : foldersByParent.get(currentId) ?? [];
+
+  const showPlace = (next: DocumentPlace) => {
     setActionError(null);
     setQuery('');
-    setCurrentId(id);
+    setPlacesAnchor(null);
+    setHistory((previous) => previous.places[previous.index] === next ? previous : {
+      places: [...previous.places.slice(0, previous.index + 1), next],
+      index: previous.index + 1,
+    });
+  };
+
+  const stepHistory = (direction: -1 | 1) => {
+    setActionError(null);
+    setQuery('');
+    if (search) return;
+    setHistory((previous) => {
+      const index = previous.index + direction;
+      return index >= 0 && index < previous.places.length ? { ...previous, index } : previous;
+    });
+  };
+
+  const changeView = (next: DocumentView | null) => {
+    if (!next) return;
+    setView(next);
+    localStorage.setItem(VIEW_STORAGE_KEY, next);
   };
 
   const onPick = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = '';
-    if (!file || uploading) return;
+    if (!file || uploading || showPaths) return;
     setActionError(null);
     setUploading(true);
     try {
@@ -378,18 +442,10 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
 
   const moveTree = useMemo(() => {
     if (!moveDialog) return [];
-    const tree = new Map<number | null, Folder[]>();
-    for (const folder of folders) {
-      const siblings = tree.get(folder.parentId) ?? [];
-      siblings.push(folder);
-      tree.set(folder.parentId, siblings);
-    }
     const rows: { folder: Folder | null; depth: number }[] = [{ folder: null, depth: 0 }];
     const blockedId = moveDialog.kind === 'folder' ? moveDialog.item.id : null;
     const addChildren = (parent: number | null, depth: number) => {
-      const siblings = tree.get(parent) ?? [];
-      siblings.sort((left, right) => left.name.localeCompare(right.name, 'fr'));
-      for (const folder of siblings) {
+      for (const folder of foldersByParent.get(parent) ?? []) {
         if (folder.id === blockedId) continue;
         rows.push({ folder, depth });
         addChildren(folder.id, depth + 1);
@@ -397,12 +453,13 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
     };
     addChildren(null, 1);
     return rows;
-  }, [moveDialog, folders]);
+  }, [moveDialog, foldersByParent]);
 
   const closeExplorer = () => {
     detailRequest.current += 1;
     setDetail(null);
     setMenu(null);
+    setPlacesAnchor(null);
     setActionError(null);
     onClose();
   };
@@ -410,6 +467,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
   const menuTarget = menu?.target;
   const editingFile = nameDialog?.mode === 'rename-file';
   const nameDialogTitle = nameDialog?.mode === 'new-folder' ? 'Nouveau dossier' : editingFile ? 'Renommer le fichier' : 'Renommer le dossier';
+  const places = <DocumentPlaces foldersByParent={foldersByParent} currentPath={breadcrumb} active={search ? undefined : place} onNavigate={showPlace} />;
 
   return (
     <Drawer
@@ -423,7 +481,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
           'aria-modal': true,
           'aria-labelledby': 'doc-explorer-title',
           sx: {
-            width: { xs: '100%', sm: 'min(850px, calc(100% - 32px))' },
+            width: { xs: '100%', md: 'min(1180px, calc(100% - 32px))' },
             bgcolor: explorerColors.background,
             color: explorerColors.ink,
             borderLeft: { sm: '1px solid ' + explorerColors.border },
@@ -431,12 +489,12 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
         },
       }}
     >
-      <Box component="header" sx={{ px: horizontalPadding, pt: { xs: 2, sm: 3 }, pb: { xs: 2, sm: 2.5 }, bgcolor: explorerColors.surface, borderBottom: '1px solid ' + explorerColors.border }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: { xs: 1, sm: 1.5 }, mb: { xs: 1.75, sm: 2.4 } }}>
+      <Box component="header" sx={{ px: horizontalPadding, py: 1.4, flexShrink: 0, bgcolor: explorerColors.surface, borderBottom: '1px solid ' + explorerColors.border }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: { xs: 1, sm: 1.5 } }}>
           <Box
             sx={{
-              width: { xs: 39, sm: 48 },
-              height: { xs: 39, sm: 48 },
+              width: 40,
+              height: 40,
               flexShrink: 0,
               borderRadius: '13px',
               bgcolor: explorerColors.accentSoft,
@@ -447,148 +505,201 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
           >
             <FolderOpenOutlinedIcon />
           </Box>
-          <Typography id="doc-explorer-title" component="h2" sx={{ fontSize: { xs: '1.17rem', sm: '1.55rem' }, fontWeight: 760, lineHeight: 1.15, flex: 1, minWidth: 0, letterSpacing: '-0.025em' }}>
+          <Typography id="doc-explorer-title" component="h2" sx={{ fontSize: { xs: '1.08rem', sm: '1.35rem' }, fontWeight: 760, lineHeight: 1.15, flex: 1, minWidth: 0, letterSpacing: '-0.025em' }}>
             Espace documentaire
           </Typography>
-          <Tooltip title="Rafraîchir">
+          <Tooltip disableInteractive title="Rafraîchir">
             <IconButton aria-label="Rafraîchir les documents" onClick={reload} sx={headerActionStyle}>
               <RefreshIcon fontSize="small" />
             </IconButton>
           </Tooltip>
-          <Tooltip title="Fermer">
+          <Tooltip disableInteractive title="Fermer">
             <IconButton aria-label="Fermer l’espace documentaire" onClick={closeExplorer} sx={headerActionStyle}>
               <CloseIcon fontSize="small" />
             </IconButton>
           </Tooltip>
         </Box>
-        <Box sx={{ display: 'grid', gridTemplateColumns: { xs: 'minmax(0, 1fr)', md: 'minmax(0, 1fr) auto' }, gap: 1.2 }}>
-          <TextField
-            size="small"
-            fullWidth
-            value={query}
-            placeholder="Rechercher un fichier…"
-            onChange={(event) => setQuery(event.target.value)}
-            slotProps={{
-              htmlInput: { maxLength: 100, 'aria-label': 'Rechercher dans tous les dossiers' },
-              input: {
-                startAdornment: <InputAdornment position="start"><SearchIcon fontSize="small" sx={{ color: explorerColors.muted }} /></InputAdornment>,
-                endAdornment: query ? (
-                  <InputAdornment position="end">
-                    <IconButton aria-label="Effacer la recherche" size="small" onClick={() => setQuery('')}>
-                      <CloseIcon fontSize="small" />
-                    </IconButton>
-                  </InputAdornment>
-                ) : undefined,
-              },
-            }}
-            sx={{
-              '& .MuiOutlinedInput-root': { height: 42, borderRadius: '10px', bgcolor: '#f6f9f9' },
-              '& .MuiOutlinedInput-notchedOutline': { borderColor: explorerColors.border },
-              '& input::placeholder': { color: explorerColors.muted, opacity: 1 },
-            }}
-          />
-          <Box sx={{ display: 'grid', gridTemplateColumns: { xs: 'minmax(0, 1fr) minmax(0, 1fr)', sm: 'auto auto' }, justifyContent: { sm: 'end' }, gap: 1 }}>
-            <Button
-              variant="outlined"
-              startIcon={<CreateNewFolderOutlinedIcon />}
-              onClick={() => openNameDialog({ mode: 'new-folder' })}
-              disabled={Boolean(search)}
-              sx={{ ...buttonStyle, color: explorerColors.accent, borderColor: explorerColors.border }}
-            >
-              Nouveau dossier
-            </Button>
-            <Button
-              disableElevation
-              variant="contained"
-              startIcon={uploading ? <CircularProgress color="inherit" size={16} /> : <UploadFileOutlinedIcon />}
-              disabled={uploading || Boolean(search)}
-              onClick={() => fileRef.current?.click()}
-              sx={primaryButtonStyle}
-            >
-              {uploading ? 'Dépôt en cours…' : 'Déposer un fichier'}
-            </Button>
+      </Box>
+
+      <Box sx={{ display: 'grid', gridTemplateColumns: wide ? '218px minmax(0, 1fr)' : 'minmax(0, 1fr)', flex: 1, minHeight: 0 }}>
+        {wide && (
+          <Box component="aside" sx={{ bgcolor: '#edf3f2', borderRight: '1px solid ' + explorerColors.border, overflowY: 'auto', overscrollBehavior: 'contain' }}>
+            {places}
           </Box>
-          <input hidden type="file" ref={fileRef} onChange={onPick} />
+        )}
+
+        <Box sx={{ display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0 }}>
+          <Box sx={{ px: horizontalPadding, py: { xs: 1.35, sm: 1.6 }, position: 'relative', flexShrink: 0, borderBottom: '1px solid ' + explorerColors.border, bgcolor: explorerColors.surface }}>
+            <Box
+              sx={{
+                display: 'grid', alignItems: 'center', gap: 1, mb: 1.15,
+                gridTemplateColumns: { xs: 'minmax(0, 1fr) auto', sm: 'auto minmax(0, 1fr) auto' },
+                gridTemplateAreas: { xs: '"navigation views" "location location"', sm: '"navigation location views"' },
+              }}
+            >
+              <Box sx={{ gridArea: 'navigation', display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                {!wide && (
+                  <Tooltip disableInteractive title="Emplacements">
+                    <IconButton aria-label="Afficher les emplacements" aria-haspopup="dialog" aria-expanded={Boolean(placesAnchor)} onClick={(event) => setPlacesAnchor(event.currentTarget)} sx={headerActionStyle}>
+                      <MenuOutlinedIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                )}
+                <Tooltip disableInteractive title="Précédent">
+                  <span><IconButton aria-label="Précédent" disabled={!search && history.index === 0} onClick={() => stepHistory(-1)} sx={headerActionStyle}><ArrowBackIcon fontSize="small" /></IconButton></span>
+                </Tooltip>
+                <Tooltip disableInteractive title="Suivant">
+                  <span><IconButton aria-label="Suivant" disabled={Boolean(search) || history.index === history.places.length - 1} onClick={() => stepHistory(1)} sx={headerActionStyle}><ArrowForwardIcon fontSize="small" /></IconButton></span>
+                </Tooltip>
+              </Box>
+
+              <Box sx={{ gridArea: 'location', minWidth: 0, minHeight: 40, px: 1.3, display: 'flex', alignItems: 'center', overflow: 'hidden', border: '1px solid ' + explorerColors.border, borderRadius: '10px', bgcolor: '#f4f8f7' }}>
+                {search ? (
+                  <Typography component="h3" noWrap sx={{ fontSize: '0.83rem', fontWeight: 700 }}>Résultats dans tous les dossiers</Typography>
+                ) : recent ? (
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0 }}>
+                    <HistoryIcon fontSize="small" sx={{ color: explorerColors.accent }} />
+                    <Typography component="h3" sx={{ fontSize: '0.85rem', fontWeight: 750 }}>Récents</Typography>
+                    <Typography variant="caption" noWrap sx={{ color: explorerColors.muted }}>{RECENT_DAYS} derniers jours</Typography>
+                  </Box>
+                ) : (
+                  <Breadcrumbs
+                    aria-label="Chemin du dossier"
+                    maxItems={3}
+                    sx={{ minWidth: 0, '& .MuiBreadcrumbs-ol': { flexWrap: 'nowrap', minWidth: 0 }, '& .MuiBreadcrumbs-li': { minWidth: 0 }, '& .MuiBreadcrumbs-separator': { mx: 0.55 } }}
+                  >
+                    <Link component="button" aria-current={currentId === null ? 'page' : undefined} onClick={() => showPlace(null)} color="inherit" underline="hover" sx={{ display: 'flex', alignItems: 'center', gap: 0.6, fontSize: '0.83rem', fontWeight: 700 }}>
+                      <HomeOutlinedIcon fontSize="small" /> Racine
+                    </Link>
+                    {breadcrumb.map((folder) => (
+                      <Link
+                        key={folder.id}
+                        component="button"
+                        aria-current={currentId === folder.id ? 'page' : undefined}
+                        onClick={() => showPlace(folder.id)}
+                        title={folder.name}
+                        underline="hover"
+                        sx={{
+                          display: 'block', maxWidth: { xs: '31vw', sm: 128, xl: 205 }, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                          color: currentId === folder.id ? explorerColors.ink : explorerColors.accent, fontSize: '0.83rem', fontWeight: currentId === folder.id ? 750 : 600,
+                        }}
+                      >
+                        {folder.name}
+                      </Link>
+                    ))}
+                  </Breadcrumbs>
+                )}
+              </Box>
+
+              <ToggleButtonGroup
+                exclusive value={view} onChange={(_event, next: DocumentView | null) => changeView(next)} aria-label="Mode d’affichage"
+                sx={{ gridArea: 'views', '& .MuiToggleButton-root': { width: 40, height: 40, px: 0, color: explorerColors.muted, borderColor: explorerColors.border }, '& .Mui-selected': { color: explorerColors.accent, bgcolor: explorerColors.accentSoft } }}
+              >
+                <ToggleButton value="list" aria-label="Vue liste" title="Vue liste"><ViewListOutlinedIcon fontSize="small" /></ToggleButton>
+                <ToggleButton value="grid" aria-label="Vue grille" title="Vue grille"><GridViewOutlinedIcon fontSize="small" /></ToggleButton>
+              </ToggleButtonGroup>
+            </Box>
+
+            <Box sx={{ display: 'grid', gridTemplateColumns: { xs: 'minmax(0, 1fr)', sm: 'minmax(0, 1fr) auto' }, gap: 1 }}>
+              <TextField
+                size="small"
+                fullWidth
+                value={query}
+                placeholder="Rechercher un fichier…"
+                onChange={(event) => setQuery(event.target.value)}
+                slotProps={{
+                  htmlInput: { maxLength: 100, 'aria-label': 'Rechercher dans tous les dossiers' },
+                  input: {
+                    startAdornment: <InputAdornment position="start"><SearchIcon fontSize="small" sx={{ color: explorerColors.muted }} /></InputAdornment>,
+                    endAdornment: query ? (
+                      <InputAdornment position="end">
+                        <IconButton aria-label="Effacer la recherche" size="small" onClick={() => setQuery('')}>
+                          <CloseIcon fontSize="small" />
+                        </IconButton>
+                      </InputAdornment>
+                    ) : undefined,
+                  },
+                }}
+                sx={{
+                  '& .MuiOutlinedInput-root': { height: 42, borderRadius: '10px', bgcolor: '#f6f9f9' },
+                  '& .MuiOutlinedInput-notchedOutline': { borderColor: explorerColors.border },
+                  '& input::placeholder': { color: explorerColors.muted, opacity: 1 },
+                }}
+              />
+              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: 'minmax(0, 1fr) minmax(0, 1fr)', sm: 'auto auto' }, gap: 1 }}>
+                <Button
+                  variant="outlined"
+                  startIcon={<CreateNewFolderOutlinedIcon />}
+                  onClick={() => openNameDialog({ mode: 'new-folder' })}
+                  disabled={showPaths}
+                  sx={{ ...buttonStyle, color: explorerColors.accent, borderColor: explorerColors.border }}
+                >
+                  Nouveau dossier
+                </Button>
+                <Button
+                  disableElevation
+                  variant="contained"
+                  startIcon={uploading ? <CircularProgress color="inherit" size={16} /> : <UploadFileOutlinedIcon />}
+                  disabled={uploading || showPaths}
+                  onClick={() => fileRef.current?.click()}
+                  sx={primaryButtonStyle}
+                >
+                  {uploading ? 'Dépôt en cours…' : 'Déposer un fichier'}
+                </Button>
+              </Box>
+              <input hidden type="file" ref={fileRef} onChange={onPick} />
+            </Box>
+            {loading && <LinearProgress aria-label="Actualisation des documents" sx={{ position: 'absolute', height: 2, left: 0, right: 0, bottom: 0 }} />}
+          </Box>
+
+          <Box ref={contentRef} sx={{ px: horizontalPadding, pt: { xs: 1.55, sm: 2 }, pb: 3, flex: 1, minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain' }} aria-busy={loading || loadingMore}>
+            {actionError && <Alert severity="error" onClose={() => setActionError(null)} sx={{ mb: 2 }}>{actionError}</Alert>}
+            {listError && (
+              <Alert severity="error" sx={{ mb: 2 }} action={<Button color="inherit" size="small" onClick={reload}>Réessayer</Button>}>
+                {listError}
+              </Alert>
+            )}
+            <DocumentExplorerList
+              folders={childFolders}
+              files={visibleListing?.files ?? null}
+              loading={!visibleListing && !listError}
+              searching={Boolean(search)}
+              recent={recent}
+              view={view}
+              sort={sort}
+              filters={filters}
+              onSort={recent ? setRecentSort : setFolderSort}
+              onFilter={setFilters}
+              downloading={downloading}
+              folderPath={(id) => pathFor(id).map((folder) => folder.name).join(' / ') || 'Racine'}
+              onOpenFolder={showPlace}
+              onOpenFile={(file) => void openDetail(file)}
+              onDownload={(file) => void download(file)}
+              onMenu={(target, anchor) => setMenu({ target, anchor })}
+            />
+            {visibleListing?.nextBefore != null && (
+              <Box sx={{ display: 'flex', justifyContent: 'center', mt: 1.5 }}>
+                <Button onClick={() => void loadMoreFiles()} disabled={loading || loadingMore} sx={{ ...buttonStyle, color: explorerColors.accent }}>
+                  {loadingMore ? 'Chargement des fichiers…' : 'Afficher plus de fichiers'}
+                </Button>
+              </Box>
+            )}
+          </Box>
         </Box>
       </Box>
 
-      <Box sx={{ position: 'relative', flexShrink: 0, px: horizontalPadding, py: 1.5, borderBottom: '1px solid ' + explorerColors.border }}>
-        {search ? (
-          <Typography component="h3" sx={{ fontSize: '0.85rem', fontWeight: 700 }}>Résultats dans tous les dossiers</Typography>
-        ) : (
-          <Breadcrumbs
-            aria-label="Chemin du dossier"
-            maxItems={4}
-            sx={{ '& .MuiBreadcrumbs-ol': { flexWrap: 'nowrap', minWidth: 0 }, '& .MuiBreadcrumbs-li': { minWidth: 0 }, '& .MuiBreadcrumbs-separator': { mx: 0.75 } }}
-          >
-            <Link
-              component="button"
-              aria-current={currentId === null ? 'page' : undefined}
-              onClick={() => showFolder(null)}
-              color="inherit"
-              underline="hover"
-              sx={{ display: 'flex', alignItems: 'center', gap: 0.65, fontSize: '0.85rem', fontWeight: 700 }}
-            >
-              <HomeOutlinedIcon fontSize="small" /> Racine
-            </Link>
-            {breadcrumb.map((folder) => (
-              <Link
-                key={folder.id}
-                component="button"
-                aria-current={currentId === folder.id ? 'page' : undefined}
-                onClick={() => showFolder(folder.id)}
-                title={folder.name}
-                underline="hover"
-                sx={{
-                  display: 'block',
-                  maxWidth: { xs: '34vw', sm: 210 },
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                  color: currentId === folder.id ? explorerColors.ink : explorerColors.accent,
-                  fontSize: '0.85rem',
-                  fontWeight: currentId === folder.id ? 750 : 600,
-                }}
-              >
-                {folder.name}
-              </Link>
-            ))}
-          </Breadcrumbs>
-        )}
-        {loading && <LinearProgress aria-label="Actualisation des documents" sx={{ position: 'absolute', height: 2, left: 0, right: 0, bottom: 0 }} />}
-      </Box>
-
-      <Box ref={contentRef} sx={{ px: horizontalPadding, pt: { xs: 2, sm: 2.5 }, pb: 3, flex: 1, minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain' }} aria-busy={loading || loadingMore}>
-        {actionError && <Alert severity="error" onClose={() => setActionError(null)} sx={{ mb: 2 }}>{actionError}</Alert>}
-        {listError && (
-          <Alert severity="error" sx={{ mb: 2 }} action={<Button color="inherit" size="small" onClick={reload}>Réessayer</Button>}>
-            {listError}
-          </Alert>
-        )}
-        <DocumentExplorerList
-          folders={childFolders}
-          files={visibleListing?.files ?? null}
-          loading={!visibleListing && !listError}
-          searching={Boolean(search)}
-          sort={sort}
-          filters={filters}
-          onSort={setSort}
-          onFilter={setFilters}
-          downloading={downloading}
-          folderPath={(id) => pathFor(id).map((folder) => folder.name).join(' / ') || 'Racine'}
-          onOpenFolder={showFolder}
-          onOpenFile={(file) => void openDetail(file)}
-          onDownload={(file) => void download(file)}
-          onMenu={(target, anchor) => setMenu({ target, anchor })}
-        />
-        {visibleListing?.nextBefore != null && (
-          <Box sx={{ display: 'flex', justifyContent: 'center', mt: 1.5 }}>
-            <Button onClick={() => void loadMoreFiles()} disabled={loading || loadingMore} sx={{ ...buttonStyle, color: explorerColors.accent }}>
-              {loadingMore ? 'Chargement des fichiers…' : 'Afficher plus de fichiers'}
-            </Button>
-          </Box>
-        )}
-      </Box>
+      {!wide && (
+        <Popover
+          open={open && Boolean(placesAnchor)}
+          keepMounted
+          anchorEl={placesAnchor}
+          onClose={() => setPlacesAnchor(null)}
+          anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+          slotProps={{ paper: { role: 'dialog', 'aria-label': 'Emplacements', sx: { bgcolor: '#edf3f2', width: 280, maxWidth: 'calc(100% - 32px)' } } }}
+        >
+          {places}
+        </Popover>
+      )}
 
       <Menu anchorEl={menu?.anchor ?? null} open={Boolean(menu)} onClose={() => setMenu(null)}>
         {menuTarget?.kind === 'file' && (

@@ -3,13 +3,15 @@ import AudioFileOutlinedIcon from '@mui/icons-material/AudioFileOutlined';
 import DownloadOutlinedIcon from '@mui/icons-material/DownloadOutlined';
 import FolderOpenOutlinedIcon from '@mui/icons-material/FolderOpenOutlined';
 import FolderOutlinedIcon from '@mui/icons-material/FolderOutlined';
+import ImageOutlinedIcon from '@mui/icons-material/ImageOutlined';
 import MoreHorizIcon from '@mui/icons-material/MoreHoriz';
+import MovieOutlinedIcon from '@mui/icons-material/MovieOutlined';
 import PictureAsPdfOutlinedIcon from '@mui/icons-material/PictureAsPdfOutlined';
 import SearchOffOutlinedIcon from '@mui/icons-material/SearchOffOutlined';
 import { Box, Button, ButtonBase, CircularProgress, IconButton, Skeleton, Tooltip, Typography } from '@mui/material';
 import type { ReactNode } from 'react';
-import { chatColors } from '../theme';
 import { formatFileSize } from '../formatFileSize';
+import { chatColors } from '../theme';
 import type { FileFilters, FileItem, FileSort, Folder } from '../types';
 import DocumentColumnControls from './DocumentColumnControls';
 
@@ -20,12 +22,15 @@ export const explorerColors = {
 };
 
 export type DocumentItem = { kind: 'folder'; item: Folder } | { kind: 'file'; item: FileItem };
+export type DocumentView = 'list' | 'grid';
 
 interface Props {
   folders: Folder[];
   files: FileItem[] | null;
   loading: boolean;
   searching: boolean;
+  recent: boolean;
+  view: DocumentView;
   sort: FileSort;
   filters: FileFilters;
   onSort: (sort: FileSort) => void;
@@ -48,48 +53,81 @@ const actionStyle = {
   borderRadius: '9px',
   '&:hover': { bgcolor: explorerColors.accentSoft, color: explorerColors.accent },
   '&.Mui-focusVisible': { outline: '2px solid ' + explorerColors.accent, outlineOffset: -2 },
-  '@media (max-width:359px)': { width: 36, height: 40 },
+  '@media (max-width:359px)': { width: 36 },
 };
 
-const itemButtonStyle = {
-  p: 1.25,
-  width: '100%',
+const rowStyle = {
+  display: 'grid',
+  gridTemplateColumns: { xs: 'minmax(0, 1fr) 82px', md: fileColumns },
+  '@media (max-width:359px)': { gridTemplateColumns: 'minmax(0, 1fr) 74px' },
+  alignItems: 'center',
   minWidth: 0,
-  gap: 1.25,
-  borderRadius: '11px',
-  justifyContent: 'flex-start',
-  textAlign: 'left',
-  '&:hover': { bgcolor: '#f1f7f6' },
-  '@media (max-width:359px)': { gap: 0.75 },
-  '&.Mui-focusVisible': { outline: '2px solid ' + explorerColors.accent, outlineOffset: -2 },
+  px: 0.5,
+  py: 0.25,
+  '& + &': { borderTop: '1px solid ' + explorerColors.border },
 };
 
-function FileIcon({ mime }: { mime: string }) {
-  if (mime.startsWith('audio/')) {
-    return <IconTile color="#644690" background="#efeafa"><AudioFileOutlinedIcon fontSize="small" /></IconTile>;
-  }
-  if (mime === 'application/pdf') {
-    return <IconTile color="#a03b36" background="#fbeae8"><PictureAsPdfOutlinedIcon fontSize="small" /></IconTile>;
-  }
-  return <IconTile color={explorerColors.accent} background={explorerColors.accentSoft}><ArticleOutlinedIcon fontSize="small" /></IconTile>;
-}
+const cardStyle = {
+  display: 'flex',
+  flexDirection: 'column',
+  minWidth: 0,
+  border: '1px solid ' + explorerColors.border,
+  borderRadius: '12px',
+  bgcolor: explorerColors.surface,
+};
 
-function IconTile({ children, color, background }: { children: ReactNode; color: string; background: string }) {
+function IconTile({ children, color, background, grid }: { children: ReactNode; color: string; background: string; grid: boolean }) {
   return (
     <Box
       component="span"
-      sx={{ display: 'grid', placeItems: 'center', width: 40, height: 40, flexShrink: 0, borderRadius: '11px', color, bgcolor: background, '@media (max-width:359px)': { width: 34, height: 34 } }}
+      sx={{
+        display: 'grid', placeItems: 'center', width: grid ? 56 : 38, height: grid ? 56 : 38, flexShrink: 0,
+        borderRadius: grid ? '14px' : '10px', color, bgcolor: background,
+        '& .MuiSvgIcon-root': { fontSize: grid ? 34 : 22 },
+        '@media (max-width:359px)': { width: grid ? 52 : 34, height: grid ? 52 : 34 },
+      }}
     >
       {children}
     </Box>
   );
 }
 
-function FileName({ name }: { name: string }) {
+function DocumentIcon({ target, grid }: { target: DocumentItem; grid: boolean }) {
+  if (target.kind === 'folder') {
+    return <IconTile grid={grid} color={explorerColors.folder} background={explorerColors.folderSoft}><FolderOutlinedIcon /></IconTile>;
+  }
+  const { mime } = target.item;
+  if (mime.startsWith('audio/')) {
+    return <IconTile grid={grid} color="#644690" background="#efeafa"><AudioFileOutlinedIcon /></IconTile>;
+  }
+  if (mime.startsWith('video/')) {
+    return <IconTile grid={grid} color="#375883" background="#e9effa"><MovieOutlinedIcon /></IconTile>;
+  }
+  if (mime.startsWith('image/')) {
+    return <IconTile grid={grid} color="#2b6a72" background="#e3f1f3"><ImageOutlinedIcon /></IconTile>;
+  }
+  if (mime === 'application/pdf') {
+    return <IconTile grid={grid} color="#a03b36" background="#fbeae8"><PictureAsPdfOutlinedIcon /></IconTile>;
+  }
+  return <IconTile grid={grid} color={explorerColors.accent} background={explorerColors.accentSoft}><ArticleOutlinedIcon /></IconTile>;
+}
+
+function DocumentName({ name, grid }: { name: string; grid: boolean }) {
+  if (grid) {
+    return (
+      <Typography
+        component="span"
+        aria-hidden="true"
+        sx={{ display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 2, overflow: 'hidden', overflowWrap: 'anywhere', lineHeight: 1.3, fontWeight: 700, fontSize: '0.86rem' }}
+      >
+        {name}
+      </Typography>
+    );
+  }
   const characters = Array.from(name);
   const splitAt = characters.length > 38 ? characters.length - 13 : characters.length;
   return (
-    <Box component="span" aria-hidden="true" sx={{ display: 'flex', minWidth: 0, fontWeight: 650, fontSize: '0.89rem' }}>
+    <Box component="span" aria-hidden="true" sx={{ display: 'flex', minWidth: 0, fontWeight: 700, fontSize: '0.89rem' }}>
       <Box component="span" sx={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'pre' }}>
         {characters.slice(0, splitAt).join('')}
       </Box>
@@ -100,181 +138,170 @@ function FileName({ name }: { name: string }) {
   );
 }
 
-function ItemMenu({ target, onMenu }: { target: DocumentItem; onMenu: Props['onMenu'] }) {
-  const kind = target.kind === 'folder' ? 'dossier' : 'fichier';
-  return (
-    <Tooltip title="Plus d’actions">
-      <IconButton
-        aria-label={'Actions du ' + kind + ' ' + target.item.name}
-        aria-haspopup="menu"
-        onClick={(event) => onMenu(target, event.currentTarget)}
-        sx={actionStyle}
-      >
-        <MoreHorizIcon fontSize="small" />
-      </IconButton>
-    </Tooltip>
-  );
-}
+type EntryProps = Pick<Props, 'onOpenFolder' | 'onOpenFile' | 'onDownload' | 'onMenu'> & {
+  target: DocumentItem;
+  grid: boolean;
+  description: string;
+  isDownloading: boolean;
+};
 
-function SectionTitle({ id, title, count }: { id: string; title: string; count?: number }) {
+function DocumentEntry({ target, grid, description, isDownloading, onOpenFolder, onOpenFile, onDownload, onMenu }: EntryProps) {
+  const { item } = target;
+  const file = target.kind === 'file' ? target.item : null;
+  const date = dayFormatter.format(new Date(item.updatedAt ?? item.createdAt));
+  const size = file ? formatFileSize(file.size) : '';
   return (
-    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.9, mb: 1.15 }}>
-      <Typography component="h3" id={id} sx={{ color: explorerColors.ink, fontSize: '0.93rem', fontWeight: 750 }}>
-        {title}
-      </Typography>
-      {count !== undefined && (
-        <Box component="span" sx={{ minWidth: 23, px: 0.55, py: 0.16, borderRadius: 1.25, textAlign: 'center', bgcolor: '#e7eeee', color: explorerColors.muted, fontSize: '0.72rem', fontWeight: 700 }}>
-          {count}
+    <Box component="li" sx={grid ? cardStyle : rowStyle}>
+      <ButtonBase
+        aria-label={(file ? 'Détails de ' : 'Ouvrir le dossier ') + item.name}
+        title={item.name}
+        onClick={() => file ? onOpenFile(file) : onOpenFolder(item.id)}
+        sx={{
+          display: 'flex', flexDirection: grid ? 'column' : 'row', alignItems: 'center',
+          justifyContent: grid ? 'center' : 'flex-start', flex: grid ? 1 : undefined,
+          gap: grid ? 1 : 1.2, minWidth: 0, width: '100%', minHeight: grid ? 146 : 58, p: grid ? 1 : 0.9,
+          textAlign: grid ? 'center' : 'left', color: explorerColors.ink, borderRadius: '9px',
+          '&:hover': { bgcolor: '#f1f7f6' },
+          '&.Mui-focusVisible': { outline: '2px solid ' + explorerColors.accent, outlineOffset: -2 },
+        }}
+      >
+        <DocumentIcon target={target} grid={grid} />
+        <Box component="span" sx={{ display: 'block', minWidth: 0, width: grid ? '100%' : undefined, flex: grid ? undefined : 1 }}>
+          <DocumentName name={item.name} grid={grid} />
+          <Typography component="span" variant="caption" noWrap display="block" title={description} sx={{ color: explorerColors.muted }}>
+            {description}
+          </Typography>
+          <Typography component="span" variant="caption" sx={{ color: explorerColors.muted, display: grid ? 'block' : { xs: 'block', md: 'none' } }}>
+            {size ? size + ' · ' + date : date}
+          </Typography>
         </Box>
+      </ButtonBase>
+      {!grid && (
+        <>
+          <Typography component="span" variant="caption" sx={{ color: explorerColors.muted, display: { xs: 'none', md: 'block' } }}>{date}</Typography>
+          <Typography component="span" variant="caption" sx={{ color: explorerColors.muted, display: { xs: 'none', md: 'block' } }}>{size || '—'}</Typography>
+        </>
       )}
+      <Box sx={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', px: grid ? 0.3 : 0 }}>
+        {file && (
+          <Tooltip disableInteractive title={isDownloading ? 'Téléchargement en cours' : 'Télécharger'}>
+            <span>
+              <IconButton aria-label={'Télécharger ' + file.name} disabled={isDownloading} onClick={() => onDownload(file)} sx={actionStyle}>
+                {isDownloading ? <CircularProgress size={17} /> : <DownloadOutlinedIcon fontSize="small" />}
+              </IconButton>
+            </span>
+          </Tooltip>
+        )}
+        <Tooltip disableInteractive title="Plus d’actions">
+          <IconButton
+            aria-label={'Actions du ' + (file ? 'fichier ' : 'dossier ') + item.name}
+            aria-haspopup="menu"
+            onClick={(event) => onMenu(target, event.currentTarget)}
+            sx={actionStyle}
+          >
+            <MoreHorizIcon fontSize="small" />
+          </IconButton>
+        </Tooltip>
+      </Box>
     </Box>
   );
 }
 
-function EmptyFiles({ searching, filtered, hasFolders }: { searching: boolean; filtered: boolean; hasFolders: boolean }) {
-  if (!searching && !filtered && hasFolders) {
-    return <Typography variant="body2" sx={{ px: 1.5, py: 2, color: explorerColors.muted }}>Aucun fichier dans ce dossier.</Typography>;
-  }
-  const noResults = searching || filtered;
+function EmptyFiles({ searching, filtered, recent }: { searching: boolean; filtered: boolean; recent: boolean }) {
+  const noResults = searching || filtered || recent;
   return (
     <Box sx={{ p: 4, textAlign: 'center' }}>
-      <Box sx={{ mx: 'auto', mb: 1.5, width: 48, height: 48, display: 'grid', placeItems: 'center', borderRadius: '14px', color: explorerColors.accent, bgcolor: explorerColors.accentSoft }}>
+      <Box sx={{ mx: 'auto', mb: 1.4, width: 48, height: 48, display: 'grid', placeItems: 'center', borderRadius: '12px', color: explorerColors.accent, bgcolor: explorerColors.accentSoft }}>
         {noResults ? <SearchOffOutlinedIcon /> : <FolderOpenOutlinedIcon />}
       </Box>
-      <Typography component="h4" sx={{ color: explorerColors.ink, fontWeight: 750, mb: 0.35 }}>
-        {noResults ? 'Aucun résultat' : 'Ce dossier est vide'}
+      <Typography component="h3" sx={{ color: explorerColors.ink, fontWeight: 750, mb: 0.35 }}>
+        {filtered || searching ? 'Aucun résultat' : recent ? 'Aucun fichier récent' : 'Ce dossier est vide'}
       </Typography>
-      <Typography variant="body2" sx={{ color: explorerColors.muted }}>
-        {filtered ? 'Modifiez ou effacez les filtres.' : searching ? 'Essayez un autre mot-clé.' : 'Déposez un fichier ou créez un dossier.'}
-      </Typography>
+      {(filtered || searching || !recent) && (
+        <Typography variant="body2" sx={{ color: explorerColors.muted }}>
+          {filtered ? 'Modifiez ou effacez les filtres.' : searching ? 'Essayez un autre mot-clé.' : 'Déposez un fichier ou créez un dossier.'}
+        </Typography>
+      )}
     </Box>
   );
 }
 
 export default function DocumentExplorerList({
-  folders, files, loading, searching, sort, filters, onSort, onFilter,
+  folders, files, loading, searching, recent, view, sort, filters, onSort, onFilter,
   downloading, folderPath, onOpenFolder, onOpenFile, onDownload, onMenu,
 }: Props) {
+  const grid = view === 'grid';
   const filtered = Object.values(filters).some((value) => value !== undefined);
+  const direction = sort.direction === 'asc' ? 1 : -1;
+  const orderedFolders = [...folders].sort((left, right) => {
+    const alphabetical = left.name.localeCompare(right.name, 'fr', { sensitivity: 'base' });
+    if (sort.column === 'date') {
+      return (Date.parse(left.updatedAt ?? left.createdAt) - Date.parse(right.updatedAt ?? right.createdAt)) * direction || alphabetical;
+    }
+    return sort.column === 'name' ? alphabetical * direction : alphabetical;
+  });
+  const entries: DocumentItem[] = [
+    ...orderedFolders.map((item): DocumentItem => ({ kind: 'folder', item })),
+    ...(files ?? []).map((item): DocumentItem => ({ kind: 'file', item })),
+  ];
+  const counts = [
+    folders.length ? folders.length + (folders.length === 1 ? ' dossier' : ' dossiers') : '',
+    files ? files.length + (files.length < 2 ? ' fichier' : ' fichiers') : '',
+  ].filter(Boolean).join(' · ');
 
   return (
-    <>
-      {folders.length > 0 && (
-        <Box component="section" aria-labelledby="doc-folders-heading" sx={{ mb: 3 }}>
-          <SectionTitle id="doc-folders-heading" title="Dossiers" count={folders.length} />
+    <Box component="section" aria-label="Contenu documentaire">
+      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, minHeight: 29, mb: 0.65 }}>
+        <Typography role="status" variant="caption" sx={{ color: explorerColors.muted, fontWeight: 650 }}>{counts}</Typography>
+        {filtered && (
+          <Button size="small" onClick={() => onFilter({})} sx={{ textTransform: 'none', color: explorerColors.accent, fontWeight: 700 }}>
+            Effacer les filtres
+          </Button>
+        )}
+      </Box>
+      <Box sx={{ border: '1px solid ' + explorerColors.border, borderRadius: '12px', bgcolor: explorerColors.surface, overflow: 'hidden' }}>
+        <DocumentColumnControls desktopColumns={grid ? 'repeat(3, minmax(0, 120px))' : fileColumns} sort={sort} filters={filters} onSort={onSort} onFilter={onFilter} />
+        {entries.length > 0 && (
           <Box
             component="ul"
+            aria-label={grid ? 'Documents en grille' : 'Documents en liste'}
             sx={{
-              listStyle: 'none',
-              display: 'grid',
-              gridTemplateColumns: { xs: 'minmax(0, 1fr)', sm: 'repeat(2, minmax(0, 1fr))', lg: 'repeat(3, minmax(0, 1fr))' },
-              gap: 1,
-              p: 0,
-              m: 0,
+              listStyle: 'none', m: 0, p: grid ? 1.15 : 0,
+              display: grid ? 'grid' : 'block', gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 130px), 1fr))',
+              gap: 1, bgcolor: grid ? '#f7faf9' : explorerColors.surface,
             }}
           >
-            {folders.map((folder) => (
-              <Box
-                key={folder.id}
-                component="li"
-                sx={{ display: 'flex', alignItems: 'center', minWidth: 0, p: 0.375, border: '1px solid ' + explorerColors.border, borderRadius: '14px', bgcolor: explorerColors.surface }}
-              >
-                <ButtonBase onClick={() => onOpenFolder(folder.id)} aria-label={'Ouvrir le dossier ' + folder.name} title={folder.name} sx={itemButtonStyle}>
-                  <IconTile color={explorerColors.folder} background={explorerColors.folderSoft}><FolderOutlinedIcon fontSize="small" /></IconTile>
-                  <Box component="span" sx={{ minWidth: 0, flex: 1 }}>
-                    <Typography component="span" noWrap display="block" sx={{ color: explorerColors.ink, fontWeight: 700, fontSize: '0.89rem' }}>
-                      {folder.name}
-                    </Typography>
-                    <Typography component="span" variant="caption" noWrap display="block" sx={{ color: explorerColors.muted }}>
-                      {folder.createdBy.name + ' · ' + dayFormatter.format(new Date(folder.updatedAt ?? folder.createdAt))}
-                    </Typography>
-                  </Box>
-                </ButtonBase>
-                <ItemMenu target={{ kind: 'folder', item: folder }} onMenu={onMenu} />
-              </Box>
-            ))}
+            {entries.map((target) => {
+              const description = target.kind === 'folder' ? target.item.createdBy.name
+                : searching || recent ? folderPath(target.item.folderId) : target.item.user.name;
+              return (
+                <DocumentEntry
+                  key={target.kind + '-' + target.item.id}
+                  target={target}
+                  grid={grid}
+                  description={description}
+                  isDownloading={target.kind === 'file' && downloading.has(target.item.id)}
+                  onOpenFolder={onOpenFolder}
+                  onOpenFile={onOpenFile}
+                  onDownload={onDownload}
+                  onMenu={onMenu}
+                />
+              );
+            })}
           </Box>
-        </Box>
-      )}
-
-      <Box component="section" aria-labelledby="doc-files-heading">
-        <Box sx={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
-          <SectionTitle id="doc-files-heading" title="Fichiers" count={files?.length} />
-          {filtered && (
-            <Button size="small" onClick={() => onFilter({})} sx={{ textTransform: 'none', color: explorerColors.accent, fontWeight: 700 }}>
-              Effacer les filtres
-            </Button>
-          )}
-        </Box>
-        <Box sx={{ border: '1px solid ' + explorerColors.border, borderRadius: '14px', bgcolor: explorerColors.surface, overflow: 'hidden' }}>
-          <DocumentColumnControls desktopColumns={fileColumns} sort={sort} filters={filters} onSort={onSort} onFilter={onFilter} />
-          {loading && (
-            <Box aria-hidden="true" sx={{ display: 'grid', p: 1, gap: 1.1 }}>
-              {[0, 1, 2].map((row) => <Skeleton key={row} variant="rounded" height={62} />)}
-            </Box>
-          )}
-          {files?.length === 0 && <EmptyFiles searching={searching} filtered={filtered} hasFolders={folders.length > 0} />}
-          {files && files.length > 0 && (
-            <Box component="ul" sx={{ listStyle: 'none', p: 0, m: 0 }}>
-              {files.map((file) => {
-                const lastDate = dayFormatter.format(new Date(file.updatedAt ?? file.createdAt));
-                const isDownloading = downloading.has(file.id);
-                return (
-                  <Box
-                    component="li"
-                    key={file.id}
-                    sx={{
-                      display: 'grid',
-                      gridTemplateColumns: { xs: 'minmax(0, 1fr) 82px', md: fileColumns },
-                      '@media (max-width:359px)': { gridTemplateColumns: 'minmax(0, 1fr) 74px' },
-                      alignItems: 'center',
-                      minWidth: 0,
-                      px: 0.5,
-                      py: 0.4,
-                      '& + &': { borderTop: '1px solid ' + explorerColors.border },
-                    }}
-                  >
-                    <ButtonBase
-                      onClick={() => onOpenFile(file)}
-                      aria-label={'Détails de ' + file.name}
-                      title={file.name}
-                      sx={{ ...itemButtonStyle, color: explorerColors.ink, pl: 1 }}
-                    >
-                      <FileIcon mime={file.mime} />
-                      <Box component="span" sx={{ minWidth: 0, flex: 1 }}>
-                        <FileName name={file.name} />
-                        <Typography component="span" variant="caption" noWrap display="block" sx={{ color: explorerColors.muted }}>
-                          {searching ? folderPath(file.folderId) : file.user.name}
-                        </Typography>
-                        <Typography component="span" variant="caption" sx={{ color: explorerColors.muted, display: { xs: 'block', md: 'none' } }}>
-                          {formatFileSize(file.size) + ' · ' + lastDate}
-                        </Typography>
-                      </Box>
-                    </ButtonBase>
-                    <Typography component="span" variant="caption" sx={{ color: explorerColors.muted, display: { xs: 'none', md: 'block' } }}>{lastDate}</Typography>
-                    <Typography component="span" variant="caption" sx={{ color: explorerColors.muted, display: { xs: 'none', md: 'block' } }}>{formatFileSize(file.size)}</Typography>
-                    <Box sx={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>
-                      <Tooltip title={isDownloading ? 'Téléchargement en cours' : 'Télécharger'}>
-                        <span>
-                          <IconButton
-                            aria-label={'Télécharger ' + file.name}
-                            disabled={isDownloading}
-                            onClick={() => onDownload(file)}
-                            sx={actionStyle}
-                          >
-                            {isDownloading ? <CircularProgress size={17} /> : <DownloadOutlinedIcon fontSize="small" />}
-                          </IconButton>
-                        </span>
-                      </Tooltip>
-                      <ItemMenu target={{ kind: 'file', item: file }} onMenu={onMenu} />
-                    </Box>
-                  </Box>
-                );
-              })}
-            </Box>
-          )}
-        </Box>
+        )}
+        {loading && (
+          <Box aria-hidden="true" sx={{ display: 'grid', p: 1, gap: 1 }}>
+            {[0, 1, 2].map((row) => <Skeleton key={row} variant="rounded" height={52} />)}
+          </Box>
+        )}
+        {files && entries.length === 0 && <EmptyFiles searching={searching} filtered={filtered} recent={recent} />}
+        {filtered && files?.length === 0 && folders.length > 0 && (
+          <Typography variant="body2" sx={{ px: 1.5, py: 2, color: explorerColors.muted, borderTop: '1px solid ' + explorerColors.border }}>
+            Aucun fichier ne correspond aux filtres.
+          </Typography>
+        )}
       </Box>
-    </>
+    </Box>
   );
 }
