@@ -5,9 +5,10 @@ import FolderOutlinedIcon from '@mui/icons-material/FolderOutlined';
 import HistoryIcon from '@mui/icons-material/History';
 import HomeOutlinedIcon from '@mui/icons-material/HomeOutlined';
 import { Box, IconButton, List, ListItem, ListItemButton, Tooltip, Typography } from '@mui/material';
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { chatColors } from '../theme';
 import type { Folder } from '../types';
+import { documentDropAttributes, documentDropStyle } from '../useDocumentDrag';
 
 export type DocumentPlace = number | null | 'recent';
 
@@ -46,15 +47,25 @@ export default function DocumentPlaces({ foldersByParent, currentPath, active, o
     });
   }
 
-  function renderFolders(parent: number | null, depth = 0): ReactNode {
-    return foldersByParent.get(parent)?.map((folder) => {
+  const pending = (foldersByParent.get(null) ?? []).slice().reverse().map((folder) => ({ folder, depth: 0 }));
+  const visible: typeof pending = [];
+  while (pending.length) {
+    const row = pending.pop()!;
+    visible.push(row);
+    if (!expanded.has(row.folder.id)) continue;
+    const children = foldersByParent.get(row.folder.id) ?? [];
+    for (let index = children.length - 1; index >= 0; index--) pending.push({ folder: children[index], depth: row.depth + 1 });
+  }
+
+  function renderFolders() {
+    return visible.map(({ folder, depth }) => {
       const hasChildren = foldersByParent.has(folder.id);
       const isOpen = expanded.has(folder.id);
       const isCurrent = active === folder.id;
       const toggleLabel = (isOpen ? 'Replier ' : 'Déplier ') + folder.name;
       return (
         <Box component="li" key={folder.id}>
-          <Box sx={{ display: 'flex', alignItems: 'center', minWidth: 0, pl: Math.min(depth, 5) * 1.5 }}>
+          <Box {...documentDropAttributes({ kind: 'folder', id: folder.id })} sx={{ display: 'flex', alignItems: 'center', minWidth: 0, pl: Math.min(depth, 5) * 1.5, borderRadius: '8px', ...documentDropStyle }}>
             {hasChildren ? (
               <Tooltip disableInteractive title={toggleLabel}>
                 <IconButton
@@ -80,7 +91,6 @@ export default function DocumentPlaces({ foldersByParent, currentPath, active, o
               <Typography component="span" noWrap sx={{ fontSize: '0.83rem', fontWeight: isCurrent ? 750 : 550 }}>{folder.name}</Typography>
             </ListItemButton>
           </Box>
-          {hasChildren && isOpen && <List disablePadding>{renderFolders(folder.id, depth + 1)}</List>}
         </Box>
       );
     });
@@ -91,7 +101,7 @@ export default function DocumentPlaces({ foldersByParent, currentPath, active, o
       <Typography component="h3" sx={{ px: 1.1, pb: 0.8, color: chatColors.muted, fontSize: '0.76rem', fontWeight: 750 }}>Emplacements</Typography>
       <List disablePadding sx={{ display: 'grid', gap: 0.25 }}>
         <ListItem disablePadding>
-          <ListItemButton component="button" selected={active === null} aria-current={active === null ? 'page' : undefined} onClick={() => onNavigate(null)} sx={placeStyle}>
+          <ListItemButton component="button" {...documentDropAttributes({ kind: 'folder', id: null })} selected={active === null} aria-current={active === null ? 'page' : undefined} onClick={() => onNavigate(null)} sx={{ ...placeStyle, ...documentDropStyle }}>
             <HomeOutlinedIcon fontSize="small" />
             <Typography component="span" sx={{ fontSize: '0.86rem', fontWeight: 700 }}>Racine</Typography>
           </ListItemButton>
@@ -106,7 +116,7 @@ export default function DocumentPlaces({ foldersByParent, currentPath, active, o
       {foldersByParent.has(null) && (
         <Box sx={{ mt: 2.1, pt: 1.45, borderTop: '1px solid ' + chatColors.border }}>
           <Typography component="h3" sx={{ px: 1.1, pb: 0.65, color: chatColors.muted, fontSize: '0.76rem', fontWeight: 750 }}>Dossiers</Typography>
-          <List disablePadding>{renderFolders(null)}</List>
+          <List disablePadding>{renderFolders()}</List>
         </Box>
       )}
     </Box>

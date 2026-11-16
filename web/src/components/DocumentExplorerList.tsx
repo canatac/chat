@@ -1,6 +1,7 @@
 import ArticleOutlinedIcon from '@mui/icons-material/ArticleOutlined';
 import AudioFileOutlinedIcon from '@mui/icons-material/AudioFileOutlined';
 import DownloadOutlinedIcon from '@mui/icons-material/DownloadOutlined';
+import DragIndicatorIcon from '@mui/icons-material/DragIndicator';
 import FolderOpenOutlinedIcon from '@mui/icons-material/FolderOpenOutlined';
 import FolderOutlinedIcon from '@mui/icons-material/FolderOutlined';
 import ImageOutlinedIcon from '@mui/icons-material/ImageOutlined';
@@ -13,6 +14,8 @@ import type { ReactNode } from 'react';
 import { formatFileSize } from '../formatFileSize';
 import { chatColors } from '../theme';
 import type { FileFilters, FileItem, FileSort, Folder } from '../types';
+import { documentDropAttributes, documentDropStyle } from '../useDocumentDrag';
+import type useDocumentDrag from '../useDocumentDrag';
 import DocumentColumnControls from './DocumentColumnControls';
 
 export const explorerColors = {
@@ -41,10 +44,12 @@ interface Props {
   onOpenFile: (file: FileItem) => void;
   onDownload: (file: FileItem) => void;
   onMenu: (target: DocumentItem, anchor: HTMLElement) => void;
+  drag: Pick<ReturnType<typeof useDocumentDrag>, 'handle' | 'surface'>;
+  dragDisabled: boolean;
 }
 
 const dayFormatter = new Intl.DateTimeFormat('fr-FR', { day: 'numeric', month: 'short', year: 'numeric' });
-const fileColumns = 'minmax(0, 1fr) 116px 102px 94px';
+const fileColumns = 'minmax(0, 1fr) 116px 102px 128px';
 
 const actionStyle = {
   color: explorerColors.muted,
@@ -58,8 +63,8 @@ const actionStyle = {
 
 const rowStyle = {
   display: 'grid',
-  gridTemplateColumns: { xs: 'minmax(0, 1fr) 82px', md: fileColumns },
-  '@media (max-width:359px)': { gridTemplateColumns: 'minmax(0, 1fr) 74px' },
+  gridTemplateColumns: { xs: 'minmax(0, 1fr) 112px', md: fileColumns },
+  '@media (max-width:359px)': { gridTemplateColumns: 'minmax(0, 1fr) 106px' },
   alignItems: 'center',
   minWidth: 0,
   px: 0.5,
@@ -138,24 +143,24 @@ function DocumentName({ name, grid }: { name: string; grid: boolean }) {
   );
 }
 
-type EntryProps = Pick<Props, 'onOpenFolder' | 'onOpenFile' | 'onDownload' | 'onMenu'> & {
+type EntryProps = Pick<Props, 'onOpenFolder' | 'onOpenFile' | 'onDownload' | 'onMenu' | 'drag' | 'dragDisabled'> & {
   target: DocumentItem;
   grid: boolean;
   description: string;
   isDownloading: boolean;
 };
 
-function DocumentEntry({ target, grid, description, isDownloading, onOpenFolder, onOpenFile, onDownload, onMenu }: EntryProps) {
+function DocumentEntry({ target, grid, description, isDownloading, onOpenFolder, onOpenFile, onDownload, onMenu, drag, dragDisabled }: EntryProps) {
   const { item } = target;
   const file = target.kind === 'file' ? target.item : null;
   const date = dayFormatter.format(new Date(item.updatedAt ?? item.createdAt));
   const size = file ? formatFileSize(file.size) : '';
   return (
-    <Box component="li" sx={grid ? cardStyle : rowStyle}>
+    <Box component="li" {...documentDropAttributes({ kind: target.kind, id: item.id })} sx={{ ...(grid ? cardStyle : rowStyle), ...documentDropStyle }}>
       <ButtonBase
         aria-label={(file ? 'Détails de ' : 'Ouvrir le dossier ') + item.name}
         title={item.name}
-        onClick={() => file ? onOpenFile(file) : onOpenFolder(item.id)}
+        {...drag.surface(target, () => file ? onOpenFile(file) : onOpenFolder(item.id))}
         sx={{
           display: 'flex', flexDirection: grid ? 'column' : 'row', alignItems: 'center',
           justifyContent: grid ? 'center' : 'flex-start', flex: grid ? 1 : undefined,
@@ -183,6 +188,19 @@ function DocumentEntry({ target, grid, description, isDownloading, onOpenFolder,
         </>
       )}
       <Box sx={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', px: grid ? 0.3 : 0 }}>
+        <Tooltip disableInteractive disableTouchListener title="Glisser ou choisir le dossier de destination">
+          <span>
+            <IconButton
+              aria-label={'Déplacer ' + item.name}
+              disableRipple
+              disabled={dragDisabled}
+              {...drag.handle(target)}
+              sx={{ ...actionStyle, width: 32, '@media (max-width:359px)': { width: 32 }, touchAction: 'none', cursor: 'grab', '&:active': { cursor: 'grabbing' }, userSelect: 'none' }}
+            >
+              <DragIndicatorIcon sx={{ fontSize: 19 }} />
+            </IconButton>
+          </span>
+        </Tooltip>
         {file && (
           <Tooltip disableInteractive title={isDownloading ? 'Téléchargement en cours' : 'Télécharger'}>
             <span>
@@ -228,7 +246,7 @@ function EmptyFiles({ searching, filtered, recent }: { searching: boolean; filte
 
 export default function DocumentExplorerList({
   folders, files, loading, searching, recent, view, sort, filters, onSort, onFilter,
-  downloading, folderPath, onOpenFolder, onOpenFile, onDownload, onMenu,
+  downloading, folderPath, onOpenFolder, onOpenFile, onDownload, onMenu, drag, dragDisabled,
 }: Props) {
   const grid = view === 'grid';
   const filtered = Object.values(filters).some((value) => value !== undefined);
@@ -285,6 +303,8 @@ export default function DocumentExplorerList({
                   onOpenFile={onOpenFile}
                   onDownload={onDownload}
                   onMenu={onMenu}
+                  drag={drag}
+                  dragDisabled={dragDisabled}
                 />
               );
             })}
