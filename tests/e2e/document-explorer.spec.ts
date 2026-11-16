@@ -410,3 +410,143 @@ test('importe l’arborescence d’un dossier déposé et celle d’un dossier c
     fs.rmSync(temporary, { recursive: true, force: true });
   }
 });
+
+test('à 320 px, sélectionne toute la pagination, déplace le lot et confirme sa suppression', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 320, height: 820 }, hasTouch: true, isMobile: true });
+  const page = await context.newPage();
+  try {
+    await page.route('**/api/files?*', (route) => {
+      const url = new URL(route.request().url());
+      url.searchParams.set('limit', '2');
+      return route.continue({ url: url.toString() });
+    });
+    await withExplorer(page, async () => {
+      const drawer = page.getByRole('dialog', { name: 'Espace documentaire' });
+      await drawer.getByRole('button', { name: 'Ouvrir le dossier Comptes rendus' }).tap();
+      await drawer.getByRole('button', { name: 'Nouveau dossier', exact: true }).tap();
+      const create = page.getByRole('dialog', { name: 'Nouveau dossier' });
+      await create.getByRole('textbox', { name: 'Nom du dossier' }).fill('Dossier du lot');
+      await create.getByRole('button', { name: 'Créer le dossier' }).tap();
+      await expect(drawer.getByRole('button', { name: 'Ouvrir le dossier Dossier du lot' })).toBeVisible();
+
+      await drawer.locator('input[aria-label="Fichiers à déposer"]').setInputFiles(['Alpha.txt', 'Bravo.txt', 'Zèbre.txt'].map((name) => ({ name, mimeType: 'text/plain', buffer: Buffer.from(name) })));
+      await expect(drawer.getByRole('button', { name: 'Afficher plus de fichiers' })).toBeVisible();
+      await expect(drawer.getByRole('button', { name: 'Détails de Zèbre.txt' })).toHaveCount(0);
+      await drawer.getByRole('button', { name: 'Sélectionner', exact: true }).tap();
+      const actions = drawer.getByRole('group', { name: 'Actions de sélection' });
+      await actions.getByRole('button', { name: 'Tout sélectionner' }).tap();
+      await expect(actions.getByRole('status')).toHaveText('4 éléments sélectionnés');
+      const item = drawer.getByRole('checkbox', { name: 'Sélectionner Bravo.txt', exact: true });
+      await expect(item).toHaveAttribute('aria-checked', 'true');
+      await item.tap();
+      await expect(actions.getByRole('status')).toHaveText('3 éléments sélectionnés');
+      await item.tap();
+      await expect(actions.getByRole('status')).toHaveText('4 éléments sélectionnés');
+      expect(await actions.evaluate((box) => box.scrollWidth - box.clientWidth)).toBeLessThanOrEqual(1);
+
+      await actions.getByRole('button', { name: 'Déplacer…' }).tap();
+      const move = page.getByRole('dialog', { name: 'Déplacer vers' });
+      await move.getByRole('button', { name: 'Racine', exact: true }).tap();
+      await move.getByRole('button', { name: 'Archives audio', exact: true }).tap();
+      await move.getByRole('button', { name: 'Transcriptions', exact: true }).tap();
+      await move.getByRole('button', { name: 'Déplacer ici' }).tap();
+      await expect(drawer.getByText('4 éléments déplacés dans « Transcriptions ».')).toBeVisible();
+      await expect(drawer.getByText('Ce dossier est vide')).toBeVisible();
+
+      await drawer.getByRole('button', { name: 'Afficher les emplacements' }).tap();
+      const places = page.getByRole('dialog', { name: 'Emplacements', exact: true });
+      await places.getByRole('button', { name: 'Déplier Archives audio' }).tap();
+      await places.getByRole('button', { name: 'Aller au dossier Transcriptions' }).tap();
+      await drawer.getByRole('button', { name: 'Afficher plus de fichiers' }).tap();
+      await expect(drawer.getByRole('button', { name: 'Détails de Zèbre.txt' })).toBeVisible();
+      await drawer.getByRole('button', { name: 'Sélectionner', exact: true }).tap();
+      await actions.getByRole('button', { name: 'Tout sélectionner' }).tap();
+      await expect(actions.getByRole('status')).toHaveText('4 éléments sélectionnés');
+      await actions.getByRole('button', { name: 'Supprimer…' }).tap();
+      const confirmation = page.getByRole('dialog', { name: 'Supprimer la sélection ?' });
+      await expect(confirmation.getByText('Le contenu des dossiers sélectionnés sera aussi supprimé.')).toBeVisible();
+      await confirmation.getByRole('button', { name: 'Annuler' }).tap();
+      await expect(actions.getByRole('status')).toHaveText('4 éléments sélectionnés');
+      await actions.getByRole('button', { name: 'Supprimer…' }).tap();
+      await confirmation.getByRole('button', { name: 'Supprimer', exact: true }).tap();
+      await expect(drawer.getByText('4 éléments supprimés.')).toBeVisible();
+      await expect(drawer.getByText('Ce dossier est vide')).toBeVisible();
+    }, true);
+  } finally {
+    await context.close();
+  }
+});
+
+test('sélectionne les fichiers filtrés au clavier et déplace en glissant depuis la grille ou l’arborescence', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await withExplorer(page, async () => {
+    const drawer = page.getByRole('dialog', { name: 'Espace documentaire' });
+    const places = drawer.getByRole('navigation', { name: 'Emplacements des documents' });
+    await drawer.locator('input[aria-label="Fichiers à déposer"]').setInputFiles(['Lot alpha.txt', 'Lot bravo.txt', 'À conserver.txt'].map((name) => ({ name, mimeType: 'text/plain', buffer: Buffer.from(name) })));
+    await expect(drawer.getByRole('button', { name: 'Détails de Lot bravo.txt' })).toBeVisible();
+    await drawer.getByRole('button', { name: 'Vue grille' }).click();
+    await drawer.getByRole('button', { name: 'Filtrer par nom' }).click();
+    const filter = page.getByRole('dialog', { name: 'Filtrer par nom' });
+    await filter.getByLabel('Le nom contient').fill('Lot');
+    await filter.getByRole('button', { name: 'Appliquer' }).click();
+    await expect(drawer.getByRole('button', { name: 'Détails de À conserver.txt' })).toHaveCount(0);
+    await drawer.getByRole('button', { name: 'Vue grille' }).focus();
+    await page.keyboard.press('Control+a');
+    const actions = drawer.getByRole('group', { name: 'Actions de sélection' });
+    await expect(actions.getByRole('status')).toHaveText('2 éléments sélectionnés');
+    const alpha = drawer.getByRole('checkbox', { name: 'Sélectionner Lot alpha.txt' });
+    await expect(alpha).toHaveAttribute('aria-checked', 'true');
+
+    const destination = places.getByRole('button', { name: 'Aller au dossier Comptes rendus' });
+    await dragWithMouse(page, alpha, destination);
+    await expect(drawer.getByText('2 éléments déplacés dans « Comptes rendus ».')).toBeVisible();
+    await drawer.getByRole('button', { name: 'Effacer les filtres' }).click();
+    await expect(drawer.getByRole('button', { name: 'Détails de À conserver.txt' })).toBeVisible();
+
+    const archive = places.getByRole('button', { name: 'Aller au dossier Archives audio' });
+    await dragWithMouse(page, archive, destination);
+    await places.getByRole('button', { name: 'Déplier Comptes rendus' }).click();
+    await expect(archive).toBeVisible();
+    await destination.click();
+    await expect(drawer.getByRole('button', { name: 'Ouvrir le dossier Archives audio' })).toBeVisible();
+    await expect(drawer.getByRole('button', { name: 'Détails de Lot bravo.txt' })).toBeVisible();
+  });
+});
+
+test('renomme, déplace et supprime un dossier depuis les emplacements tactiles', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 320, height: 820 }, hasTouch: true, isMobile: true });
+  const page = await context.newPage();
+  try {
+    await withExplorer(page, async () => {
+      await page.getByRole('button', { name: 'Afficher les emplacements' }).tap();
+      const places = page.getByRole('dialog', { name: 'Emplacements', exact: true });
+      const actions = (name: string) => places.getByRole('button', { name: `Actions de ${name} dans l’arborescence`, exact: true });
+      const menu = page.getByRole('menu');
+      await actions('Archives audio').tap();
+      await menu.getByRole('menuitem', { name: 'Renommer' }).tap();
+      const rename = page.getByRole('dialog', { name: 'Renommer le dossier' });
+      await rename.getByRole('textbox', { name: 'Nom du dossier' }).fill('Archives renommées');
+      await rename.getByRole('button', { name: 'Enregistrer' }).tap();
+
+      await actions('Archives renommées').tap();
+      await menu.getByRole('menuitem', { name: 'Déplacer…' }).tap();
+      const move = page.getByRole('dialog', { name: 'Déplacer vers' });
+      await move.getByRole('button', { name: 'Comptes rendus' }).tap();
+      await move.getByRole('button', { name: 'Déplacer ici' }).tap();
+      await places.getByRole('button', { name: 'Déplier Comptes rendus' }).tap();
+
+      await actions('Archives renommées').tap();
+      await menu.getByRole('menuitem', { name: 'Supprimer' }).tap();
+      const confirmation = page.getByRole('dialog', { name: 'Supprimer le dossier ?' });
+      await expect(confirmation.getByText('« Archives renommées » sera supprimé définitivement.')).toBeVisible();
+      await confirmation.getByRole('checkbox', { name: 'Supprimer aussi le contenu du dossier' }).tap();
+      await confirmation.getByRole('button', { name: 'Supprimer', exact: true }).tap();
+      await expect(places).toBeVisible();
+      await expect(places.getByRole('button', { name: 'Replier Comptes rendus' })).toHaveCount(0);
+      await expect(actions('Archives renommées')).toHaveCount(0);
+      expect(await places.evaluate((box) => box.scrollWidth - box.clientWidth)).toBeLessThanOrEqual(1);
+    });
+  } finally {
+    await context.close();
+  }
+});
