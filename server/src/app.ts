@@ -496,12 +496,24 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
     }
   });
 
+  const timestamp = z.string().regex(/^-?\d+$/).transform(Number).pipe(z.number().int().safe());
+  const byteThreshold = z.string().trim().min(1).pipe(z.coerce.number().min(0).max(Number.MAX_SAFE_INTEGER));
   const filesQuerySchema = z.object({
     limit: z.coerce.number().int().min(1).max(200).default(50),
     before: z.coerce.number().int().optional(),
     query: z.string().max(100).optional(),
     folder: z.string().optional(), // absent = tout ; 'root' = racine ; sinon id de dossier
-  });
+    sort: z.enum(['name', 'date', 'size']).optional(),
+    direction: z.enum(['asc', 'desc']).optional(),
+    name: z.string().trim().max(100).optional(),
+    activityFrom: timestamp.optional(),
+    activityBefore: timestamp.optional(),
+    minBytes: byteThreshold.optional(),
+    maxBytes: byteThreshold.optional(),
+  }).refine(({ activityFrom, activityBefore, minBytes, maxBytes }) => (
+    (activityFrom === undefined || activityBefore === undefined || activityFrom < activityBefore)
+    && (minBytes === undefined || maxBytes === undefined || minBytes <= maxBytes)
+  ));
 
   app.get('/api/files', (req, res) => {
     const parsed = filesQuerySchema.safeParse(req.query);
@@ -509,24 +521,27 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       res.status(400).json({ error: 'Paramètres invalides' });
       return;
     }
+    const { limit, before, query, folder, ...options } = parsed.data;
     let folderId: number | null | undefined;
-    if (parsed.data.folder !== undefined) {
-      if (parsed.data.folder === 'root') folderId = null;
+    if (folder !== undefined) {
+      if (folder === 'root') folderId = null;
       else {
-        folderId = Number(parsed.data.folder);
+        folderId = Number(folder);
         if (!Number.isInteger(folderId) || folderId <= 0) {
           res.status(400).json({ error: "folder invalide (id ou 'root')" });
           return;
         }
       }
     }
-    const rows: FileListRow[] = db.listFiles(parsed.data.limit, parsed.data.before, parsed.data.query || undefined, folderId);
+    const rows: FileListRow[] = db.listFiles(options.sort ? limit + 1 : limit, before, query, folderId, options);
+    const page = rows.slice(0, limit);
     res.json({
-      files: rows.map((f) => ({
+      files: page.map((f) => ({
         ...toPublicFile(f),
         messageId: f.message_id,
         user: { id: f.user_id, name: f.user_name },
       })),
+      nextBefore: rows.length > limit ? page[page.length - 1].id : null,
     });
   });
 

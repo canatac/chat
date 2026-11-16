@@ -39,7 +39,6 @@ import {
   ListItemText,
   Menu,
   MenuItem,
-  Skeleton,
   TextField,
   Tooltip,
   Typography,
@@ -47,7 +46,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, saveFile } from '../api';
 import { formatFileSize } from '../formatFileSize';
-import type { FileItem, Folder } from '../types';
+import type { FileFilters, FileItem, FileSort, Folder } from '../types';
 import type { ChatSocket } from '../ws';
 import DocumentExplorerList, { explorerColors, type DocumentItem } from './DocumentExplorerList';
 
@@ -63,6 +62,7 @@ type NameEdit =
   | { mode: 'rename-file'; file: FileItem };
 
 type FileDetail = Awaited<ReturnType<typeof api.fileDetail>>;
+type FileListing = Awaited<ReturnType<typeof api.files>> & { scope: string };
 
 const dateTime = new Intl.DateTimeFormat('fr-FR', { dateStyle: 'medium', timeStyle: 'short' });
 const FILE_LIMIT = 200;
@@ -109,11 +109,14 @@ const preparedDialogProps = { fullWidth: true, maxWidth: 'xs' as const };
 
 export default function DocDrawer({ open, onClose, socket }: Props) {
   const [folders, setFolders] = useState<Folder[]>([]);
-  const [listing, setListing] = useState<{ scope: string; files: FileItem[] } | null>(null);
+  const [listing, setListing] = useState<FileListing | null>(null);
   const [currentId, setCurrentId] = useState<number | null>(null);
   const [query, setQuery] = useState('');
+  const [sort, setSort] = useState<FileSort>({ column: 'name', direction: 'asc' });
+  const [filters, setFilters] = useState<FileFilters>({});
   const [revision, setRevision] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -133,29 +136,35 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const detailRequest = useRef(0);
+  const moreFilesRequest = useRef<AbortController | null>(null);
   const search = query.trim();
-  const scope = search ? 'search:' + search : 'folder:' + currentId;
-  const matchesScope = listing?.scope === scope;
+  const folderScope = search ? 'search:' + search : 'folder:' + currentId;
+  const fileRequest = useMemo(() => ({
+    query: search, folderId: search ? undefined : currentId, limit: FILE_LIMIT, sort, filters,
+  }), [currentId, filters, search, sort]);
+  const scope = JSON.stringify(fileRequest);
+  const visibleListing = listing?.scope === scope ? listing : null;
   const reload = useCallback(() => setRevision((previous) => previous + 1), []);
 
   useEffect(() => {
     if (!open) return;
     const request = new AbortController();
     setLoading(true);
+    setLoadingMore(false);
     setListError(null);
 
     const timer = window.setTimeout(async () => {
       try {
         const [directory, result] = await Promise.all([
           api.folders(request.signal),
-          api.files(search, undefined, FILE_LIMIT, search ? undefined : currentId, request.signal),
+          api.files(fileRequest, request.signal),
         ]);
         if (request.signal.aborted) return;
         setFolders(directory.folders);
         if (currentId !== null && !directory.folders.some((folder) => folder.id === currentId)) {
           setCurrentId(null);
         }
-        setListing({ scope, files: result.files });
+        setListing({ scope, ...result });
       } catch (error) {
         if (!request.signal.aborted) setListError(errorMessage(error, 'Impossible de charger les documents.'));
       } finally {
@@ -166,8 +175,10 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
     return () => {
       window.clearTimeout(timer);
       request.abort();
+      moreFilesRequest.current?.abort();
+      moreFilesRequest.current = null;
     };
-  }, [open, currentId, scope, search, revision]);
+  }, [open, currentId, fileRequest, scope, search, revision]);
 
   useEffect(() => {
     if (!open || !socket) return;
@@ -178,7 +189,36 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
 
   useEffect(() => {
     if (contentRef.current) contentRef.current.scrollTop = 0;
-  }, [scope]);
+  }, [folderScope]);
+
+  const loadMoreFiles = async () => {
+    const before = visibleListing?.nextBefore;
+    if (before == null || loading || moreFilesRequest.current) return;
+    const request = new AbortController();
+    moreFilesRequest.current = request;
+    setLoadingMore(true);
+    setListError(null);
+    try {
+      const result = await api.files({ ...fileRequest, before }, request.signal);
+      if (request.signal.aborted) return;
+      setListing((current) => {
+        if (current?.scope !== scope || current.nextBefore !== before) return current;
+        const loaded = new Set(current.files.map((file) => file.id));
+        return {
+          scope,
+          files: [...current.files, ...result.files.filter((file) => !loaded.has(file.id))],
+          nextBefore: result.nextBefore,
+        };
+      });
+    } catch (error) {
+      if (!request.signal.aborted) setListError(errorMessage(error, 'Impossible de charger la suite des fichiers.'));
+    } finally {
+      if (moreFilesRequest.current === request) {
+        moreFilesRequest.current = null;
+        setLoadingMore(false);
+      }
+    }
+  };
 
   const folderById = useMemo(() => new Map(folders.map((folder) => [folder.id, folder])), [folders]);
   const pathFor = useCallback((id: number | null) => {
@@ -518,28 +558,34 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
         {loading && <LinearProgress aria-label="Actualisation des documents" sx={{ position: 'absolute', height: 2, left: 0, right: 0, bottom: 0 }} />}
       </Box>
 
-      <Box ref={contentRef} sx={{ px: horizontalPadding, pt: { xs: 2, sm: 2.5 }, pb: 3, flex: 1, minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain' }} aria-busy={loading}>
+      <Box ref={contentRef} sx={{ px: horizontalPadding, pt: { xs: 2, sm: 2.5 }, pb: 3, flex: 1, minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain' }} aria-busy={loading || loadingMore}>
         {actionError && <Alert severity="error" onClose={() => setActionError(null)} sx={{ mb: 2 }}>{actionError}</Alert>}
         {listError && (
           <Alert severity="error" sx={{ mb: 2 }} action={<Button color="inherit" size="small" onClick={reload}>Réessayer</Button>}>
             {listError}
           </Alert>
         )}
-        {matchesScope ? (
-          <DocumentExplorerList
-            folders={childFolders}
-            files={listing.files}
-            searching={Boolean(search)}
-            downloading={downloading}
-            folderPath={(id) => pathFor(id).map((folder) => folder.name).join(' / ') || 'Racine'}
-            onOpenFolder={showFolder}
-            onOpenFile={(file) => void openDetail(file)}
-            onDownload={(file) => void download(file)}
-            onMenu={(target, anchor) => setMenu({ target, anchor })}
-          />
-        ) : !listError && (
-          <Box aria-hidden="true" sx={{ display: 'grid', gap: 1.1 }}>
-            {[0, 1, 2].map((row) => <Skeleton key={row} variant="rounded" height={62} />)}
+        <DocumentExplorerList
+          folders={childFolders}
+          files={visibleListing?.files ?? null}
+          loading={!visibleListing && !listError}
+          searching={Boolean(search)}
+          sort={sort}
+          filters={filters}
+          onSort={setSort}
+          onFilter={setFilters}
+          downloading={downloading}
+          folderPath={(id) => pathFor(id).map((folder) => folder.name).join(' / ') || 'Racine'}
+          onOpenFolder={showFolder}
+          onOpenFile={(file) => void openDetail(file)}
+          onDownload={(file) => void download(file)}
+          onMenu={(target, anchor) => setMenu({ target, anchor })}
+        />
+        {visibleListing?.nextBefore != null && (
+          <Box sx={{ display: 'flex', justifyContent: 'center', mt: 1.5 }}>
+            <Button onClick={() => void loadMoreFiles()} disabled={loading || loadingMore} sx={{ ...buttonStyle, color: explorerColors.accent }}>
+              {loadingMore ? 'Chargement des fichiers…' : 'Afficher plus de fichiers'}
+            </Button>
           </Box>
         )}
       </Box>

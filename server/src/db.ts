@@ -83,6 +83,22 @@ export interface FileListRow extends FileRow {
   user_name: string;
 }
 
+const FILE_SORT_COLUMNS = {
+  name: 'file_name_key(f.name)',
+  date: 'COALESCE(f.updated_at, f.created_at)',
+  size: 'f.size',
+};
+
+interface FileListOptions {
+  sort?: keyof typeof FILE_SORT_COLUMNS;
+  direction?: 'asc' | 'desc';
+  name?: string;
+  activityFrom?: number;
+  activityBefore?: number;
+  minBytes?: number;
+  maxBytes?: number;
+}
+
 export interface ChunkRow {
   id: number;
   file_id: number;
@@ -112,6 +128,9 @@ export class DB {
   constructor(dataDir: string, newBotId: number | null = null) {
     fs.mkdirSync(dataDir, { recursive: true });
     this.db = new DatabaseSync(path.join(dataDir, 'chat.db'));
+    this.db.function('file_name_key', { deterministic: true }, (name) =>
+      String(name).normalize('NFD').replace(/\p{M}/gu, '').toLowerCase(),
+    );
     this.db.exec(`
       PRAGMA journal_mode = WAL;
       CREATE TABLE IF NOT EXISTS users (
@@ -309,12 +328,20 @@ export class DB {
     return this.db.prepare('SELECT * FROM files WHERE id = ?').get(id) as unknown as FileRow | undefined;
   }
 
-  listFiles(limit: number, before?: number, query?: string, folderId?: number | null): FileListRow[] {
+  listFiles(limit: number, before?: number, query?: string, folderId?: number | null, options: FileListOptions = {}): FileListRow[] {
     let sql = 'SELECT f.*, COALESCE(u.display_name, u.name) AS user_name FROM files f JOIN users u ON u.id = f.user_id';
     const params: (string | number)[] = [];
     const conds: string[] = [];
+    const sortColumn = options.sort ? FILE_SORT_COLUMNS[options.sort] : undefined;
+    const direction = options.direction === 'desc' ? 'DESC' : 'ASC';
     if (before !== undefined) {
-      conds.push('f.id < ?');
+      if (sortColumn) {
+        // La pagination reprend après la valeur de tri et l’identifiant du dernier fichier.
+        const comparator = direction === 'DESC' ? '<' : '>';
+        conds.push(`(${sortColumn}, f.id) ${comparator} (SELECT ${sortColumn}, f.id FROM files f WHERE f.id = ?)`);
+      } else {
+        conds.push('f.id < ?');
+      }
       params.push(before);
     }
     if (query) {
@@ -328,8 +355,23 @@ export class DB {
         params.push(folderId);
       }
     }
+    if (options.name) {
+      conds.push('instr(file_name_key(f.name), file_name_key(?)) > 0');
+      params.push(options.name);
+    }
+    for (const [value, condition] of [
+      [options.activityFrom, `${FILE_SORT_COLUMNS.date} >= ?`],
+      [options.activityBefore, `${FILE_SORT_COLUMNS.date} < ?`],
+      [options.minBytes, 'f.size >= ?'],
+      [options.maxBytes, 'f.size <= ?'],
+    ] as const) {
+      if (value === undefined) continue;
+      conds.push(condition);
+      params.push(value);
+    }
     if (conds.length) sql += ' WHERE ' + conds.join(' AND ');
-    sql += ' ORDER BY f.name COLLATE NOCASE, f.id DESC LIMIT ?';
+    const orderBy = sortColumn ? `${sortColumn} ${direction}, f.id ${direction}` : 'f.name COLLATE NOCASE, f.id DESC';
+    sql += ` ORDER BY ${orderBy} LIMIT ?`;
     params.push(limit);
     return this.db.prepare(sql).all(...params) as unknown as FileListRow[];
   }

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { after, before, test } from 'node:test';
 import WebSocket from 'ws';
 import { createServer, type ServerContext } from '../src/app.js';
@@ -203,6 +204,62 @@ test('dossier non vide : DELETE 409 avec compteurs, puis recursive=1 supprime to
   const events = (await (await j('/api/events?limit=500')).json()) as { events: EventBody[] };
   assert.ok(events.events.some((e) => e.action === 'file_deleted' && e.fileId === f.id));
   assert.ok(events.events.some((e) => e.action === 'folder_deleted' && e.folderId === a.id));
+});
+
+test('tri et filtres des fichiers avant la pagination, avec un ordre stable à taille égale', async () => {
+  const folder = await mkFolder('Tri et filtres');
+  const zebra = await upload('Zèbre.txt', 'z', folder.id);
+  const teamA = await upload('Équipe-a.txt', 'a'.repeat(1024), folder.id);
+  const alpha = await upload('Alpha.txt', 'a'.repeat(1024), folder.id);
+  const teamB = await upload('équipe-b.txt', 'b'.repeat(4096), folder.id);
+  await upload('équipe-b-hors-dossier.txt', 'b'.repeat(4096));
+
+  const jan17 = Date.UTC(2026, 0, 17);
+  const jan18 = Date.UTC(2026, 0, 18);
+  const jan19 = Date.UTC(2026, 0, 19);
+  const database = new DatabaseSync(path.join(path.dirname(uploadsDir), 'chat.db'));
+  try {
+    const stamp = database.prepare('UPDATE files SET created_at = ?, updated_at = ? WHERE id = ?');
+    stamp.run(jan17, null, zebra.id);
+    stamp.run(jan17, jan19, teamA.id);
+    stamp.run(jan18, null, alpha.id);
+    stamp.run(jan19 - 1, null, teamB.id);
+  } finally {
+    database.close();
+  }
+
+  const from = '/api/files?folder=' + folder.id;
+  const list = async (params: string) => {
+    const response = await j(from + params);
+    assert.equal(response.status, 200);
+    return await response.json() as { files: FileBody[]; nextBefore: number | null };
+  };
+  const byName = await list('&sort=name&direction=asc');
+  assert.deepEqual(byName.files.map(({ id }) => id), [alpha.id, teamA.id, teamB.id, zebra.id]);
+  const byDate = await list('&sort=date&direction=desc');
+  assert.deepEqual(byDate.files.map(({ id }) => id), [teamA.id, teamB.id, alpha.id, zebra.id]);
+
+  const firstPage = await list('&sort=size&direction=asc&limit=2');
+  assert.deepEqual(firstPage.files.map(({ id }) => id), [zebra.id, teamA.id]);
+  assert.equal(firstPage.nextBefore, teamA.id);
+  const secondPage = await list('&sort=size&direction=asc&limit=2&before=' + firstPage.nextBefore);
+  assert.deepEqual(secondPage.files.map(({ id }) => id), [alpha.id, teamB.id]);
+  assert.equal(secondPage.nextBefore, null);
+
+  const latest = await list('&sort=date&direction=desc&limit=1');
+  assert.equal(latest.nextBefore, teamA.id);
+  const previous = await list('&sort=date&direction=desc&limit=1&before=' + latest.nextBefore);
+  assert.deepEqual(previous.files.map(({ id }) => id), [teamB.id]);
+
+  const onTheDay = await list('&sort=date&activityFrom=' + jan18 + '&activityBefore=' + jan19);
+  assert.deepEqual(onTheDay.files.map(({ id }) => id), [alpha.id, teamB.id]);
+  const filtered = await list('&sort=size&direction=asc&limit=1&name=EQUIPE&query=-b&minBytes=4096&maxBytes=4096');
+  assert.deepEqual(filtered.files.map(({ id }) => id), [teamB.id]);
+  assert.equal(filtered.nextBefore, null);
+
+  assert.equal((await j(from + '&minBytes=5&maxBytes=4')).status, 400);
+  assert.equal((await j(from + '&activityFrom=2&activityBefore=1')).status, 400);
+  assert.equal((await j(from + '&sort=unknown')).status, 400);
 });
 
 test('docsChanged est diffusé en WebSocket lors d une mutation documentaire', async () => {

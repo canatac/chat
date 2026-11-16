@@ -1,4 +1,13 @@
-import type { AdminStats, CallInfo, FileEvent, FileItem, Folder, Message, MessageFile, Room, RoomInvitation, RoomMember, RoomSession, User } from './types';
+import type { AdminStats, CallInfo, FileEvent, FileFilters, FileItem, FileSort, Folder, Message, MessageFile, Room, RoomInvitation, RoomMember, RoomSession, User } from './types';
+
+interface FileListRequest {
+  query: string;
+  folderId?: number | null;
+  limit: number;
+  before?: number;
+  sort: FileSort;
+  filters: FileFilters;
+}
 
 const TOKEN_KEY = 'chat.token';
 let sessionToken = localStorage.getItem(TOKEN_KEY);
@@ -107,11 +116,22 @@ export const api = {
     req<{ messages: Message[] }>(`/api/messages?limit=${limit}${before !== undefined ? `&before=${before}` : ''}`, { signal }),
   send: (content: string) =>
     req<{ message: Message }>('/api/messages', { method: 'POST', body: JSON.stringify({ content }) }),
-  files: (query = '', before?: number, limit = 100, folder?: number | null, signal?: AbortSignal) =>
-    req<{ files: FileItem[] }>(
-      `/api/files?limit=${limit}${before !== undefined ? `&before=${before}` : ''}${query ? `&query=${encodeURIComponent(query)}` : ''}${folder !== undefined ? `&folder=${folder === null ? 'root' : folder}` : ''}`,
-      { signal },
-    ),
+  files: ({ query, folderId, limit, before, sort, filters }: FileListRequest, signal?: AbortSignal) => {
+    const params = new URLSearchParams({ limit: String(limit), sort: sort.column, direction: sort.direction });
+    if (before !== undefined) params.set('before', String(before));
+    if (query) params.set('query', query);
+    if (folderId !== undefined) params.set('folder', folderId === null ? 'root' : String(folderId));
+    if (filters.name) params.set('name', filters.name);
+    if (filters.dateFrom) params.set('activityFrom', String(new Date(filters.dateFrom + 'T00:00:00').getTime()));
+    if (filters.dateTo) {
+      const nextDay = new Date(filters.dateTo + 'T00:00:00');
+      nextDay.setDate(nextDay.getDate() + 1);
+      params.set('activityBefore', String(nextDay.getTime()));
+    }
+    if (filters.minSizeKiB !== undefined) params.set('minBytes', String(filters.minSizeKiB * 1024));
+    if (filters.maxSizeKiB !== undefined) params.set('maxBytes', String(filters.maxSizeKiB * 1024));
+    return req<{ files: FileItem[]; nextBefore: number | null }>('/api/files?' + params, { signal });
+  },
   uploadFile: async (file: File, message: string, post: boolean, folderId?: number | null) => {
     const fd = new FormData();
     fd.append('file', file);

@@ -6,11 +6,12 @@ import FolderOutlinedIcon from '@mui/icons-material/FolderOutlined';
 import MoreHorizIcon from '@mui/icons-material/MoreHoriz';
 import PictureAsPdfOutlinedIcon from '@mui/icons-material/PictureAsPdfOutlined';
 import SearchOffOutlinedIcon from '@mui/icons-material/SearchOffOutlined';
-import { Box, ButtonBase, CircularProgress, IconButton, Tooltip, Typography } from '@mui/material';
+import { Box, Button, ButtonBase, CircularProgress, IconButton, Skeleton, Tooltip, Typography } from '@mui/material';
 import type { ReactNode } from 'react';
 import { chatColors } from '../theme';
 import { formatFileSize } from '../formatFileSize';
-import type { FileItem, Folder } from '../types';
+import type { FileFilters, FileItem, FileSort, Folder } from '../types';
+import DocumentColumnControls from './DocumentColumnControls';
 
 export const explorerColors = {
   ...chatColors,
@@ -22,8 +23,13 @@ export type DocumentItem = { kind: 'folder'; item: Folder } | { kind: 'file'; it
 
 interface Props {
   folders: Folder[];
-  files: FileItem[];
+  files: FileItem[] | null;
+  loading: boolean;
   searching: boolean;
+  sort: FileSort;
+  filters: FileFilters;
+  onSort: (sort: FileSort) => void;
+  onFilter: (filters: FileFilters) => void;
   downloading: ReadonlySet<number>;
   folderPath: (id: number | null) => string;
   onOpenFolder: (id: number) => void;
@@ -33,7 +39,7 @@ interface Props {
 }
 
 const dayFormatter = new Intl.DateTimeFormat('fr-FR', { day: 'numeric', month: 'short', year: 'numeric' });
-const fileColumns = 'minmax(0, 1fr) 106px 70px 94px';
+const fileColumns = 'minmax(0, 1fr) 116px 102px 94px';
 
 const actionStyle = {
   color: explorerColors.muted,
@@ -110,37 +116,46 @@ function ItemMenu({ target, onMenu }: { target: DocumentItem; onMenu: Props['onM
   );
 }
 
-function SectionTitle({ id, title, count }: { id: string; title: string; count: number }) {
+function SectionTitle({ id, title, count }: { id: string; title: string; count?: number }) {
   return (
     <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.9, mb: 1.15 }}>
       <Typography component="h3" id={id} sx={{ color: explorerColors.ink, fontSize: '0.93rem', fontWeight: 750 }}>
         {title}
       </Typography>
-      <Box component="span" sx={{ minWidth: 23, px: 0.55, py: 0.16, borderRadius: 1.25, textAlign: 'center', bgcolor: '#e7eeee', color: explorerColors.muted, fontSize: '0.72rem', fontWeight: 700 }}>
-        {count}
+      {count !== undefined && (
+        <Box component="span" sx={{ minWidth: 23, px: 0.55, py: 0.16, borderRadius: 1.25, textAlign: 'center', bgcolor: '#e7eeee', color: explorerColors.muted, fontSize: '0.72rem', fontWeight: 700 }}>
+          {count}
+        </Box>
+      )}
+    </Box>
+  );
+}
+
+function EmptyFiles({ searching, filtered, hasFolders }: { searching: boolean; filtered: boolean; hasFolders: boolean }) {
+  if (!searching && !filtered && hasFolders) {
+    return <Typography variant="body2" sx={{ px: 1.5, py: 2, color: explorerColors.muted }}>Aucun fichier dans ce dossier.</Typography>;
+  }
+  const noResults = searching || filtered;
+  return (
+    <Box sx={{ p: 4, textAlign: 'center' }}>
+      <Box sx={{ mx: 'auto', mb: 1.5, width: 48, height: 48, display: 'grid', placeItems: 'center', borderRadius: '14px', color: explorerColors.accent, bgcolor: explorerColors.accentSoft }}>
+        {noResults ? <SearchOffOutlinedIcon /> : <FolderOpenOutlinedIcon />}
       </Box>
+      <Typography component="h4" sx={{ color: explorerColors.ink, fontWeight: 750, mb: 0.35 }}>
+        {noResults ? 'Aucun résultat' : 'Ce dossier est vide'}
+      </Typography>
+      <Typography variant="body2" sx={{ color: explorerColors.muted }}>
+        {filtered ? 'Modifiez ou effacez les filtres.' : searching ? 'Essayez un autre mot-clé.' : 'Déposez un fichier ou créez un dossier.'}
+      </Typography>
     </Box>
   );
 }
 
 export default function DocumentExplorerList({
-  folders, files, searching, downloading, folderPath, onOpenFolder, onOpenFile, onDownload, onMenu,
+  folders, files, loading, searching, sort, filters, onSort, onFilter,
+  downloading, folderPath, onOpenFolder, onOpenFile, onDownload, onMenu,
 }: Props) {
-  if (!folders.length && !files.length) {
-    return (
-      <Box sx={{ p: 4, mt: 1, textAlign: 'center', border: '1px dashed ' + explorerColors.border, borderRadius: '14px', bgcolor: explorerColors.surface }}>
-        <Box sx={{ mx: 'auto', mb: 1.5, width: 48, height: 48, display: 'grid', placeItems: 'center', borderRadius: '14px', color: explorerColors.accent, bgcolor: explorerColors.accentSoft }}>
-          {searching ? <SearchOffOutlinedIcon /> : <FolderOpenOutlinedIcon />}
-        </Box>
-        <Typography component="h3" sx={{ color: explorerColors.ink, fontWeight: 750, mb: 0.35 }}>
-          {searching ? 'Aucun résultat' : 'Ce dossier est vide'}
-        </Typography>
-        <Typography variant="body2" sx={{ color: explorerColors.muted }}>
-          {searching ? 'Essayez un autre mot-clé.' : 'Déposez un fichier ou créez un dossier.'}
-        </Typography>
-      </Box>
-    );
-  }
+  const filtered = Object.values(filters).some((value) => value !== undefined);
 
   return (
     <>
@@ -183,29 +198,23 @@ export default function DocumentExplorerList({
       )}
 
       <Box component="section" aria-labelledby="doc-files-heading">
-        <SectionTitle id="doc-files-heading" title="Fichiers" count={files.length} />
-        {files.length === 0 ? (
-          <Typography variant="body2" sx={{ color: explorerColors.muted }}>Aucun fichier dans ce dossier.</Typography>
-        ) : (
-          <Box sx={{ border: '1px solid ' + explorerColors.border, borderRadius: '14px', bgcolor: explorerColors.surface, overflow: 'hidden' }}>
-            <Box
-              aria-hidden="true"
-              sx={{
-                display: { xs: 'none', md: 'grid' },
-                gridTemplateColumns: fileColumns,
-                alignItems: 'center',
-                px: 0.5,
-                height: 36,
-                bgcolor: '#edf3f3',
-                color: explorerColors.muted,
-                fontWeight: 700,
-                fontSize: '0.72rem',
-              }}
-            >
-              <Box sx={{ pl: 1.5 }}>Nom</Box>
-              <Box>Dernière activité</Box>
-              <Box>Taille</Box>
+        <Box sx={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
+          <SectionTitle id="doc-files-heading" title="Fichiers" count={files?.length} />
+          {filtered && (
+            <Button size="small" onClick={() => onFilter({})} sx={{ textTransform: 'none', color: explorerColors.accent, fontWeight: 700 }}>
+              Effacer les filtres
+            </Button>
+          )}
+        </Box>
+        <Box sx={{ border: '1px solid ' + explorerColors.border, borderRadius: '14px', bgcolor: explorerColors.surface, overflow: 'hidden' }}>
+          <DocumentColumnControls desktopColumns={fileColumns} sort={sort} filters={filters} onSort={onSort} onFilter={onFilter} />
+          {loading && (
+            <Box aria-hidden="true" sx={{ display: 'grid', p: 1, gap: 1.1 }}>
+              {[0, 1, 2].map((row) => <Skeleton key={row} variant="rounded" height={62} />)}
             </Box>
+          )}
+          {files?.length === 0 && <EmptyFiles searching={searching} filtered={filtered} hasFolders={folders.length > 0} />}
+          {files && files.length > 0 && (
             <Box component="ul" sx={{ listStyle: 'none', p: 0, m: 0 }}>
               {files.map((file) => {
                 const lastDate = dayFormatter.format(new Date(file.updatedAt ?? file.createdAt));
@@ -236,9 +245,9 @@ export default function DocumentExplorerList({
                         <FileName name={file.name} />
                         <Typography component="span" variant="caption" noWrap display="block" sx={{ color: explorerColors.muted }}>
                           {searching ? folderPath(file.folderId) : file.user.name}
-                          <Box component="span" sx={{ display: { xs: 'inline', md: 'none' } }}>
-                            {' · ' + formatFileSize(file.size) + ' · ' + lastDate}
-                          </Box>
+                        </Typography>
+                        <Typography component="span" variant="caption" sx={{ color: explorerColors.muted, display: { xs: 'block', md: 'none' } }}>
+                          {formatFileSize(file.size) + ' · ' + lastDate}
                         </Typography>
                       </Box>
                     </ButtonBase>
@@ -263,8 +272,8 @@ export default function DocumentExplorerList({
                 );
               })}
             </Box>
-          </Box>
-        )}
+          )}
+        </Box>
       </Box>
     </>
   );
