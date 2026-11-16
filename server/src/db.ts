@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
+import type { Mention, MentionKind } from './mentions.js';
 
 export interface UserRow {
   id: number;
@@ -16,11 +17,27 @@ export interface MessageRow {
   user_id: number;
   content: string;
   created_at: number;
+  mentions: string;
 }
 
-export interface ContextRow extends MessageRow {
+export interface ContextRow extends Omit<MessageRow, 'mentions'> {
   name: string;
 }
+
+export interface MentionNotificationRow {
+  id: number;
+  message_id: number;
+  kind: MentionKind;
+  read_at: number | null;
+  content: string;
+  created_at: number;
+  sender_name: string;
+}
+
+const mentionNotificationSelect = `
+  SELECT n.id, n.message_id, n.kind, n.read_at, m.content, m.created_at, COALESCE(u.display_name, u.name) AS sender_name
+  FROM mention_notifications n JOIN messages m ON m.id = n.message_id JOIN users u ON u.id = m.user_id
+`;
 
 export interface FileRow {
   id: number;
@@ -144,9 +161,20 @@ export class DB {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL REFERENCES users(id),
         content TEXT NOT NULL,
-        created_at INTEGER NOT NULL
+        created_at INTEGER NOT NULL,
+        mentions TEXT NOT NULL DEFAULT '[]'
       );
       CREATE INDEX IF NOT EXISTS idx_messages_id ON messages(id);
+      CREATE TABLE IF NOT EXISTS mention_notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        recipient_id INTEGER NOT NULL,
+        message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('member', 'room')),
+        read_at INTEGER,
+        UNIQUE (recipient_id, message_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_mentions_recipient ON mention_notifications(recipient_id, id);
+      CREATE INDEX IF NOT EXISTS idx_mentions_unread ON mention_notifications(recipient_id) WHERE read_at IS NULL;
       CREATE TABLE IF NOT EXISTS folders (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
@@ -242,6 +270,10 @@ export class DB {
     if (!userColumns.some((column) => column.name === 'display_name')) {
       this.db.exec('ALTER TABLE users ADD COLUMN display_name TEXT');
     }
+    const messageColumns = this.db.prepare('PRAGMA table_info(messages)').all() as { name: string }[];
+    if (!messageColumns.some((column) => column.name === 'mentions')) {
+      this.db.exec("ALTER TABLE messages ADD COLUMN mentions TEXT NOT NULL DEFAULT '[]'");
+    }
   }
 
   createUser(name: string, passHash: string): UserRow {
@@ -280,10 +312,10 @@ export class DB {
     return this.db.prepare('SELECT * FROM users WHERE is_bot = 1').get() as unknown as UserRow;
   }
 
-  insertMessage(userId: number, content: string): MessageRow {
+  insertMessage(userId: number, content: string, mentions: Mention[] = []): MessageRow {
     const info = this.db
-      .prepare('INSERT INTO messages (user_id, content, created_at) VALUES (?, ?, ?)')
-      .run(userId, content, Date.now());
+      .prepare('INSERT INTO messages (user_id, content, created_at, mentions) VALUES (?, ?, ?, ?)')
+      .run(userId, content, Date.now(), JSON.stringify(mentions));
     return this.getMessageById(Number(info.lastInsertRowid)) as MessageRow;
   }
 
@@ -297,6 +329,41 @@ export class DB {
         ? this.db.prepare('SELECT * FROM messages WHERE id < ? ORDER BY id DESC LIMIT ?').all(before, limit)
         : this.db.prepare('SELECT * FROM messages ORDER BY id DESC LIMIT ?').all(limit);
     return rows as unknown as MessageRow[];
+  }
+
+  listMessagesAfter(limit: number, after: number): MessageRow[] {
+    return this.db.prepare('SELECT * FROM messages WHERE id > ? ORDER BY id ASC LIMIT ?')
+      .all(after, limit) as unknown as MessageRow[];
+  }
+
+  createMentionNotifications(messageId: number, recipients: ReadonlyMap<number, MentionKind>) {
+    if (!recipients.size) return [];
+    const insert = this.db.prepare('INSERT INTO mention_notifications (recipient_id, message_id, kind) VALUES (?, ?, ?)');
+    return [...recipients].map(([recipientId, kind]) => ({ recipientId, kind, id: Number(insert.run(recipientId, messageId, kind).lastInsertRowid) }));
+  }
+
+  listMentionNotifications(recipientId: number, limit: number, before?: number): MentionNotificationRow[] {
+    const where = ' WHERE n.recipient_id = ?' + (before === undefined ? '' : ' AND n.id < ?');
+    const query = this.db.prepare(mentionNotificationSelect + where + ' ORDER BY n.id DESC LIMIT ?');
+    return (before === undefined ? query.all(recipientId, limit) : query.all(recipientId, before, limit)) as unknown as MentionNotificationRow[];
+  }
+
+  getMentionNotification(recipientId: number, id: number): MentionNotificationRow | undefined {
+    return this.db.prepare(mentionNotificationSelect + ' WHERE n.recipient_id = ? AND n.id = ?')
+      .get(recipientId, id) as unknown as MentionNotificationRow | undefined;
+  }
+
+  unreadMentions(recipientId: number): number {
+    const row = this.db.prepare('SELECT COUNT(*) AS count FROM mention_notifications WHERE recipient_id = ? AND read_at IS NULL')
+      .get(recipientId) as { count: number };
+    return row.count;
+  }
+
+  markMentionsRead(recipientId: number, selection: { id: number } | { through: number }): void {
+    const clause = 'id' in selection ? 'id = ?' : 'id <= ?';
+    const id = 'id' in selection ? selection.id : selection.through;
+    this.db.prepare('UPDATE mention_notifications SET read_at = ? WHERE recipient_id = ? AND read_at IS NULL AND ' + clause)
+      .run(Date.now(), recipientId, id);
   }
 
   listMessagesJoined(limit: number, before?: number): ContextRow[] {

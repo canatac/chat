@@ -12,6 +12,7 @@ import { createServer } from '../src/app.js';
 import { hashPassword } from '../src/auth.js';
 import { loadConfig } from '../src/config.js';
 import { DB } from '../src/db.js';
+import { resolveMentions } from '../src/mentions.js';
 
 const password = 'mot-de-passe-de-test';
 const jwtSecret = 'test-secret-multi-chatrooms';
@@ -78,6 +79,7 @@ type SocketEvent = {
   type: string;
   message?: { content: string };
   messages?: { content: string }[];
+  notification?: { id: number; kind: string; messageId: number };
 };
 
 function waitForMessage(ws: WebSocket, match: (event: SocketEvent) => boolean): Promise<SocketEvent> {
@@ -96,6 +98,76 @@ function waitForMessage(ws: WebSocket, match: (event: SocketEvent) => boolean): 
     ws.on('message', onMessage);
   });
 }
+
+test('les mentions suivent l’alias complet, même en cas d’homonymes choisis dans la saisie', () => {
+  const members = [{ id: 2, alias: 'Léo' }, { id: 3, alias: 'Léo Martin' }, { id: 4, alias: 'Léo Martin' }];
+  assert.deepEqual(resolveMentions('@Léo Martin', members, []), []);
+  assert.deepEqual(resolveMentions('@Léo Martin', members, [{ start: 0, end: 11, userId: 4 }]), [{ start: 0, end: 11, userId: 4 }]);
+  assert.deepEqual(resolveMentions('@Léo Martin', members, [{ start: 0, end: 11, userId: 99 }]), []);
+  const prose = '🗂️ (@Le\u0301o) @Léonic @roommate abc@room `@room` https://example.test/@room et @room.';
+  const matches = resolveMentions(prose, members, []);
+  assert.deepEqual(matches.map(({ start, end, userId }) => [prose.slice(start, end), userId]), [['@Le\u0301o', 2], ['@room', null]]);
+});
+
+test('notifie les bons membres, y compris hors ligne, et isole la lecture par salon et par destinataire', async (t) => {
+  const { base } = await start(t);
+  const alpha = await register(base, 'alpha-mentions@example.test', 'Salon Mentions');
+  const other = await register(base, 'beta-mentions@example.test', 'Autre salon');
+  const addMember = async (alias: string, email: string) => {
+    const invited = await api(base, '/rooms/' + alpha.roomId + '/invitations', { method: 'POST', token: alpha.token, body: { email } });
+    assert.equal(invited.status, 201);
+    const { token } = await invited.json() as { token: string };
+    const accepted = await api(base, '/auth/invitations/accept', { method: 'POST', body: { token, alias, password } });
+    assert.equal(accepted.status, 201);
+    return await accepted.json() as Session;
+  };
+  const leo = await addMember('Léo Martin', 'leo-mentions@example.test');
+  const ariane = await addMember('Ariane', 'ariane-mentions@example.test');
+  const watcher = connect(base, leo.token, alpha.roomId);
+  const sender = connect(base, alpha.token, alpha.roomId);
+  t.after(() => { watcher.close(); sender.close(); });
+  const senderEvents: SocketEvent[] = [];
+  sender.on('message', (raw) => senderEvents.push(JSON.parse(raw.toString()) as SocketEvent));
+  await Promise.all([once(watcher, 'open'), once(sender, 'open')]);
+  const directNotice = waitForMessage(watcher, (event) => event.type === 'notificationsChanged' && event.notification?.kind === 'member');
+  const send = (content: string) => api(base, '/messages', { method: 'POST', token: alpha.token, body: { content } });
+  const sent = await send('Pour @LÉO MARTIN et encore @Léo Martin. Alias @ArianeTech, `@room`, contact@room ; https://exemple.test/@room');
+  assert.equal(sent.status, 201);
+  const { message } = await sent.json() as { message: { id: number; mentions: { userId: number }[] } };
+  assert.deepEqual(message.mentions.map(({ userId }) => userId), [leo.user.id, leo.user.id]);
+  const direct = (await directNotice).notification!;
+  assert.equal(direct.messageId, message.id);
+
+  const inbox = async (account: Session, query = '') => {
+    const response = await api(base, '/notifications' + query, { token: account.token });
+    assert.equal(response.status, 200);
+    return await response.json() as { notifications: { id: number; kind: 'member' | 'room'; readAt: string | null }[]; unread: number; nextBefore: number | null };
+  };
+  assert.equal((await inbox(leo)).unread, 1);
+  assert.equal((await inbox(ariane)).unread, 0);
+  assert.equal((await send('@room et @Léo Martin')).status, 201);
+  const barrier = waitForMessage(sender, (event) => event.message?.content === 'Repère de test');
+  assert.equal((await send('Repère de test')).status, 201);
+  await barrier;
+  assert.equal(senderEvents.some((event) => event.notification), false);
+  const latest = await inbox(leo, '?limit=1');
+  assert.equal(latest.unread, 2);
+  assert.equal(latest.notifications[0].kind, 'member');
+  assert.equal((await inbox(leo, '?before=' + latest.nextBefore)).notifications[0].id, direct.id);
+  const roomNotice = await inbox(ariane);
+  assert.deepEqual(roomNotice.notifications.map(({ kind }) => kind), ['room']);
+  assert.equal((await inbox(other)).unread, 0);
+  assert.equal((await api(base, '/notifications', { token: other.token, room: alpha.roomId })).status, 403);
+  assert.equal((await api(base, '/notifications/' + direct.id, { token: alpha.token })).status, 404);
+
+  const read = (account: Session, body: unknown) => api(base, '/notifications/read', { method: 'PATCH', token: account.token, body });
+  assert.equal((await read(alpha, { id: direct.id })).status, 404);
+  assert.equal((await read(leo, { through: direct.id })).status, 200);
+  assert.equal((await inbox(leo)).unread, 1);
+  assert.equal((await read(leo, { id: latest.notifications[0].id })).status, 200);
+  assert.equal((await inbox(leo)).unread, 0);
+  assert.equal((await inbox(ariane)).unread, 1);
+});
 
 test('création de salons, invitations, profils, révocation et droits par rôle', async (t) => {
   const { base } = await start(t);
