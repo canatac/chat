@@ -3,6 +3,7 @@ import InsightsOutlinedIcon from '@mui/icons-material/InsightsOutlined';
 import FolderOpenOutlinedIcon from '@mui/icons-material/FolderOpenOutlined';
 import ForumOutlinedIcon from '@mui/icons-material/ForumOutlined';
 import LogoutOutlinedIcon from '@mui/icons-material/LogoutOutlined';
+import NotificationsNoneRoundedIcon from '@mui/icons-material/NotificationsNoneRounded';
 import PhoneIcon from '@mui/icons-material/Phone';
 import { Avatar, Badge, Box, Button, ButtonBase, Divider, ListItemIcon, Menu, MenuItem, Tooltip, Typography } from '@mui/material';
 import { useState } from 'react';
@@ -19,8 +20,11 @@ interface Props {
   onlineIds: number[];
   connection: ConnectionStatus;
   hasCall: boolean;
+  unreadNotifications: number;
+  notificationsOpen: boolean;
   onCall: () => void;
   onDocuments: () => void;
+  onNotifications: () => void;
   onAdmin: () => void;
   onStats: () => void;
   onLogout: () => void;
@@ -53,9 +57,12 @@ const actionStyle = {
 
 export default function ChatHeader({
   roomName, user, users, onlineIds, connection, hasCall, onCall, onDocuments, onAdmin, onStats, onLogout,
+  unreadNotifications, notificationsOpen, onNotifications,
 }: Props) {
   const [accountAnchor, setAccountAnchor] = useState<HTMLElement | null>(null);
   const callLabel = hasCall ? 'Appel en cours' : "Appel d'équipe";
+  const notificationLabel = unreadNotifications
+    ? `Notifications, ${unreadNotifications} non lue${unreadNotifications === 1 ? '' : 's'}` : 'Notifications';
   const closeAccount = () => setAccountAnchor(null);
 
   return (
@@ -112,6 +119,13 @@ export default function ChatHeader({
             <Button aria-label="Espace documentaire" onClick={onDocuments} sx={actionStyle}>
               <FolderOpenOutlinedIcon fontSize="small" />
               <Box component="span" sx={{ display: { xs: 'none', md: 'inline' } }}>Documents</Box>
+            </Button>
+          </Tooltip>
+          <Tooltip title="Notifications">
+            <Button aria-label={notificationLabel} aria-expanded={notificationsOpen} aria-haspopup="dialog" onClick={onNotifications} sx={actionStyle}>
+              <Badge badgeContent={unreadNotifications} max={99} color="error" aria-hidden="true">
+                <NotificationsNoneRoundedIcon fontSize="small" />
+              </Badge>
             </Button>
           </Tooltip>
           <PresenceMenu users={users} onlineIds={onlineIds} />

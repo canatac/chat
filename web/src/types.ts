@@ -7,6 +7,7 @@ export interface User {
   role?: Role;
   avatar?: string | null;
   online?: boolean;
+  mentionable?: boolean;
 }
 
 export interface Room {
@@ -47,6 +48,29 @@ export interface Message {
   createdAt: string;
   user: User;
   files: MessageFile[];
+  mentions?: Mention[];
+}
+
+export interface Mention {
+  start: number;
+  end: number;
+  userId: number | null;
+}
+
+export interface MentionNotification {
+  id: number;
+  messageId: number;
+  kind: 'member' | 'room';
+  senderName: string;
+  preview: string;
+  createdAt: string;
+  readAt: string | null;
+}
+
+export interface NotificationPage {
+  notifications: MentionNotification[];
+  unread: number;
+  nextBefore: number | null;
 }
 
 export interface FileItem {

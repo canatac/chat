@@ -1,4 +1,4 @@
-import type { AdminStats, CallInfo, DocumentIds, FileEvent, FileFilters, FileItem, FileSort, Folder, Message, MessageFile, Room, RoomInvitation, RoomMember, RoomSession, User } from './types';
+import type { AdminStats, CallInfo, DocumentIds, FileEvent, FileFilters, FileItem, FileSort, Folder, Mention, MentionNotification, Message, MessageFile, NotificationPage, Room, RoomInvitation, RoomMember, RoomSession, User } from './types';
 
 interface FileListRequest {
   query: string;
@@ -37,6 +37,7 @@ export const selectedRoom = new URLSearchParams(location.search).get('room');
 export function openRoom(roomId: number): void {
   const url = new URL(location.href);
   url.searchParams.set('room', String(roomId));
+  url.searchParams.delete('notification');
   url.hash = '';
   location.assign(url);
 }
@@ -135,8 +136,16 @@ export const api = {
   users: () => req<{ users: User[] }>('/api/users'),
   messages: (before?: number, limit = 50, signal?: AbortSignal) =>
     req<{ messages: Message[] }>(`/api/messages?limit=${limit}${before !== undefined ? `&before=${before}` : ''}`, { signal }),
-  send: (content: string) =>
-    req<{ message: Message }>('/api/messages', { method: 'POST', body: JSON.stringify({ content }) }),
+  messageWindow: (id: number, signal: AbortSignal) =>
+    req<{ messages: Message[]; hasMore: boolean; hasNewer: boolean }>('/api/messages/around/' + id, { signal }),
+  send: (content: string, mentions: Mention[] = []) =>
+    req<{ message: Message }>('/api/messages', { method: 'POST', body: JSON.stringify(mentions.length ? { content, mentions } : { content }) }),
+  notifications: (before?: number, signal?: AbortSignal) =>
+    req<NotificationPage>('/api/notifications' + (before === undefined ? '' : '?before=' + before), { signal }),
+  notification: (id: number, signal?: AbortSignal) =>
+    req<{ notification: MentionNotification }>('/api/notifications/' + id, { signal }),
+  readNotifications: (selection: { id: number } | { through: number }) =>
+    req<{ unread: number }>('/api/notifications/read', { method: 'PATCH', body: JSON.stringify(selection) }),
   files: async (request: FileListRequest, signal?: AbortSignal) => {
     const params = fileListParams(request);
     return params ? req<{ files: FileItem[]; nextBefore: number | null }>('/api/files?' + params, { signal }) : { files: [], nextBefore: null };
@@ -149,10 +158,11 @@ export const api = {
   },
   documentBatch: (operation: DocumentIds & ({ action: 'move'; destination: number | null } | { action: 'delete' })) =>
     req<{ files: number; folders: number }>('/api/documents/batch', { method: 'POST', body: JSON.stringify(operation) }),
-  uploadFile: async (file: File, message: string, post: boolean, folderId?: number | null) => {
+  uploadFile: async (file: File, message: string, post: boolean, folderId?: number | null, mentions: Mention[] = []) => {
     const fd = new FormData();
     fd.append('file', file);
     if (message) fd.append('message', message);
+    if (post && mentions.length) fd.append('mentions', JSON.stringify(mentions));
     fd.append('post', String(post));
     if (folderId !== undefined && folderId !== null) fd.append('folderId', String(folderId));
     const res = await fetch('/api/files', {

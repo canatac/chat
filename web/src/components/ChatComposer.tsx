@@ -1,16 +1,18 @@
+import AlternateEmailRoundedIcon from '@mui/icons-material/AlternateEmailRounded';
 import AttachFileOutlinedIcon from '@mui/icons-material/AttachFileOutlined';
 import AutoAwesomeOutlinedIcon from '@mui/icons-material/AutoAwesomeOutlined';
 import CloseIcon from '@mui/icons-material/Close';
 import InsertDriveFileOutlinedIcon from '@mui/icons-material/InsertDriveFileOutlined';
 import SendRoundedIcon from '@mui/icons-material/SendRounded';
 import {
-  Alert, Box, Button, CircularProgress, IconButton, ListItemText, Menu, MenuItem, Paper, TextField, Tooltip, Typography,
+  Alert, Avatar, Box, Button, CircularProgress, IconButton, ListItemButton, ListItemText, Menu, MenuItem, Paper, TextField, Tooltip, Typography,
 } from '@mui/material';
-import { useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type FocusEvent, type SyntheticEvent } from 'react';
 import { api } from '../api';
 import { formatFileSize } from '../formatFileSize';
+import { insertMentionTrigger, mentionAt, mentionsAfterEdit } from '../mentions';
 import { chatColors } from '../theme';
-import type { Message } from '../types';
+import type { Mention, Message, User } from '../types';
 
 const MAX_MESSAGE_LENGTH = 4000;
 
@@ -37,10 +39,21 @@ function commandIn(text: string) {
 
 interface Props {
   onPublished: (message: Message) => void;
+  members: User[];
+  ownId: number;
 }
 
-export default function ChatComposer({ onPublished }: Props) {
+type MentionOption = { userId: number | null; name: string; avatar?: string | null; detail?: string };
+const mentionList = 'chat-mention-options';
+const optionId = (option: MentionOption) => 'chat-mention-option-' + (option.userId ?? 'room');
+const searchKey = (text: string) => text.normalize('NFD').replace(/\p{M}/gu, '').toLocaleLowerCase('fr');
+
+export default function ChatComposer({ onPublished, members, ownId }: Props) {
   const [draft, setDraft] = useState('');
+  const [mentions, setMentions] = useState<Mention[]>([]);
+  const [caret, setCaret] = useState<number | null>(null);
+  const [dismissed, setDismissed] = useState(false);
+  const [highlight, setHighlight] = useState(-1);
   const [file, setFile] = useState<File | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -53,6 +66,68 @@ export default function ChatComposer({ onPublished }: Props) {
   const tooLong = content.length > MAX_MESSAGE_LENGTH;
   const canSubmit = Boolean(content || file) && !tooLong && !sending;
   const command = file ? undefined : commandIn(draft);
+  const options = useMemo(() => {
+    const people = members.filter((member) => member.mentionable !== false && !member.isBot);
+    const counts = new Map<string, number>();
+    for (const { name } of people) counts.set(searchKey(name), (counts.get(searchKey(name)) ?? 0) + 1);
+    const list: MentionOption[] = people.filter(({ id }) => id !== ownId).map(({ id, name, avatar }) => ({
+      userId: id, name, avatar, detail: (counts.get(searchKey(name)) ?? 0) > 1 || searchKey(name) === 'room' ? `Membre ${id}` : undefined,
+    }));
+    list.unshift({ userId: null, name: 'room', detail: 'Tout le salon' });
+    return list;
+  }, [members, ownId]);
+  const activeMention = !sending && !commandAnchor && !dismissed ? mentionAt(draft, caret, mentions) : null;
+  const suggestions = activeMention ? options.filter(({ name }) => searchKey(name).includes(searchKey(activeMention.query))).slice(0, 9) : [];
+  const highlighted = suggestions[highlight];
+  const highlightedId = highlighted ? optionId(highlighted) : undefined;
+
+  useEffect(() => {
+    if (highlightedId) document.getElementById(highlightedId)?.scrollIntoView({ block: 'nearest' });
+  }, [highlightedId]);
+
+  function changeDraft(next: string, position: number | null) {
+    setMentions(mentionsAfterEdit(draft, next, mentions));
+    setDraft(next);
+    setCaret(position);
+    setHighlight(-1);
+    setDismissed(false);
+  }
+
+  function focusAt(position: number) {
+    textInput.current?.focus();
+    requestAnimationFrame(() => {
+      textInput.current?.focus();
+      textInput.current?.setSelectionRange(position, position);
+    });
+  }
+
+  function chooseMention(option: MentionOption) {
+    if (!activeMention) return;
+    const { start, end } = activeMention;
+    const label = '@' + option.name;
+    const existing = draft.slice(start, start + label.length);
+    const extra = searchKey(existing) === searchKey(label)
+      ? Math.max(0, start + label.length - end)
+      : (draft.slice(end).match(/^[\p{L}\p{M}\p{N}_-]+/u)?.[0].length ?? 0);
+    const suffix = draft.slice(end + extra);
+    const separator = !suffix || /^[\p{L}\p{M}\p{N}_@]/u.test(suffix) ? ' ' : '';
+    const next = draft.slice(0, start) + label + separator + suffix;
+    const nextCaret = start + label.length + (suffix.startsWith(' ') ? 1 : separator.length);
+    setMentions([...mentionsAfterEdit(draft, next, mentions).filter((item) => item.end <= start || item.start >= start + label.length),
+      { start, end: start + label.length, userId: option.userId }]);
+    setDraft(next);
+    setCaret(nextCaret);
+    setHighlight(-1);
+    setDismissed(false);
+    focusAt(nextCaret);
+  }
+
+  function insertAt() {
+    const input = textInput.current;
+    const next = insertMentionTrigger(draft, input?.selectionStart ?? draft.length, input?.selectionEnd ?? draft.length);
+    changeDraft(next.text, next.caret);
+    focusAt(next.caret);
+  }
 
   const submit = async () => {
     if (!canSubmit || submitPending.current) return;
@@ -60,11 +135,17 @@ export default function ChatComposer({ onPublished }: Props) {
     setSending(true);
     setError(null);
     try {
-      const result = file ? await api.uploadFile(file, content, true) : await api.send(content);
+      const start = draft.length - draft.trimStart().length;
+      const hints = mentions.filter((mention) => mention.start >= start && mention.end <= start + content.length)
+        .map((mention) => ({ ...mention, start: mention.start - start, end: mention.end - start }));
+      const result = file ? await api.uploadFile(file, content, true, undefined, hints) : await api.send(content, hints);
       if (!result.message) throw new Error('Le serveur n’a pas confirmé la publication.');
       onPublished(result.message);
       setFile(null);
       setDraft('');
+      setMentions([]);
+      setCaret(null);
+      setHighlight(-1);
     } catch (failure) {
       const detail = failure instanceof Error && !(failure instanceof TypeError) ? failure.message : '';
       const message = file ? 'Impossible d’envoyer la pièce jointe.' : 'Impossible d’envoyer le message.';
@@ -78,9 +159,10 @@ export default function ChatComposer({ onPublished }: Props) {
   const selectCommand = (name: string) => {
     const previous = commandIn(draft);
     const text = draft.trimStart();
-    setDraft(name + ' ' + (previous ? text.slice(previous.name.length).trimStart() : text));
+    const next = name + ' ' + (previous ? text.slice(previous.name.length).trimStart() : text);
+    changeDraft(next, next.length);
     setCommandAnchor(null);
-    requestAnimationFrame(() => textInput.current?.focus());
+    focusAt(next.length);
   };
 
   return (
@@ -102,7 +184,11 @@ export default function ChatComposer({ onPublished }: Props) {
           aria-label="Rédaction du message"
           aria-busy={sending}
           onSubmit={(event) => { event.preventDefault(); void submit(); }}
+          onBlur={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget)) setCaret(null);
+          }}
           sx={{
+            position: 'relative',
             px: 1,
             py: 0.6,
             border: '1px solid ' + chatColors.border,
@@ -111,6 +197,34 @@ export default function ChatComposer({ onPublished }: Props) {
             '&:focus-within': { borderColor: '#76a99f', boxShadow: '0 0 0 2px #e5f3ef' },
           }}
         >
+          {suggestions.length > 0 && (
+            <Paper
+              id={mentionList}
+              role="listbox"
+              aria-label="Suggestions de mentions"
+              elevation={4}
+              sx={{ position: 'absolute', bottom: 'calc(100% + 6px)', left: 0, zIndex: 3, width: 'min(360px, 100%)', maxHeight: 'min(262px, 43dvh)', overflowY: 'auto', overscrollBehavior: 'contain', p: 0.5, borderRadius: '12px', border: '1px solid ' + chatColors.border }}
+            >
+              {suggestions.map((option, index) => (
+                <ListItemButton
+                  key={optionId(option)}
+                  id={optionId(option)}
+                  role="option"
+                  aria-selected={highlight === index}
+                  tabIndex={-1}
+                  selected={highlight === index}
+                  onPointerDown={(event) => event.preventDefault()}
+                  onClick={() => chooseMention(option)}
+                  sx={{ gap: 1, minHeight: 44, borderRadius: '8px', py: 0.4 }}
+                >
+                  <Avatar src={option.avatar ?? undefined} aria-hidden="true" sx={{ width: 30, height: 30, bgcolor: chatColors.accentSoft, color: chatColors.accent, fontSize: 14, fontWeight: 750 }}>
+                    {option.userId === null ? '@' : option.name.slice(0, 1).toUpperCase()}
+                  </Avatar>
+                  <ListItemText sx={{ minWidth: 0 }} primary={'@' + option.name} secondary={option.detail} slotProps={{ primary: { noWrap: true, fontWeight: 700 } }} />
+                </ListItemButton>
+              ))}
+            </Paper>
+          )}
           {file && (
             <Box
               sx={{
@@ -142,14 +256,34 @@ export default function ChatComposer({ onPublished }: Props) {
             placeholder={file ? 'Ajouter un message (facultatif)…' : 'Écrire un message…'}
             error={tooLong}
             helperText={tooLong ? 'Le message dépasse la limite de 4 000 caractères.' : command?.description}
-            onChange={(event) => setDraft(event.target.value)}
+            onChange={(event) => changeDraft(event.target.value, event.target.selectionStart)}
             onKeyDown={(event) => {
-              if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return;
+              if (event.nativeEvent.isComposing) return;
+              if (suggestions.length && ['ArrowDown', 'ArrowUp', 'Escape'].includes(event.key)) {
+                event.preventDefault();
+                if (event.key === 'Escape') setDismissed(true);
+                else if (event.key === 'ArrowDown') setHighlight((highlight + 1) % suggestions.length);
+                else setHighlight(highlight <= 0 ? suggestions.length - 1 : highlight - 1);
+                return;
+              }
+              if (event.key !== 'Enter' || event.shiftKey) return;
               event.preventDefault();
-              void submit();
+              if (highlighted) chooseMention(highlighted);
+              else void submit();
             }}
             slotProps={{
-              htmlInput: { 'aria-label': 'Écrire un message' },
+              htmlInput: {
+                'aria-label': 'Écrire un message',
+                'aria-autocomplete': 'list',
+                'aria-controls': suggestions.length ? mentionList : undefined,
+                'aria-activedescendant': highlightedId,
+                onFocus: (event: FocusEvent<HTMLTextAreaElement>) => setCaret(event.currentTarget.selectionStart),
+                onSelect: (event: SyntheticEvent<HTMLTextAreaElement>) => {
+                  const { selectionStart, selectionEnd } = event.currentTarget;
+                  const position = selectionStart === selectionEnd ? selectionStart : null;
+                  if (position !== caret) { setCaret(position); setHighlight(-1); setDismissed(false); }
+                },
+              },
               input: { readOnly: sending },
             }}
             sx={{
@@ -175,6 +309,13 @@ export default function ChatComposer({ onPublished }: Props) {
               <span>
                 <IconButton aria-label="Joindre un fichier à la conversation" disabled={sending} onClick={() => fileInput.current?.click()} sx={toolStyle}>
                   <AttachFileOutlinedIcon fontSize="small" />
+                </IconButton>
+              </span>
+            </Tooltip>
+            <Tooltip title="Mentionner quelqu’un">
+              <span>
+                <IconButton aria-label="Mentionner quelqu’un" disabled={sending} onMouseDown={(event) => event.preventDefault()} onClick={insertAt} sx={toolStyle}>
+                  <AlternateEmailRoundedIcon fontSize="small" />
                 </IconButton>
               </span>
             </Tooltip>
