@@ -206,7 +206,7 @@ test('transcribeFile : gros fichier sans ffmpeg -> erreur explicite (pas de "non
   );
 });
 
-test('transcribeFile : gros fichier avec ffmpeg -> compression 16k mono puis segments recousus (5 appels pour 5 min avec STT_CHUNK_MINUTES=1) + jalons prepare/segment/done', async (t) => {
+test('transcribeFile : gros fichier avec ffmpeg -> compression 16k mono puis 6 segments recousus avec jalons de progression', async (t) => {
   if (!ffmpegAvailable()) return t.skip('ffmpeg absent dans cet environnement');
   const { execFileSync } = await import('node:child_process');
   let calls = 0;
@@ -214,25 +214,26 @@ test('transcribeFile : gros fichier avec ffmpeg -> compression 16k mono puis seg
     (_req, res, c) => {
       calls = c.n;
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ text: `partie ${c.n}`, duration: 60 }));
+      res.end(JSON.stringify({ text: `partie ${c.n}`, duration: c.n === 6 ? 55 : 60 }));
     },
     async (baseUrl) => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stt-'));
       try {
         const wav = path.join(dir, 'long.wav');
-        // 300 s de silence 16 kHz mono = 9,6 Mo > STT_MAX_FILE_MB=1 -> downscale opus 32k (~1,2 Mo > 1 Mo) -> 5 segments de 60 s
-        execFileSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'anullsrc=r=16000:cl=mono', '-t', '300', wav], { stdio: 'ignore' });
+        // Le bruit garde la version Opus au-dessus de 1 Mio. La durée laisse un dernier segment partiel.
+        execFileSync('ffmpeg', [
+          '-y', '-f', 'lavfi', '-i', 'anoisesrc=r=16000:color=pink:amplitude=0.45:seed=21', '-t', '355', wav,
+        ], { stdio: 'ignore' });
         const events: SttProgress[] = [];
         const r = await transcribeFile(sttCfg(baseUrl, { STT_MAX_FILE_MB: '1', STT_CHUNK_MINUTES: '1' }), wav, 'long.wav', 'audio/wav', (p) => events.push(p));
-        assert.equal(calls, 5);
+        assert.equal(calls, 6);
         assert.ok(r.text.includes('partie 1'));
-        assert.ok(r.text.includes('partie 5'));
-        assert.equal(r.durationSeconds, 300);
+        assert.ok(r.text.includes('partie 6'));
+        assert.equal(r.durationSeconds, 355);
         assert.ok(events.some((e) => e.phase === 'prepare'));
         const segs = events.filter((e) => e.phase === 'segment');
-        assert.equal(segs.length, 5);
-        assert.deepEqual(segs.map((e) => e.segment), [1, 2, 3, 4, 5]);
-        assert.ok(segs.every((e) => e.totalSegments === 5));
+        assert.deepEqual(segs.map((e) => e.segment), [1, 2, 3, 4, 5, 6]);
+        assert.ok(segs.every((e) => e.totalSegments === 6));
         assert.equal(events[events.length - 1]?.phase, 'done');
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
