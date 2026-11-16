@@ -12,6 +12,7 @@ import { isAudioMime, sttConfigured, transcribeFile, type SttProgressCb } from '
 export interface LinkDeps {
   db: DB;
   config: Config;
+  uploadsDir: string;
   userId: number;
   postBot: (content: string) => void;
 }
@@ -182,7 +183,7 @@ export function parseLienArg(arg: string): { url: string; title: string } {
 }
 
 export async function handleLinkCommand(deps: LinkDeps, msg: { id: number; content: string }, arg: string): Promise<void> {
-  const uploadsDir = path.join(deps.config.DATA_DIR, 'uploads');
+  const { uploadsDir } = deps;
   fs.mkdirSync(uploadsDir, { recursive: true });
   let parsed: { url: string; title: string };
   try {

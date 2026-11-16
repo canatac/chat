@@ -15,6 +15,11 @@ test.beforeAll(async () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chat-e2e-'));
   const { createServer } = await import('../../server/dist/app.js');
   const { loadConfig } = await import('../../server/dist/config.js');
+  const { DB } = await import('../../server/dist/db.js');
+  const { hashPassword } = await import('../../server/dist/auth.js');
+  const legacy = new DB(dataDir);
+  for (const name of ['AliceE2E', 'BobE2E']) legacy.createUser(name, hashPassword('secret123'));
+  legacy.close();
   const config = loadConfig({
     ...process.env,
     PORT: String(PORT),
@@ -35,7 +40,7 @@ test.afterAll(async () => {
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
-async function registerAndLogin(page: Page, name: string, freq: number) {
+async function loginWithTone(page: Page, name: string, freq: number) {
   await page.addInitScript((f) => {
     const ctx = new AudioContext();
     const osc = ctx.createOscillator();
@@ -50,9 +55,10 @@ async function registerAndLogin(page: Page, name: string, freq: number) {
       return orig(c);
     }) as typeof navigator.mediaDevices.getUserMedia;
   }, freq);
-  const res = await page.request.post(`${BASE}/api/auth/register`, {
+  const res = await page.request.post(`${BASE}/api/auth/login`, {
     data: { name, password: 'secret123' },
   });
+  expect(res.status()).toBe(200);
   const { token } = await res.json();
   await page.goto(BASE);
   await page.evaluate((t) => localStorage.setItem('chat.token', t), token);
@@ -81,8 +87,8 @@ test('deux voix dans un seul fichier (440 Hz + 880 Hz), REC lancé par A arrêt�
   const pageA = await ctxA.newPage();
   const pageB = await ctxB.newPage();
 
-  await registerAndLogin(pageA, 'AliceE2E', 440);
-  await registerAndLogin(pageB, 'BobE2E', 880);
+  await loginWithTone(pageA, 'AliceE2E', 440);
+  await loginWithTone(pageB, 'BobE2E', 880);
 
   const call = await callApi(pageA, 'POST', `${BASE}/api/calls/start`, { title: 'E2E' });
   await callApi(pageB, 'POST', `${BASE}/api/calls/join`, {});
@@ -106,7 +112,11 @@ test('deux voix dans un seul fichier (440 Hz + 880 Hz), REC lancé par A arrêt�
   expect(file, 'fichier déposé').toBeTruthy();
   expect(file.size).toBeGreaterThan(1000);
 
-  const dl = await pageA.request.get(`${BASE}/api/files/${file.id}/download`);
+  const token = await pageA.evaluate(() => localStorage.getItem('chat.token'));
+  const dl = await pageA.request.get(`${BASE}/api/files/${file.id}/download`, {
+    headers: { Authorization: 'Bearer ' + token },
+  });
+  expect(dl.status()).toBe(200);
   const buf = Buffer.from(await dl.body());
   const dataDir = (globalThis as Record<string, unknown>).__dataDir as string;
   const out = path.join(dataDir, file.name);

@@ -61,7 +61,7 @@ export default function PresenceMenu({ users, onlineIds }: Props) {
             return (
               <ListItem key={user.id} sx={{ gap: 1 }}>
                 <ListItemAvatar sx={{ minWidth: 35 }}>
-                  <Avatar aria-hidden="true" sx={{ width: 30, height: 30, bgcolor: chatColors.accentSoft, color: chatColors.accent, fontSize: '0.83rem', fontWeight: 700 }}>
+                  <Avatar aria-hidden="true" src={user.avatar ?? undefined} sx={{ width: 30, height: 30, bgcolor: chatColors.accentSoft, color: chatColors.accent, fontSize: '0.83rem', fontWeight: 700 }}>
                     {user.name.slice(0, 1).toUpperCase()}
                   </Avatar>
                 </ListItemAvatar>

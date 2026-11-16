@@ -1,8 +1,8 @@
 import ArrowDownwardRoundedIcon from '@mui/icons-material/ArrowDownwardRounded';
 import ForumOutlinedIcon from '@mui/icons-material/ForumOutlined';
 import { Alert, Box, Button, CircularProgress, Typography } from '@mui/material';
-import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { api } from './api';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { api, selectedRoom } from './api';
 import AdminDialog from './components/AdminDialog';
 import CallDialog from './components/CallDialog';
 import ChatComposer from './components/ChatComposer';
@@ -10,7 +10,7 @@ import ChatHeader, { type ConnectionStatus } from './components/ChatHeader';
 import DocDrawer from './components/DocDrawer';
 import MessageRow from './components/MessageRow';
 import { chatColors } from './theme';
-import type { CallInfo, Message, User } from './types';
+import type { CallInfo, Message, Room, User } from './types';
 import { ChatSocket } from './ws';
 
 const PAGE_SIZE = 50;
@@ -20,6 +20,8 @@ const calendarDate = new Intl.DateTimeFormat('fr-FR', { dateStyle: 'long' });
 interface Props {
   token: string;
   user: User;
+  room: Room;
+  onAdmin: () => void;
   onLogout: () => void;
 }
 
@@ -57,7 +59,7 @@ function DayDivider({ date }: { date: Date }) {
   );
 }
 
-export default function Chat({ token, user, onLogout }: Props) {
+export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [onlineIds, setOnlineIds] = useState<number[]>([]);
@@ -69,9 +71,12 @@ export default function Chat({ token, user, onLogout }: Props) {
   const [historyError, setHistoryError] = useState<'recent' | 'older' | null>(null);
   const [atEnd, setAtEnd] = useState(true);
   const [docOpen, setDocOpen] = useState(false);
-  const [adminOpen, setAdminOpen] = useState(false);
+  const [statsOpen, setStatsOpen] = useState(false);
   const [callOpen, setCallOpen] = useState(false);
   const [call, setCall] = useState<CallInfo | null>(null);
+
+  const usersById = useMemo(() => new Map(users.map((member) => [member.id, member])), [users]);
+  const displayUser = { ...user, ...usersById.get(user.id) };
 
   const listRef = useRef<HTMLDivElement>(null);
   const followMessages = useRef(true);
@@ -94,7 +99,7 @@ export default function Chat({ token, user, onLogout }: Props) {
 
   useEffect(() => {
     const request = new AbortController();
-    const activeSocket = new ChatSocket(token);
+    const activeSocket = new ChatSocket(token, selectedRoom);
     let receivedPresence = false;
     let connectedBefore = false;
     let receivedCall = false;
@@ -134,6 +139,10 @@ export default function Chat({ token, user, onLogout }: Props) {
         receivedPresence = true;
         setOnlineIds(event.online);
         if (event.online.some((id) => !knownUsers.has(id))) refreshUsers();
+      } else if (event.type === 'membersChanged') {
+        refreshUsers();
+      } else if (event.type === 'roomUnavailable') {
+        location.reload();
       } else if (event.type === 'call') {
         receivedCall = true;
         setCall(event.call ?? null);
@@ -217,14 +226,16 @@ export default function Chat({ token, user, onLogout }: Props) {
   return (
     <Box sx={{ height: '100vh', '@supports (height: 100dvh)': { height: '100dvh' }, display: 'flex', flexDirection: 'column', bgcolor: chatColors.background }}>
       <ChatHeader
-        user={user}
+        roomName={room.name}
+        user={displayUser}
         users={users}
         onlineIds={onlineIds}
         connection={connection}
         hasCall={Boolean(call)}
         onCall={() => setCallOpen(true)}
         onDocuments={() => setDocOpen(true)}
-        onAdmin={() => setAdminOpen(true)}
+        onAdmin={onAdmin}
+        onStats={() => setStatsOpen(true)}
         onLogout={onLogout}
       />
       <Box component="main" sx={{ position: 'relative', flex: 1, minHeight: 0 }}>
@@ -293,7 +304,12 @@ export default function Chat({ token, user, onLogout }: Props) {
                   return (
                     <Fragment key={message.id}>
                       {newDay && <DayDivider date={date} />}
-                      <MessageRow message={message} own={message.user.id === user.id} groupStart={groupStart} />
+                      <MessageRow
+                        message={message}
+                        sender={usersById.get(message.user.id) ?? message.user}
+                        own={message.user.id === user.id}
+                        groupStart={groupStart}
+                      />
                     </Fragment>
                   );
                 })}
@@ -321,7 +337,7 @@ export default function Chat({ token, user, onLogout }: Props) {
       <ChatComposer onPublished={publish} />
 
       <DocDrawer open={docOpen} onClose={() => setDocOpen(false)} socket={socket} />
-      <AdminDialog open={adminOpen} onClose={() => setAdminOpen(false)} />
+      {(user.role === 'admin' || user.role === 'superadmin') && <AdminDialog open={statsOpen} onClose={() => setStatsOpen(false)} />}
       <CallDialog
         open={callOpen}
         onClose={() => setCallOpen(false)}

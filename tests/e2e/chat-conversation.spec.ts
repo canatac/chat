@@ -9,24 +9,29 @@ const longLink = 'https://media.example.org/reunions/' + 'archive-de-demonstrati
 
 type Account = { token: string; user: { id: number } };
 
-async function register(page: Page, base: string, name: string): Promise<Account> {
-  const response = await page.request.post(base + '/api/auth/register', { data: { name, password: 'chat-local-e2e' } });
-  expect(response.status()).toBe(201);
+async function login(page: Page, base: string, name: string): Promise<Account> {
+  const response = await page.request.post(base + '/api/auth/login', { data: { name, password: 'chat-local-e2e' } });
+  expect(response.status()).toBe(200);
   return response.json() as Promise<Account>;
 }
 
 async function withChat(page: Page, historySize: number, run: (base: string, colleague: Account) => Promise<void>) {
   const { createServer } = await import('../../server/dist/app.js');
   const { loadConfig } = await import('../../server/dist/config.js');
+  const { DB } = await import('../../server/dist/db.js');
+  const { hashPassword } = await import('../../server/dist/auth.js');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'chat-conversation-e2e-'));
+  const legacy = new DB(dir);
+  for (const name of ['Camille', 'Noémie']) legacy.createUser(name, hashPassword('chat-local-e2e'));
+  legacy.close();
   const ctx = createServer(loadConfig({ JWT_SECRET: 'chat-e2e-secret', ADMIN_NAMES: 'Camille' }), dir);
 
   try {
     await new Promise<void>((resolve) => ctx.server.listen(0, '127.0.0.1', resolve));
     const { port } = ctx.server.address() as AddressInfo;
     const base = 'http://127.0.0.1:' + port;
-    const account = await register(page, base, 'Camille');
-    const colleague = await register(page, base, 'Noémie');
+    const account = await login(page, base, 'Camille');
+    const colleague = await login(page, base, 'Noémie');
     for (let index = 1; index <= historySize; index++) {
       ctx.db.insertMessage(colleague.user.id, 'Message historique ' + index);
     }

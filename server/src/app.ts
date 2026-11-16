@@ -7,14 +7,16 @@ import { fileURLToPath } from 'node:url';
 import multer from 'multer';
 import { WebSocket, WebSocketServer } from 'ws';
 import { z } from 'zod';
-import { hashPassword, signToken, verifyPassword, verifyToken } from './auth.js';
-import { isAdminUser, type Config } from './config.js';
+import { hashPassword } from './auth.js';
+import type { Config } from './config.js';
 import { DB, type CallRow, type FileEventListRow, type FileListRow, type FileRow, type FolderRow, type MessageRow, type UserRow } from './db.js';
 import { deriveDocument, HttpError, type DeriveKind } from './llm/derive.js';
 import { handleCommand } from './llm/run.js';
 import { chunkText, extractText } from './llm/rag.js';
 import { pricesFor } from './llm/pricing.js';
 import { isAudioMime, sttConfigured, transcribeFile } from './llm/stt.js';
+import { mountRoomAdmin, parseRoomId, publicAccount } from './room-admin.js';
+import { LEGACY_ROOM_ID, RoomDirectory, type Account } from './rooms.js';
 
 export interface PublicUser {
   id: number;
@@ -61,7 +63,7 @@ export interface SerializedMessage {
 }
 
 export function toPublicUser(u: UserRow): PublicUser {
-  return { id: u.id, name: u.name, isBot: u.is_bot === 1 };
+  return { id: u.id, name: u.display_name ?? u.name, isBot: u.is_bot === 1 };
 }
 
 export function toPublicFile(f: FileRow): PublicFile {
@@ -112,13 +114,12 @@ export interface ServerContext {
   close: () => Promise<void>;
 }
 
-export function createServer(config: Config, dataDir: string): ServerContext {
-  const db = new DB(dataDir);
+function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: number, directory: RoomDirectory) {
   const uploadsDir = path.join(dataDir, 'uploads');
   fs.mkdirSync(uploadsDir, { recursive: true });
 
-  const app = express();
-  app.use(express.json({ limit: '64kb' }));
+  const app = express.Router();
+  const clients = new Set<WebSocket>();
 
   const online = new Map<number, Set<WebSocket>>();
   function onlineUserIds(): number[] {
@@ -206,6 +207,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
         {
           db,
           config,
+          uploadsDir,
           userId,
           postBot: (text) => {
             const botRow = db.insertMessage(db.getBot().id, text);
@@ -303,90 +305,36 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     }
   }
 
-  const auth: express.RequestHandler = (req, res, next) => {
-    const header = req.headers.authorization;
-    const token = header?.startsWith('Bearer ') ? header.slice(7) : undefined;
-    if (!token) {
-      res.status(401).json({ error: 'Non authentifié' });
-      return;
-    }
-    try {
-      const payload = verifyToken(token, config.JWT_SECRET);
-      req.user = { id: payload.sub, name: payload.name };
-      next();
-    } catch {
-      res.status(401).json({ error: 'Token invalide' });
-    }
-  };
-
   const adminOnly: express.RequestHandler = (req, res, next) => {
-    if (!req.user || !isAdminUser(config, req.user.name)) {
-      res.status(403).json({ error: 'Réservé aux administrateurs (ADMIN_NAMES dans le .env)' });
+    if (req.user?.role !== 'admin' && req.user?.role !== 'superadmin') {
+      res.status(403).json({ error: 'Réservé aux administrateurs du salon' });
       return;
     }
     next();
   };
 
-  const credentialsSchema = z.object({
-    name: z
-      .string()
-      .trim()
-      .min(2)
-      .max(30)
-      .regex(/^[\p{L}\p{N} _.-]+$/u, 'Nom invalide'),
-    password: z.string().min(6).max(100),
-  });
-
-  app.post('/api/auth/register', (req, res) => {
-    const parsed = credentialsSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ error: 'Nom (2-30 caractères) et mot de passe (6 caractères minimum) requis' });
-      return;
-    }
-    const { name, password } = parsed.data;
-    if (db.getUserByName(name)) {
-      res.status(409).json({ error: 'Ce nom est déjà pris' });
-      return;
-    }
-    const user = db.createUser(name, hashPassword(password));
-    res.status(201).json({ token: signToken(user, config.JWT_SECRET), user: toPublicUser(user) });
-  });
-
-  app.post('/api/auth/login', (req, res) => {
-    const parsed = credentialsSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ error: 'Identifiants invalides' });
-      return;
-    }
-    const user = db.getUserByName(parsed.data.name);
-    if (!user || !user.pass_hash || !verifyPassword(parsed.data.password, user.pass_hash)) {
-      res.status(401).json({ error: 'Nom ou mot de passe incorrect' });
-      return;
-    }
-    res.json({ token: signToken(user, config.JWT_SECRET), user: toPublicUser(user) });
-  });
-
-  app.get('/api/me', auth, (req, res) => {
-    const user = db.getUserById(req.user?.id ?? -1);
-    if (!user) {
-      res.status(404).json({ error: 'Utilisateur introuvable' });
-      return;
-    }
-    res.json({ user: { ...toPublicUser(user), isAdmin: isAdminUser(config, user.name) } });
-  });
-
-  app.get('/api/users', auth, (req, res) => {
+  app.get('/api/users', (req, res) => {
+    const members = new Map(directory.listMembers(roomId).map((member) => [member.id, member]));
     const onlineIds = new Set(onlineUserIds());
+    const viewer = res.locals.account as Account;
+    for (const id of [...onlineIds, viewer.id]) {
+      if (members.has(id)) continue;
+      const visitor = directory.getAccount(id);
+      if (visitor && directory.role(visitor) === 'superadmin') members.set(id, visitor);
+    }
     res.json({
-      users: db.listUsers().map((u) => ({ ...toPublicUser(u), online: onlineIds.has(u.id) })),
+      users: [...members.values()].map((member) => ({
+        ...publicAccount(directory, member),
+        online: onlineIds.has(member.id),
+      })),
     });
   });
 
-  app.get('/api/calls/active', auth, (req, res) => {
+  app.get('/api/calls/active', (req, res) => {
     res.json({ call: serializeCall() });
   });
 
-  app.get('/api/rtc-config', auth, (req, res) => {
+  app.get('/api/rtc-config', (req, res) => {
     const iceServers: { urls: string | string[]; username?: string; credential?: string }[] = [
       { urls: 'stun:stun.l.google.com:19302' },
     ];
@@ -402,7 +350,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
 
   const callTitleSchema = z.object({ title: z.string().trim().max(120).optional() });
 
-  app.post('/api/calls/start', auth, (req, res) => {
+  app.post('/api/calls/start', (req, res) => {
     if (activeCall) {
       res.status(409).json({ error: 'Un appel est déjà en cours', call: serializeCall() });
       return;
@@ -415,7 +363,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     res.status(201).json({ call: serializeCall() });
   });
 
-  app.post('/api/calls/join', auth, (req, res) => {
+  app.post('/api/calls/join', (req, res) => {
     if (!activeCall) {
       res.status(404).json({ error: 'Aucun appel en cours' });
       return;
@@ -425,7 +373,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     res.json({ call: serializeCall() });
   });
 
-  app.post('/api/calls/leave', auth, (req, res) => {
+  app.post('/api/calls/leave', (req, res) => {
     if (!activeCall) {
       res.status(404).json({ error: 'Aucun appel en cours' });
       return;
@@ -439,7 +387,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     res.json({ call: serializeCall() });
   });
 
-  app.post('/api/calls/end', auth, (req, res) => {
+  app.post('/api/calls/end', (req, res) => {
     if (!activeCall) {
       res.status(404).json({ error: 'Aucun appel en cours' });
       return;
@@ -455,7 +403,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     before: z.coerce.number().int().optional(),
   });
 
-  app.get('/api/messages', auth, (req, res) => {
+  app.get('/api/messages', (req, res) => {
     const parsed = listQuerySchema.safeParse(req.query);
     if (!parsed.success) {
       res.status(400).json({ error: 'Paramètres invalides' });
@@ -469,7 +417,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     content: z.string().trim().min(1).max(4000),
   });
 
-  app.post('/api/messages', auth, (req, res) => {
+  app.post('/api/messages', (req, res) => {
     const parsed = postSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: 'content requis (1-4000 caractères)' });
@@ -489,7 +437,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     limits: { fileSize: config.MAX_UPLOAD_MB * 1024 * 1024 },
   });
 
-  app.post('/api/files', auth, upload.single('file'), (req, res) => {
+  app.post('/api/files', upload.single('file'), (req, res) => {
     if (!req.file) {
       res.status(400).json({ error: 'Champ "file" requis' });
       return;
@@ -555,7 +503,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     folder: z.string().optional(), // absent = tout ; 'root' = racine ; sinon id de dossier
   });
 
-  app.get('/api/files', auth, (req, res) => {
+  app.get('/api/files', (req, res) => {
     const parsed = filesQuerySchema.safeParse(req.query);
     if (!parsed.success) {
       res.status(400).json({ error: 'Paramètres invalides' });
@@ -583,11 +531,11 @@ export function createServer(config: Config, dataDir: string): ServerContext {
   });
 
   // ---------- explorateur de documents : dossiers ----------
-  app.get('/api/folders', auth, (req, res) => {
+  app.get('/api/folders', (req, res) => {
     res.json({ folders: db.listFolders().map((f) => toPublicFolder(f)) });
   });
 
-  app.post('/api/folders', auth, (req, res) => {
+  app.post('/api/folders', (req, res) => {
     const parsed = z
       .object({ name: z.string().trim().min(1).max(120), parentId: z.number().int().nullable().optional() })
       .safeParse(req.body ?? {});
@@ -611,7 +559,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     res.status(201).json({ folder: toPublicFolder(folder) });
   });
 
-  app.patch('/api/folders/:id', auth, (req, res) => {
+  app.patch('/api/folders/:id', (req, res) => {
     const id = Number(req.params.id);
     const folder = db.getFolderById(id);
     if (!folder) {
@@ -659,7 +607,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     res.json({ folder: toPublicFolder(db.getFolderById(id) as FolderRow) });
   });
 
-  app.delete('/api/folders/:id', auth, (req, res) => {
+  app.delete('/api/folders/:id', (req, res) => {
     const id = Number(req.params.id);
     const folder = db.getFolderById(id);
     if (!folder) {
@@ -698,7 +646,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
   });
 
   // ---------- explorateur de documents : fichiers ----------
-  app.get('/api/files/:id', auth, (req, res) => {
+  app.get('/api/files/:id', (req, res) => {
     const file = db.getFileById(Number(req.params.id));
     if (!file) {
       res.status(404).json({ error: 'Fichier introuvable' });
@@ -718,14 +666,14 @@ export function createServer(config: Config, dataDir: string): ServerContext {
       file: {
         ...toPublicFile(file),
         messageId: file.message_id,
-        user: { id: file.user_id, name: db.getUserById(file.user_id)?.name ?? '' },
+        user: toPublicUser(db.getUserById(file.user_id)!),
       },
       folderPath,
       history: db.listFileEvents({ fileId: file.id, limit: 200 }).map(toPublicEvent),
     });
   });
 
-  app.patch('/api/files/:id', auth, (req, res) => {
+  app.patch('/api/files/:id', (req, res) => {
     const id = Number(req.params.id);
     const file = db.getFileById(id);
     if (!file) {
@@ -767,12 +715,12 @@ export function createServer(config: Config, dataDir: string): ServerContext {
       file: {
         ...toPublicFile(db.getFileById(id) as FileRow),
         messageId: file.message_id,
-        user: { id: file.user_id, name: db.getUserById(file.user_id)?.name ?? '' },
+        user: toPublicUser(db.getUserById(file.user_id)!),
       },
     });
   });
 
-  app.delete('/api/files/:id', auth, (req, res) => {
+  app.delete('/api/files/:id', (req, res) => {
     const id = Number(req.params.id);
     const file = db.getFileById(id);
     if (!file) {
@@ -795,7 +743,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     res.json({ ok: true });
   });
 
-  app.get('/api/events', auth, (req, res) => {
+  app.get('/api/events', (req, res) => {
     const fileIdRaw = req.query.fileId;
     const folderIdRaw = req.query.folderId;
     const limitRaw = Number(req.query.limit ?? 100);
@@ -813,7 +761,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     res.json({ events: events.map(toPublicEvent) });
   });
 
-  app.get('/api/files/:id/download', auth, (req, res) => {
+  app.get('/api/files/:id/download', (req, res) => {
     const file = db.getFileById(Number(req.params.id));
     if (!file) {
       res.status(404).json({ error: 'Fichier introuvable' });
@@ -833,7 +781,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     limits: { fileSize: config.RECORDING_MAX_MB * 1024 * 1024 },
   });
 
-  app.post('/api/calls/:id/recording/start', auth, (req, res) => {
+  app.post('/api/calls/:id/recording/start', (req, res) => {
     if (!activeCall || activeCall.row.id !== Number(req.params.id)) {
       res.status(404).json({ error: 'Aucun appel en cours' });
       return;
@@ -848,7 +796,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     res.json({ call: serializeCall(), recordingId: activeCall.recording.id });
   });
 
-  app.post('/api/calls/:id/recording/stop', auth, (req, res) => {
+  app.post('/api/calls/:id/recording/stop', (req, res) => {
     if (!activeCall || activeCall.row.id !== Number(req.params.id)) {
       res.status(404).json({ error: 'Aucun appel en cours' });
       return;
@@ -863,7 +811,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     res.json({ call: serializeCall() });
   });
 
-  app.post('/api/calls/:id/recording', auth, recordUpload.single('file'), (req, res) => {
+  app.post('/api/calls/:id/recording', recordUpload.single('file'), (req, res) => {
     const call = db.getCallById(Number(req.params.id));
     if (!call) {
       res.status(404).json({ error: 'Appel introuvable' });
@@ -922,7 +870,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
 
   const deriveSchema = z.object({ kind: z.enum(['resume', 'cr']) });
 
-  app.post('/api/files/:id/derive', auth, async (req, res) => {
+  app.post('/api/files/:id/derive', async (req, res) => {
     const file = db.getFileById(Number(req.params.id));
     if (!file) {
       res.status(404).json({ error: 'Fichier introuvable' });
@@ -938,7 +886,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
       const row = await deriveDocument({ db, config, userId: req.user?.id ?? -1, uploadsDir }, file, kind);
       logDocEvent(req.user?.id ?? -1, { fileId: row.id, folderId: row.folder_id ?? null, action: 'file_derived', detail: `${kind === 'cr' ? 'compte-rendu' : 'résumé'} généré depuis « ${file.name} »` });
       docsChanged();
-      res.status(201).json({ file: { ...toPublicFile(row), messageId: row.message_id, user: { id: row.user_id, name: db.getUserById(row.user_id)?.name ?? '' } } });
+      res.status(201).json({ file: { ...toPublicFile(row), messageId: row.message_id, user: toPublicUser(db.getUserById(row.user_id)!) } });
     } catch (err) {
       if (err instanceof HttpError) {
         res.status(err.statusCode).json({ error: err.message });
@@ -948,7 +896,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     }
   });
 
-  app.post('/api/files/:id/transcribe', auth, async (req, res) => {
+  app.post('/api/files/:id/transcribe', async (req, res) => {
     const file = db.getFileById(Number(req.params.id));
     if (!file) {
       res.status(404).json({ error: 'Fichier introuvable' });
@@ -971,16 +919,16 @@ export function createServer(config: Config, dataDir: string): ServerContext {
       file: {
         ...toPublicFile(row),
         messageId: row.message_id,
-        user: { id: row.user_id, name: db.getUserById(row.user_id)?.name ?? '' },
+        user: toPublicUser(db.getUserById(row.user_id)!),
       },
     });
   });
 
-  app.get('/api/admin/stats', auth, adminOnly, (req, res) => {
+  app.get('/api/admin/stats', adminOnly, (req, res) => {
     const overview = db.statsOverview();
     const model = config.LLM_MODEL ?? '';
     res.json({
-      users: { total: overview.users, online: onlineUserIds().length },
+      users: { total: directory.listMembers(roomId).length, online: onlineUserIds().length },
       messages: overview.messages,
       files: { count: overview.files, bytes: overview.fileBytes },
       calls: { total: overview.calls, active: activeCall ? activeCall.participants.size : 0 },
@@ -999,45 +947,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     });
   });
 
-  const webDist = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../web/dist');
-  if (fs.existsSync(webDist)) {
-    app.use(express.static(webDist));
-    app.get('*', (req, res, next) => {
-      if (req.path.startsWith('/api/') || req.path === '/ws') {
-        next();
-        return;
-      }
-      res.sendFile(path.join(webDist, 'index.html'));
-    });
-  }
-
-  const server = http.createServer(app);
-  const wss = new WebSocketServer({ server, path: '/ws' });
-  const clients = new Set<WebSocket>();
-
-  wss.on('connection', (ws, req) => {
-    const url = new URL(req.url ?? '/', 'http://localhost');
-    const token = url.searchParams.get('token');
-    const fail = (reason: string) => {
-      ws.send(JSON.stringify({ type: 'error', error: reason }));
-      ws.close(4001);
-    };
-    if (!token) {
-      fail('Token manquant');
-      return;
-    }
-    let payload;
-    try {
-      payload = verifyToken(token, config.JWT_SECRET);
-    } catch {
-      fail('Token invalide');
-      return;
-    }
-    const user = db.getUserById(payload.sub);
-    if (!user) {
-      fail('Utilisateur introuvable');
-      return;
-    }
+  function connect(ws: WebSocket, user: UserRow, authorized: () => boolean): void {
     clients.add(ws);
     let sockets = online.get(user.id);
     if (!sockets) {
@@ -1059,6 +969,10 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     });
 
     ws.on('message', (data) => {
+      if (!authorized()) {
+        ws.close(4003, 'Accès au salon révoqué');
+        return;
+      }
       let parsed: unknown;
       try {
         parsed = JSON.parse(data.toString());
@@ -1111,20 +1025,148 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     };
     ws.on('close', onClose);
     ws.on('error', onClose);
+  }
+
+  function disconnect(ws: WebSocket, reason: string): void {
+    clients.delete(ws);
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.close(4003, reason);
+    }
+  }
+
+  function removeMember(accountId: number): void {
+    const sockets = online.get(accountId);
+    online.delete(accountId);
+    if (sockets) {
+      for (const ws of sockets) disconnect(ws, 'Accès au salon révoqué');
+      broadcastPresence();
+    }
+    if (activeCall?.participants.delete(accountId)) {
+      if (activeCall.recording?.startedBy === accountId) activeCall.recording = null;
+      if (activeCall.participants.size === 0) {
+        db.endCall(activeCall.row.id);
+        activeCall = null;
+      }
+      broadcastCall();
+    }
+    broadcast({ type: 'membersChanged' });
+  }
+
+  function archive(): void {
+    if (activeCall) {
+      db.endCall(activeCall.row.id);
+      activeCall = null;
+    }
+    online.clear();
+    for (const ws of clients) disconnect(ws, 'Ce salon est archivé');
+  }
+
+  return { app, db, broadcast, connect, onlineUserIds, removeMember, archive };
+}
+
+export function createServer(config: Config, dataDir: string): ServerContext {
+  const db = new DB(dataDir);
+  const directory = new RoomDirectory(dataDir, db, config.ADMIN_NAMES, config.SUPERADMIN_NAMES);
+  directory.bootstrapSuperadmin(hashPassword, config.SUPERADMIN_PASSWORD ?? '');
+  const runtimes = new Map<number, ReturnType<typeof createRoomRuntime>>();
+
+  // Le salon historique conserve ses chemins et ses identifiants.
+  function runtimeFor(roomId: number) {
+    const existing = runtimes.get(roomId);
+    if (existing) return existing;
+    const roomDir = roomId === LEGACY_ROOM_ID ? dataDir : path.join(dataDir, 'rooms', String(roomId));
+    const roomDb = roomId === LEGACY_ROOM_ID ? db : new DB(roomDir, -1);
+    const runtime = createRoomRuntime(config, roomDir, roomDb, roomId, directory);
+    runtimes.set(roomId, runtime);
+    return runtime;
+  }
+
+  const app = express();
+  app.use(express.json({ limit: '64kb' }));
+  const { auth, resolveAccount } = mountRoomAdmin(app, config, directory, {
+    memberChanged(roomId, account) {
+      const runtime = runtimes.get(roomId);
+      runtime?.db.ensureActor(account);
+      runtime?.broadcast({ type: 'membersChanged' });
+    },
+    memberRemoved(roomId, accountId) {
+      runtimes.get(roomId)?.removeMember(accountId);
+    },
+    roomArchived(roomId) {
+      runtimes.get(roomId)?.archive();
+    },
+  });
+
+  app.use((req, res, next) => {
+    if (!req.path.startsWith('/api/')) {
+      next();
+      return;
+    }
+    auth(req, res, () => {
+      const account = res.locals.account as Account;
+      const selector = req.get('X-Chat-Room');
+      const room = directory.accessRoom(account, selector === undefined ? undefined : parseRoomId(selector));
+      if (!room) {
+        res.status(403).json({ error: 'Accès au salon indisponible' });
+        return;
+      }
+      const runtime = runtimeFor(room.id);
+      runtime.db.ensureActor(account);
+      runtime.app(req, res, next);
+    });
+  });
+
+  const webDist = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../web/dist');
+  if (fs.existsSync(webDist)) {
+    app.use(express.static(webDist));
+    app.get('*', (req, res, next) => {
+      if (req.path.startsWith('/api/') || req.path === '/ws') {
+        next();
+        return;
+      }
+      res.sendFile(path.join(webDist, 'index.html'));
+    });
+  }
+
+  const server = http.createServer(app);
+  const wss = new WebSocketServer({ server, path: '/ws' });
+  wss.on('connection', (ws, req) => {
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    const token = url.searchParams.get('token');
+    const account = resolveAccount(token);
+    if (!account) {
+      ws.close(4001, 'Session invalide ou révoquée');
+      return;
+    }
+    const selector = url.searchParams.get('room');
+    const room = directory.accessRoom(account, selector === null ? undefined : parseRoomId(selector));
+    if (!room) {
+      ws.close(4003, 'Accès au salon indisponible');
+      return;
+    }
+    const runtime = runtimeFor(room.id);
+    runtime.connect(ws, runtime.db.ensureActor(account), () => {
+      const current = resolveAccount(token);
+      return Boolean(current && directory.accessRoom(current, room.id));
+    });
   });
 
   return {
     config,
     db,
-    broadcast,
+    broadcast: (payload) => runtimeFor(LEGACY_ROOM_ID).broadcast(payload),
     server,
-    onlineUserIds,
+    onlineUserIds: () => runtimes.get(LEGACY_ROOM_ID)?.onlineUserIds() ?? [],
     close: () =>
       new Promise((resolve) => {
-        for (const client of clients) client.terminate();
+        for (const client of wss.clients) client.terminate();
         wss.close();
         server.close(() => {
+          for (const runtime of runtimes.values()) {
+            if (runtime.db !== db) runtime.db.close();
+          }
           db.close();
+          directory.close();
           resolve();
         });
         server.closeAllConnections();

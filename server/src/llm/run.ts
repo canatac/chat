@@ -10,6 +10,7 @@ import type { ChatMessage } from './providers.js';
 export interface CommandDeps {
   db: DB;
   config: Config;
+  uploadsDir: string;
   userId: number;
   postBot: (content: string) => void;
 }
