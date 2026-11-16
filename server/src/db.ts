@@ -342,8 +342,7 @@ export class DB {
 
   listFiles(limit: number, before?: number, query?: string, folderId?: number | null, options: FileListOptions = {}): FileListRow[] {
     let sql = 'SELECT f.*, COALESCE(u.display_name, u.name) AS user_name FROM files f JOIN users u ON u.id = f.user_id';
-    const params: (string | number)[] = [];
-    const conds: string[] = [];
+    const { conds, params } = this.matchingFiles(query, folderId, options);
     const sortColumn = options.sort ? FILE_SORT_COLUMNS[options.sort] : undefined;
     const direction = options.direction === 'desc' ? 'DESC' : 'ASC';
     if (before !== undefined) {
@@ -356,6 +355,23 @@ export class DB {
       }
       params.push(before);
     }
+    if (conds.length) sql += ' WHERE ' + conds.join(' AND ');
+    const orderBy = sortColumn ? `${sortColumn} ${direction}, f.id ${direction}` : 'f.name COLLATE NOCASE, f.id DESC';
+    sql += ` ORDER BY ${orderBy} LIMIT ?`;
+    params.push(limit);
+    return this.db.prepare(sql).all(...params) as unknown as FileListRow[];
+  }
+
+  listFileIds(query: string | undefined, folderId: number | null | undefined, options: FileListOptions): number[] {
+    const { conds, params } = this.matchingFiles(query, folderId, options);
+    const where = conds.length ? ' WHERE ' + conds.join(' AND ') : '';
+    const rows = this.db.prepare('SELECT f.id FROM files f JOIN users u ON u.id = f.user_id' + where).all(...params) as { id: number }[];
+    return rows.map(({ id }) => id);
+  }
+
+  private matchingFiles(query: string | undefined, folderId: number | null | undefined, options: FileListOptions) {
+    const conds: string[] = [];
+    const params: (string | number)[] = [];
     if (query) {
       conds.push('f.name LIKE ?');
       params.push(`%${query}%`);
@@ -381,19 +397,19 @@ export class DB {
       conds.push(condition);
       params.push(value);
     }
-    if (conds.length) sql += ' WHERE ' + conds.join(' AND ');
-    const orderBy = sortColumn ? `${sortColumn} ${direction}, f.id ${direction}` : 'f.name COLLATE NOCASE, f.id DESC';
-    sql += ` ORDER BY ${orderBy} LIMIT ?`;
-    params.push(limit);
-    return this.db.prepare(sql).all(...params) as unknown as FileListRow[];
+    return { conds, params };
   }
 
-  listFilesInFolders(folderIds: number[]): FileListRow[] {
+  getFilesByIds(fileIds: number[]): FileRow[] {
+    if (!fileIds.length) return [];
+    return this.db.prepare('SELECT * FROM files WHERE id IN (SELECT value FROM json_each(?))')
+      .all(JSON.stringify(fileIds)) as unknown as FileRow[];
+  }
+
+  listFilesInFolders(folderIds: number[]): FileRow[] {
     if (!folderIds.length) return [];
-    const marks = folderIds.map(() => '?').join(',');
-    return this.db
-      .prepare(`SELECT f.*, COALESCE(u.display_name, u.name) AS user_name FROM files f JOIN users u ON u.id = f.user_id WHERE f.folder_id IN (${marks})`)
-      .all(...folderIds) as unknown as FileListRow[];
+    return this.db.prepare('SELECT * FROM files WHERE folder_id IN (SELECT value FROM json_each(?))')
+      .all(JSON.stringify(folderIds)) as unknown as FileRow[];
   }
 
   listFilesByMessage(messageId: number): FileRow[] {
@@ -525,6 +541,12 @@ export class DB {
       .all() as unknown as FolderListRow[];
   }
 
+  listFolderIds(parentId: number | null): number[] {
+    const rows = this.db.prepare('SELECT f.id FROM folders f JOIN users u ON u.id = f.created_by WHERE f.parent_id IS ?')
+      .all(parentId) as { id: number }[];
+    return rows.map(({ id }) => id);
+  }
+
   folderExistsWithSiblingName(parentId: number | null, name: string, excludeId?: number): boolean {
     const row =
       excludeId !== undefined
@@ -559,21 +581,50 @@ export class DB {
     return false;
   }
 
-  listSubfolderIds(folderId: number): number[] {
-    const childrenOf = new Map<number | null, number[]>();
-    for (const f of this.listFolders()) {
-      const arr = childrenOf.get(f.parent_id) ?? [];
-      arr.push(f.id);
-      childrenOf.set(f.parent_id, arr);
+  listFolderTree(folderIds: number[]): FolderRow[] {
+    if (!folderIds.length) return [];
+    const rows = this.db.prepare(`
+      WITH RECURSIVE tree(id) AS (
+        SELECT value FROM json_each(?)
+        UNION
+        SELECT f.id FROM folders f JOIN tree t ON f.parent_id = t.id
+      )
+      SELECT f.* FROM folders f JOIN tree t ON f.id = t.id
+    `).all(JSON.stringify(folderIds)) as unknown as FolderRow[];
+    const withinTree = new Set(rows.map(({ id }) => id));
+    const children = new Map<number, FolderRow[]>();
+    const pending: FolderRow[] = [];
+    for (const folder of rows) {
+      const parent = folder.parent_id;
+      if (parent === null || !withinTree.has(parent)) pending.push(folder);
+      else {
+        const siblings = children.get(parent) ?? [];
+        siblings.push(folder);
+        children.set(parent, siblings);
+      }
     }
-    const out: number[] = [];
-    const stack = [...(childrenOf.get(folderId) ?? [])];
-    while (stack.length) {
-      const id = stack.pop() as number;
-      out.push(id);
-      stack.push(...(childrenOf.get(id) ?? []));
+    // Les appelants peuvent supprimer les dossiers des feuilles vers la racine.
+    const ordered: FolderRow[] = [];
+    while (pending.length) {
+      const folder = pending.pop()!;
+      ordered.push(folder);
+      for (const child of children.get(folder.id) ?? []) pending.push(child);
     }
-    return out;
+    return ordered;
+  }
+
+  findMoveConflict(kind: 'file' | 'folder', ids: number[], destination: number | null): string | undefined {
+    if (!ids.length) return undefined;
+    const table = kind === 'file' ? 'files' : 'folders';
+    const parent = kind === 'file' ? 'folder_id' : 'parent_id';
+    const conflict = this.db.prepare(`
+      SELECT MIN(name) AS name FROM ${table}
+      WHERE ${parent} IS ? OR id IN (SELECT value FROM json_each(?))
+      GROUP BY lower(name)
+      HAVING COUNT(*) > 1 AND SUM(${parent} IS NOT ?) > 0
+      LIMIT 1
+    `).get(destination, JSON.stringify(ids), destination) as { name: string } | undefined;
+    return conflict?.name;
   }
 
   folderCounts(folderId: number): { folders: number; files: number } {

@@ -552,6 +552,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
   const timestamp = z.string().regex(/^-?\d+$/).transform(Number).pipe(z.number().int().safe());
   const byteThreshold = z.string().trim().min(1).pipe(z.coerce.number().min(0).max(Number.MAX_SAFE_INTEGER));
   const filesQuerySchema = z.object({
+    select: z.literal('all').optional(),
     limit: z.coerce.number().int().min(1).max(200).default(50),
     before: z.coerce.number().int().optional(),
     query: z.string().max(100).optional(),
@@ -574,7 +575,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       res.status(400).json({ error: 'Paramètres invalides' });
       return;
     }
-    const { limit, before, query, folder, ...options } = parsed.data;
+    const { limit, before, query, folder, select, ...options } = parsed.data;
     let folderId: number | null | undefined;
     if (folder !== undefined) {
       if (folder === 'root') folderId = null;
@@ -586,6 +587,15 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
         }
       }
     }
+    if (select === 'all') {
+      const filtered = Boolean(query || options.name) ||
+        [options.activityFrom, options.activityBefore, options.minBytes, options.maxBytes].some((value) => value !== undefined);
+      res.json({
+        fileIds: db.listFileIds(query, folderId, options),
+        folderIds: folderId !== undefined && !filtered ? db.listFolderIds(folderId) : [],
+      });
+      return;
+    }
     const rows: FileListRow[] = db.listFiles(options.sort ? limit + 1 : limit, before, query, folderId, options);
     const page = rows.slice(0, limit);
     res.json({
@@ -596,6 +606,98 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       })),
       nextBefore: rows.length > limit ? page[page.length - 1].id : null,
     });
+  });
+
+  function deleteDocumentRows(userId: number, files: FileRow[], folders: FolderRow[]): void {
+    const folderIds = new Set(folders.map(({ id }) => id));
+    for (const file of files) {
+      const source = file.folder_id !== null && folderIds.has(file.folder_id)
+        ? 'suppression du dossier' : `${(file.size / 1048576).toFixed(1)} Mo`;
+      logDocEvent(userId, { fileId: file.id, folderId: file.folder_id, action: 'file_deleted', detail: `fichier « ${file.name} » supprimé (${source})` });
+      db.deleteFile(file.id);
+    }
+    for (let index = folders.length - 1; index >= 0; index--) {
+      const folder = folders[index];
+      logDocEvent(userId, { folderId: folder.id, action: 'folder_deleted', detail: `dossier « ${folder.name} » supprimé` });
+      db.deleteFolder(folder.id);
+    }
+  }
+
+  function removeDeletedBytes(files: FileRow[]): void {
+    for (const file of files) {
+      try {
+        fs.rmSync(path.join(uploadsDir, file.path), { force: true });
+      } catch (error) {
+        console.error('Nettoyage du fichier supprimé impossible', roomId, file.id, (error as NodeJS.ErrnoException).code);
+      }
+    }
+  }
+
+  const documentId = z.number().int().positive().safe();
+  const selectionFields = { fileIds: z.array(documentId), folderIds: z.array(documentId) };
+  const documentBatchSchema = z.discriminatedUnion('action', [
+    z.object({ ...selectionFields, action: z.literal('move'), destination: documentId.nullable() }),
+    z.object({ ...selectionFields, action: z.literal('delete') }),
+  ]).refine(({ fileIds, folderIds }) => fileIds.length > 0 || folderIds.length > 0);
+
+  app.post('/api/documents/batch', (req, res) => {
+    const parsed = documentBatchSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Sélection de documents invalide.' });
+      return;
+    }
+    const operation = parsed.data;
+    const fileIds = [...new Set(operation.fileIds)];
+    const folderIds = [...new Set(operation.folderIds)];
+    const userId = req.user?.id ?? -1;
+    try {
+      const result = db.transaction(() => {
+        const files = db.getFilesByIds(fileIds);
+        const folders = db.listFolderTree(folderIds);
+        const treeIds = new Set(folders.map(({ id }) => id));
+        if (operation.action === 'delete') {
+          const combined = new Map(files.map((file) => [file.id, file]));
+          for (const file of db.listFilesInFolders([...treeIds])) combined.set(file.id, file);
+          const deleted = [...combined.values()];
+          deleteDocumentRows(userId, deleted, folders);
+          return { files: deleted.length, folders: folders.length, deleted };
+        }
+
+        const { destination } = operation;
+        if (files.length !== fileIds.length || folderIds.some((id) => !treeIds.has(id))) {
+          throw new HttpError(409, 'La sélection a changé. Sélectionnez les éléments de nouveau.');
+        }
+        const target = destination === null ? null : db.getFolderById(destination);
+        if (destination !== null && !target) throw new HttpError(404, 'Dossier cible introuvable');
+        if (destination !== null && treeIds.has(destination)) {
+          throw new HttpError(409, 'Choisissez une destination en dehors des dossiers sélectionnés.');
+        }
+
+        const roots = folders.filter(({ parent_id }) => parent_id !== destination && (parent_id === null || !treeIds.has(parent_id)));
+        const looseFiles = files.filter(({ folder_id }) => folder_id !== destination && (folder_id === null || !treeIds.has(folder_id)));
+        const folderConflict = db.findMoveConflict('folder', roots.map(({ id }) => id), destination);
+        if (folderConflict) throw new HttpError(409, `Le dossier « ${folderConflict} » est en double à la destination.`);
+        const fileConflict = db.findMoveConflict('file', looseFiles.map(({ id }) => id), destination);
+        if (fileConflict) throw new HttpError(409, `Le fichier « ${fileConflict} » est en double à la destination.`);
+
+        const detail = target ? `déplacé vers le dossier « ${target.name} »` : 'déplacé vers la racine';
+        for (const folder of roots) {
+          db.updateFolder(folder.id, { parentId: destination });
+          logDocEvent(userId, { folderId: folder.id, action: 'folder_moved', detail });
+        }
+        for (const file of looseFiles) {
+          db.moveFile(file.id, destination);
+          logDocEvent(userId, { fileId: file.id, folderId: destination, action: 'file_moved', detail });
+        }
+        return { files: looseFiles.length, folders: roots.length, deleted: [] };
+      });
+      removeDeletedBytes(result.deleted);
+      if (result.files || result.folders) docsChanged();
+      res.json({ files: result.files, folders: result.folders });
+    } catch (error) {
+      res.status(error instanceof HttpError ? error.statusCode : 500)
+        .json({ error: error instanceof HttpError ? error.message : 'Impossible de traiter la sélection.' });
+    }
   });
 
   // ---------- explorateur de documents : dossiers ----------
@@ -683,34 +785,21 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       return;
     }
     const recursive = req.query.recursive === '1' || req.query.recursive === 'true';
-    const subIds = db.listSubfolderIds(id);
-    const allFolderIds = [id, ...subIds];
-    const filesToDelete = db.listFilesInFolders(allFolderIds);
+    const tree = db.listFolderTree([id]);
+    const subfolders = tree.length - 1;
+    const filesToDelete = db.listFilesInFolders(tree.map((row) => row.id));
     const direct = db.folderCounts(id);
-    if (!recursive && (subIds.length > 0 || filesToDelete.length > 0)) {
+    if (!recursive && (subfolders > 0 || filesToDelete.length > 0)) {
       res.status(409).json({
-        error: `Dossier non vide : ${subIds.length} sous-dossier(s), ${filesToDelete.length} fichier(s) au total (dont ${direct.files} directement) — passer recursive=1 pour tout supprimer`,
-        counts: { folders: subIds.length, files: filesToDelete.length, directFolders: direct.folders, directFiles: direct.files },
+        error: `Dossier non vide : ${subfolders} sous-dossier(s), ${filesToDelete.length} fichier(s) au total (dont ${direct.files} directement) — passer recursive=1 pour tout supprimer`,
+        counts: { folders: subfolders, files: filesToDelete.length, directFolders: direct.folders, directFiles: direct.files },
       });
       return;
     }
-    const userId = req.user?.id ?? -1;
-    for (const f of filesToDelete) {
-      try {
-        fs.unlinkSync(path.join(uploadsDir, f.path));
-      } catch {
-        // fichier déjà absent du disque
-      }
-      logDocEvent(userId, { fileId: f.id, folderId: f.folder_id, action: 'file_deleted', detail: `fichier « ${f.name} » supprimé (suppression du dossier)` });
-      db.deleteFile(f.id);
-    }
-    for (const fid of [...allFolderIds].reverse()) {
-      const f = db.getFolderById(fid);
-      logDocEvent(userId, { folderId: fid, action: 'folder_deleted', detail: `dossier « ${f?.name ?? `#${fid}`} » supprimé` });
-      db.deleteFolder(fid);
-    }
+    db.transaction(() => deleteDocumentRows(req.user?.id ?? -1, filesToDelete, tree));
+    removeDeletedBytes(filesToDelete);
     docsChanged();
-    res.json({ ok: true, deletedFolders: allFolderIds.length, deletedFiles: filesToDelete.length });
+    res.json({ ok: true, deletedFolders: tree.length, deletedFiles: filesToDelete.length });
   });
 
   // ---------- explorateur de documents : fichiers ----------
@@ -795,18 +884,8 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       res.status(404).json({ error: 'Fichier introuvable' });
       return;
     }
-    try {
-      fs.unlinkSync(path.join(uploadsDir, file.path));
-    } catch {
-      // déjà absent du disque
-    }
-    logDocEvent(req.user?.id ?? -1, {
-      fileId: id,
-      folderId: file.folder_id ?? null,
-      action: 'file_deleted',
-      detail: `fichier « ${file.name} » supprimé (${(file.size / 1048576).toFixed(1)} Mo)`,
-    });
-    db.deleteFile(id);
+    db.transaction(() => deleteDocumentRows(req.user?.id ?? -1, [file], []));
+    removeDeletedBytes([file]);
     docsChanged();
     res.json({ ok: true });
   });
@@ -1150,6 +1229,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
   }
 
   const app = express();
+  app.post('/api/documents/batch', express.json({ limit: '1mb' }));
   app.use(express.json({ limit: '64kb' }));
   const { auth, resolveAccount } = mountRoomAdmin(app, config, directory, {
     memberChanged(roomId, account) {
