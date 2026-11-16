@@ -6,6 +6,7 @@ export interface UserRow {
   id: number;
   name: string;
   pass_hash: string | null;
+  display_name: string | null;
   is_bot: number;
   created_at: number;
 }
@@ -108,7 +109,7 @@ export interface UsageRow {
 export class DB {
   private db: DatabaseSync;
 
-  constructor(dataDir: string) {
+  constructor(dataDir: string, newBotId: number | null = null) {
     fs.mkdirSync(dataDir, { recursive: true });
     this.db = new DatabaseSync(path.join(dataDir, 'chat.db'));
     this.db.exec(`
@@ -201,8 +202,8 @@ export class DB {
     const bot = this.db.prepare('SELECT id FROM users WHERE is_bot = 1').get() as { id: number } | undefined;
     if (!bot) {
       this.db
-        .prepare("INSERT INTO users (name, pass_hash, is_bot, created_at) VALUES ('assistant', NULL, 1, ?)")
-        .run(Date.now());
+        .prepare("INSERT INTO users (id, name, pass_hash, is_bot, created_at) VALUES (?, 'assistant', NULL, 1, ?)")
+        .run(newBotId, Date.now());
     }
     const fileCols = this.db.prepare('PRAGMA table_info(files)').all() as unknown as { name: string }[];
     if (!fileCols.some((c) => c.name === 'call_id')) {
@@ -218,6 +219,10 @@ export class DB {
       }
     }
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_files_folder ON files(folder_id)');
+    const userColumns = this.db.prepare('PRAGMA table_info(users)').all() as unknown as { name: string }[];
+    if (!userColumns.some((column) => column.name === 'display_name')) {
+      this.db.exec('ALTER TABLE users ADD COLUMN display_name TEXT');
+    }
   }
 
   createUser(name: string, passHash: string): UserRow {
@@ -225,6 +230,19 @@ export class DB {
       .prepare('INSERT INTO users (name, pass_hash, is_bot, created_at) VALUES (?, ?, 0, ?)')
       .run(name, passHash, Date.now());
     return this.getUserById(Number(info.lastInsertRowid)) as UserRow;
+  }
+
+  ensureActor(account: { id: number; alias: string }): UserRow {
+    const current = this.getUserById(account.id);
+    if (!current) {
+      this.db.prepare('INSERT INTO users(id, name, is_bot, created_at, display_name) VALUES (?, ?, 0, ?, ?)')
+        .run(account.id, 'account:' + account.id, Date.now(), account.alias);
+    } else if ((current.display_name ?? current.name) !== account.alias) {
+      this.db.prepare('UPDATE users SET display_name = ? WHERE id = ?').run(account.alias, account.id);
+    } else {
+      return current;
+    }
+    return this.getUserById(account.id)!;
   }
 
   getUserByName(name: string): UserRow | undefined {
@@ -265,8 +283,8 @@ export class DB {
   listMessagesJoined(limit: number, before?: number): ContextRow[] {
     const sql =
       before !== undefined
-        ? 'SELECT m.id, m.user_id, m.content, m.created_at, u.name FROM messages m JOIN users u ON u.id = m.user_id WHERE m.id < ? ORDER BY m.id DESC LIMIT ?'
-        : 'SELECT m.id, m.user_id, m.content, m.created_at, u.name FROM messages m JOIN users u ON u.id = m.user_id ORDER BY m.id DESC LIMIT ?';
+        ? 'SELECT m.id, m.user_id, m.content, m.created_at, COALESCE(u.display_name, u.name) AS name FROM messages m JOIN users u ON u.id = m.user_id WHERE m.id < ? ORDER BY m.id DESC LIMIT ?'
+        : 'SELECT m.id, m.user_id, m.content, m.created_at, COALESCE(u.display_name, u.name) AS name FROM messages m JOIN users u ON u.id = m.user_id ORDER BY m.id DESC LIMIT ?';
     const rows = before !== undefined ? this.db.prepare(sql).all(before, limit) : this.db.prepare(sql).all(limit);
     return rows as unknown as ContextRow[];
   }
@@ -292,7 +310,7 @@ export class DB {
   }
 
   listFiles(limit: number, before?: number, query?: string, folderId?: number | null): FileListRow[] {
-    let sql = 'SELECT f.*, u.name AS user_name FROM files f JOIN users u ON u.id = f.user_id';
+    let sql = 'SELECT f.*, COALESCE(u.display_name, u.name) AS user_name FROM files f JOIN users u ON u.id = f.user_id';
     const params: (string | number)[] = [];
     const conds: string[] = [];
     if (before !== undefined) {
@@ -320,7 +338,7 @@ export class DB {
     if (!folderIds.length) return [];
     const marks = folderIds.map(() => '?').join(',');
     return this.db
-      .prepare(`SELECT f.*, u.name AS user_name FROM files f JOIN users u ON u.id = f.user_id WHERE f.folder_id IN (${marks})`)
+      .prepare(`SELECT f.*, COALESCE(u.display_name, u.name) AS user_name FROM files f JOIN users u ON u.id = f.user_id WHERE f.folder_id IN (${marks})`)
       .all(...folderIds) as unknown as FileListRow[];
   }
 
@@ -449,7 +467,7 @@ export class DB {
 
   listFolders(): FolderListRow[] {
     return this.db
-      .prepare('SELECT f.*, u.name AS user_name FROM folders f JOIN users u ON u.id = f.created_by ORDER BY f.name COLLATE NOCASE, f.id')
+      .prepare('SELECT f.*, COALESCE(u.display_name, u.name) AS user_name FROM folders f JOIN users u ON u.id = f.created_by ORDER BY f.name COLLATE NOCASE, f.id')
       .all() as unknown as FolderListRow[];
   }
 
@@ -560,7 +578,7 @@ export class DB {
       conds.push('e.folder_id = ?');
       params.push(opts.folderId);
     }
-    let sql = 'SELECT e.*, u.name AS user_name FROM file_events e JOIN users u ON u.id = e.user_id';
+    let sql = 'SELECT e.*, COALESCE(u.display_name, u.name) AS user_name FROM file_events e JOIN users u ON u.id = e.user_id';
     if (conds.length) sql += ' WHERE ' + conds.join(' AND ');
     sql += ' ORDER BY e.id DESC LIMIT ?';
     params.push(opts.limit ?? 100);

@@ -10,18 +10,23 @@ const fixtureAudio = Buffer.from('fixture de téléchargement');
 async function withExplorer(page: Page, run: () => Promise<void>) {
   const { createServer } = await import('../../server/dist/app.js');
   const { loadConfig } = await import('../../server/dist/config.js');
+  const { DB } = await import('../../server/dist/db.js');
+  const { hashPassword } = await import('../../server/dist/auth.js');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'chat-doc-explorer-'));
+  const legacy = new DB(dir);
+  legacy.createUser('Camille', hashPassword('docs-e2e-password'));
+  legacy.close();
   const ctx = createServer(loadConfig({ JWT_SECRET: 'docs-e2e-secret' }), dir);
 
   try {
     await new Promise<void>((resolve) => ctx.server.listen(0, '127.0.0.1', resolve));
     const { port } = ctx.server.address() as AddressInfo;
     const base = 'http://127.0.0.1:' + port;
-    const registration = await page.request.post(base + '/api/auth/register', {
+    const login = await page.request.post(base + '/api/auth/login', {
       data: { name: 'Camille', password: 'docs-e2e-password' },
     });
-    expect(registration.status()).toBe(201);
-    const { token, user } = await registration.json() as { token: string; user: { id: number } };
+    expect(login.status()).toBe(200);
+    const { token, user } = await login.json() as { token: string; user: { id: number } };
     const archives = ctx.db.createFolder(user.id, 'Archives audio', null);
     ctx.db.createFolder(user.id, 'Comptes rendus', null);
     const audio = await page.request.post(base + '/api/files', {

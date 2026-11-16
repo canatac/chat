@@ -5,7 +5,9 @@ import path from 'node:path';
 import { after, before, test } from 'node:test';
 import WebSocket from 'ws';
 import { createServer, type ServerContext } from '../src/app.js';
+import { hashPassword } from '../src/auth.js';
 import { loadConfig } from '../src/config.js';
+import { DB } from '../src/db.js';
 
 let ctx: ServerContext;
 let baseUrl: string;
@@ -21,6 +23,10 @@ before(async () => {
     ADMIN_NAMES: 'Alice',
     LINK_FETCH_ALLOW_PRIVATE: '1',
   });
+  const legacy = new DB(dir);
+  legacy.createUser('Alice', hashPassword('motdepasse1'));
+  legacy.createUser('Bob', hashPassword('motdepasse2'));
+  legacy.close();
   ctx = createServer(config, dir);
   await new Promise<void>((resolve) => ctx.server.listen(0, '127.0.0.1', resolve));
   const address = ctx.server.address();
@@ -68,16 +74,16 @@ function waitForEvent(
 test('inscription, doublon, connexion', async () => {
   const reg = await api('/api/auth/register', {
     method: 'POST',
-    body: JSON.stringify({ name: 'Alice', password: 'motdepasse1' }),
+    body: JSON.stringify({ name: 'Nouveau', email: 'nouveau@example.test', roomName: 'Projet Atlas', password: 'motdepasse1' }),
   });
   assert.equal(reg.status, 201);
   const regBody = (await reg.json()) as { token: string; user: { name: string } };
   assert.ok(regBody.token);
-  assert.equal(regBody.user.name, 'Alice');
+  assert.equal(regBody.user.name, 'Nouveau');
 
   const dup = await api('/api/auth/register', {
     method: 'POST',
-    body: JSON.stringify({ name: 'Alice', password: 'motdepasse1' }),
+    body: JSON.stringify({ name: 'Nouveau', email: 'nouveau@example.test', roomName: 'Projet Atlas', password: 'motdepasse1' }),
   });
   assert.equal(dup.status, 409);
 
@@ -183,10 +189,6 @@ async function loginAs(name: string, password: string): Promise<string> {
 }
 
 test('liste des membres avec état en ligne', async () => {
-  await api('/api/auth/register', {
-    method: 'POST',
-    body: JSON.stringify({ name: 'Bob', password: 'motdepasse2' }),
-  });
   const token = await loginAs('Alice', 'motdepasse1');
   const res = await api('/api/users', { headers: { Authorization: `Bearer ${token}` } });
   assert.equal(res.status, 200);
@@ -580,11 +582,14 @@ test('STT simulé : upload recording → transcription déposée + coût/min tra
     STT_MODEL: 'whisper-large-v3',
     STT_COST_PER_AUDIO_MIN: '0.0032',
   });
+  const legacy = new DB(dir2);
+  legacy.createUser('Zoe', hashPassword('secret123'));
+  legacy.close();
   const ctx2 = createServer(cfg2, dir2);
   await new Promise<void>((r) => ctx2.server.listen(0, '127.0.0.1', r));
   const p2 = (ctx2.server.address() as { port: number }).port;
   const base2 = `http://127.0.0.1:${p2}`;
-  const reg = await fetch(`${base2}/api/auth/register`, {
+  const reg = await fetch(`${base2}/api/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name: 'Zoe', password: 'secret123' }),

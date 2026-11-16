@@ -1,9 +1,36 @@
+export type Role = 'superadmin' | 'admin' | 'member';
+
 export interface User {
   id: number;
   name: string;
   isBot: boolean;
-  isAdmin?: boolean;
+  role?: Role;
+  avatar?: string | null;
   online?: boolean;
+}
+
+export interface Room {
+  id: number;
+  name: string;
+  archivedAt: number | null;
+}
+
+export interface RoomSession {
+  user: User & { role: Role };
+  roomId: number | null;
+  rooms: Room[];
+}
+
+export interface RoomMember extends User {
+  email: string | null;
+  role: Role;
+}
+
+export interface RoomInvitation {
+  id: number;
+  email: string;
+  role: 'member' | 'admin';
+  expiresAt: number;
 }
 
 export interface MessageFile {

@@ -1,4 +1,5 @@
 import AdminPanelSettingsOutlinedIcon from '@mui/icons-material/AdminPanelSettingsOutlined';
+import InsightsOutlinedIcon from '@mui/icons-material/InsightsOutlined';
 import FolderOpenOutlinedIcon from '@mui/icons-material/FolderOpenOutlined';
 import ForumOutlinedIcon from '@mui/icons-material/ForumOutlined';
 import LogoutOutlinedIcon from '@mui/icons-material/LogoutOutlined';
@@ -12,6 +13,7 @@ import PresenceMenu from './PresenceMenu';
 export type ConnectionStatus = 'connecting' | 'online' | 'offline';
 
 interface Props {
+  roomName: string;
   user: User;
   users: User[];
   onlineIds: number[];
@@ -20,6 +22,7 @@ interface Props {
   onCall: () => void;
   onDocuments: () => void;
   onAdmin: () => void;
+  onStats: () => void;
   onLogout: () => void;
 }
 
@@ -49,7 +52,7 @@ const actionStyle = {
 };
 
 export default function ChatHeader({
-  user, users, onlineIds, connection, hasCall, onCall, onDocuments, onAdmin, onLogout,
+  roomName, user, users, onlineIds, connection, hasCall, onCall, onDocuments, onAdmin, onStats, onLogout,
 }: Props) {
   const [accountAnchor, setAccountAnchor] = useState<HTMLElement | null>(null);
   const callLabel = hasCall ? 'Appel en cours' : "Appel d'équipe";
@@ -81,10 +84,11 @@ export default function ChatHeader({
           <Box sx={{ minWidth: 0 }}>
             <Typography
               component="h1"
+              title={roomName}
               noWrap
               sx={{ color: chatColors.ink, fontSize: { xs: '0.96rem', sm: '1.28rem' }, fontWeight: 740, letterSpacing: '-0.025em', lineHeight: 1.22 }}
             >
-              Chat d'équipe
+              {roomName}
             </Typography>
             <Box role="status" sx={{ display: 'flex', alignItems: 'center', gap: 0.65, minWidth: 0, mt: 0.25 }}>
               <Box sx={{ width: 6, height: 6, borderRadius: '50%', bgcolor: connectionColor[connection], flexShrink: 0 }} />
@@ -127,6 +131,7 @@ export default function ChatHeader({
             >
               <Avatar
                 aria-hidden="true"
+                src={user.avatar ?? undefined}
                 sx={{ width: 32, height: 32, bgcolor: chatColors.accentSoft, color: chatColors.accent, fontSize: '0.83rem', fontWeight: 750 }}
               >
                 {user.name.slice(0, 1).toUpperCase()}
@@ -147,12 +152,16 @@ export default function ChatHeader({
         >
           <Typography noWrap sx={{ px: 2, py: 1, fontWeight: 700, color: chatColors.ink }}>{user.name}</Typography>
           <Divider sx={{ mb: 0.5 }} />
-          {user.isAdmin && (
-            <MenuItem onClick={() => { closeAccount(); onAdmin(); }}>
+          {(user.role === 'admin' || user.role === 'superadmin') && [
+            <MenuItem key="admin" onClick={() => { closeAccount(); onAdmin(); }}>
               <ListItemIcon><AdminPanelSettingsOutlinedIcon fontSize="small" /></ListItemIcon>
               Administration
-            </MenuItem>
-          )}
+            </MenuItem>,
+            <MenuItem key="stats" onClick={() => { closeAccount(); onStats(); }}>
+              <ListItemIcon><InsightsOutlinedIcon fontSize="small" /></ListItemIcon>
+              Statistiques du salon
+            </MenuItem>,
+          ]}
           <MenuItem onClick={() => { closeAccount(); onLogout(); }}>
             <ListItemIcon><LogoutOutlinedIcon fontSize="small" /></ListItemIcon>
             Se déconnecter

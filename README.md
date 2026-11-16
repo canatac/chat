@@ -65,16 +65,17 @@ choix pour faire des comptes-rendus de réunion ou proposer des solutions aux pr
 
 ## Fonctionnalités
 
-- Chatroom unique en **temps réel** (WebSocket), interface **Material UI** responsive
+- Salons privés en **temps réel** (WebSocket), interface **Material UI** responsive
 - **Présence** : pastilles des membres en haut à droite (vert = en ligne, gris = hors ligne), avec détail au clic
-- Comptes simples : nom d'utilisateur + mot de passe (hash bcrypt, sessions JWT 30 jours)
-- Historique persistant en **SQLite** (fichier unique, sauvegardable)
+- Création d’un salon privé depuis l’accueil, invitations individuelles et gestion des profils
+- Connexion par e-mail et mot de passe, avec reprise des identifiants historiques (bcrypt et JWT)
+- Historique persistant en **SQLite**, avec une base et un répertoire de fichiers par salon
 - **Fichiers** : pièce jointe à n'importe quel message (bouton trombone) + **espace documentaire façon explorateur**
   (dossiers/sous-dossiers, renommer, déplacer, supprimer, métadonnées, journal de modifications, recherche).
   Les fichiers texte/PDF sont indexés automatiquement, les fichiers audio transcrits (STT)
 - **/lien** : médias distants (émissions radio…) téléchargés, transcrits, CR auto, copie webm
 - **RAG** : `/ask` et `/solve` fouillent les documents déposés et citent leurs sources
-- **Dashboard d'administration** (réservé aux noms de `ADMIN_NAMES`) : volume de tokens
+- **Statistiques du salon** (admin et superadmin) : volume de tokens
   (entrée/sortie/total), **estimation du coût** en USD, activité par jour/commande/modèle, volumétrie
   messages/membres/documents/appels
 - **Appels d'équipe** (bouton téléphone en haut) : WebRTC en mesh, audio + caméra optionnelle + partage
@@ -117,13 +118,40 @@ fournisseur précis : choisissez le vôtre.
 Autres variables : `LLM_TEMPERATURE` (0.4), `LLM_MAX_TOKENS` (1024), `LLM_CONTEXT_MESSAGES`
 (nombre de messages envoyés comme contexte au LLM, 50).
 
-### Coût et administration
+### Salons et administration
 
-- `ADMIN_NAMES=alice,bob` : ces utilisateurs voient l'icône **dashboard** (en haut à droite) avec les
-  tokens consommés et le coût estimé. Les prix par modèle sont intégrés pour les modèles usuels ;
-  sinon définir `LLM_INPUT_PRICE_PER_1M` et `LLM_OUTPUT_PRICE_PER_1M` (USD / million de tokens).
-- Chaque appel LLM est enregistré (commande, modèle, tokens entrée/sortie, coût, erreurs) dans la
-  table `llm_usage`.
+| Rôle | Accès |
+| --- | --- |
+| Superadmin | Tous les salons et leurs statistiques. Création, renommage, archivage, réactivation et gestion des membres. Peut inviter un admin dans un salon. |
+| Admin | Administration de son salon depuis **Compte → Administration**. Renommage, invitations de membres, modification des profils et retrait des membres. Peut consulter les statistiques de son salon. |
+| Membre | Conversation, appels et documents de son salon. |
+
+**Créer un compte** sur la page d’accueil crée un salon privé et attribue le rôle d’admin
+au titulaire du compte. Un invité ouvre le lien transmis par l’admin, choisit un alias et
+un mot de passe, puis rejoint le salon associé à l’invitation. Le lien expire après sept jours,
+il est révocable et utilisable une seule fois. Transmettez-le directement à son destinataire.
+L’admin peut modifier l’e-mail, l’alias ou l’avatar. Le retrait d’un membre révoque sa session
+et conserve les messages et fichiers dont il est l’auteur.
+
+Pour une installation existante, indiquer dans `.env` les identifiants de connexion à
+promouvoir avec `SUPERADMIN_NAMES`. Utiliser l’identifiant historique avec sa casse exacte
+ou, pour un compte créé par e-mail, l’adresse utilisée lors de sa création. Sur une installation
+neuve, `SUPERADMIN_PASSWORD` permet d’initialiser le premier identifiant configuré.
+Cette variable ne change pas le mot de passe d’un compte existant et peut être retirée après
+l’initialisation. L’inscription publique ne peut pas utiliser un identifiant réservé au superadmin.
+
+Avant la mise à jour, sauvegarder le volume `chat-data` en entier. Le premier démarrage
+crée `directory.db` dans ce même volume, importe les comptes et applique `ADMIN_NAMES`
+aux admins du salon historique. Les anciens identifiants, le salon « Chat d'équipe »,
+`chat.db` et `uploads/` sont conservés. Chaque nouveau salon utilise
+`rooms/<id>/chat.db` et `rooms/<id>/uploads/`. Un compte ordinaire appartient à un salon.
+L’archivage suspend l’accès et révoque les invitations en attente. La réactivation rend les
+données du salon accessibles à ses membres. Les futurs comptes, profils et invitations
+sont gérés dans l’annuaire SQLite.
+
+Les statistiques LLM utilisent les prix par modèle intégrés. Les variables
+`LLM_INPUT_PRICE_PER_1M` et `LLM_OUTPUT_PRICE_PER_1M` permettent de spécifier des prix.
+Les commandes, modèles, tokens, coûts estimés et erreurs sont enregistrés par salon.
 
 ### VPN WireGuard (IP fixe pour le PC et le téléphone)
 
@@ -273,7 +301,7 @@ npm start            # http://localhost:4000
    git clone https://github.com/canatac/chat.git && cd chat
    cp .env.example .env
    ```
-6. **Configurer `.env`** : `JWT_SECRET=$(openssl rand -hex 32)`, `ADMIN_NAMES`, `WG_SERVERURL=<domaine ou IP publique>`,
+6. **Configurer `.env`** : `JWT_SECRET=$(openssl rand -hex 32)`, `SUPERADMIN_NAMES`, `WG_SERVERURL=<domaine ou IP publique>`,
    `TURN_EXTERNAL_IP=<IP publique>`, `TURN_URLS=turn:<IP publique>:3478`, `TURN_USERNAME`, `TURN_CREDENTIAL`,
    `LINK_FETCH_ALLOWED_DOMAINS=proxycast.radiofrance.fr,...`, puis `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL`, `STT_*`.
 7. **Lancer** :
@@ -309,9 +337,20 @@ npm start            # http://localhost:4000
 
 ### REST (Bearer token)
 
-- `POST /api/auth/register` `{name, password}` → `{token, user}`
-- `POST /api/auth/login` `{name, password}` → `{token, user}`
-- `GET /api/me` → `{user}` (avec `isAdmin`)
+Les ressources du salon utilisent l’en-tête `X-Chat-Room: <id>`. En son absence,
+le serveur utilise le salon du compte ou le premier salon actif disponible pour le superadmin.
+Le serveur vérifie l’accès au salon à chaque requête.
+
+- `POST /api/auth/register` `{name, email, password, roomName?}` → `{token, user, roomId, rooms}`
+- `POST /api/auth/login` `{name, password}` → même réponse, avec l’adresse e-mail ou l’identifiant dans `name`
+- `POST /api/auth/invitations/preview` `{token}` → `{room, email, expiresAt}`
+- `POST /api/auth/invitations/accept` `{token, alias, password}` → session dans le salon de l’invitation
+- `GET /api/me` → `{user, roomId, rooms}` (avec `user.role`)
+- `GET /api/rooms` → salons visibles
+- `POST /api/rooms` `{name}` et `PUT /api/rooms/:roomId/archive` `{archived}` → opérations superadmin
+- `PATCH /api/rooms/:roomId` `{name}` → renommage
+- `GET /api/rooms/:roomId/members`, `PATCH /api/rooms/:roomId/members/:memberId` `{alias?, email?, avatar?}` et `DELETE /api/rooms/:roomId/members/:memberId` → gestion des membres
+- `GET /api/rooms/:roomId/invitations`, `POST /api/rooms/:roomId/invitations` `{email, role?}` et `DELETE /api/rooms/:roomId/invitations/:invitationId` → gestion des invitations
 - `GET /api/users` → `{users: [...]}` (avec `online`)
 - `GET /api/rtc-config` → `{iceServers: [...]}` (STUN + TURN) pour les appels WebRTC
 - `GET /api/messages?limit=50&before=<id>` → `{messages: [...]}` (ordre chronologique, avec `files`)
@@ -332,12 +371,12 @@ npm start            # http://localhost:4000
 - `POST /api/calls/:id/recording` (multipart `file`) → enregistre l'appel + transcription STT automatique
 - `GET /api/admin/stats` → statistiques LLM + appels (admin uniquement)
 
-### WebSocket `/ws?token=<jwt>`
+### WebSocket `/ws?token=<jwt>&room=<id>`
 
 - Client → serveur : `{type: "message", content}`, `{type: "history", before?, limit?}`,
   `{type: "signal", to, data}` (relayé vers l'utilisateur `to`, pour WebRTC)
 - Serveur → client : `{type: "hello", user}`, `{type: "message", message}`, `{type: "history", messages}`, `{type: "presence", online: [ids]}`, `{type: "call", call}`,
-  `{type: "signal", from, data}`, `{type: "docsChanged"}` (mutation documentaire : l'explorateur se recharge), `{type: "error", error}`
+  `{type: "signal", from, data}`, `{type: "docsChanged"}`, `{type: "membersChanged"}`
 
 ## Structure du projet
 
@@ -359,5 +398,5 @@ docker-compose.yml (chat + coturn + wireguard + caddy) / Dockerfile (avec ffmpeg
 - Les transcriptions d'appels partent vers le fournisseur STT choisi : préférez un Whisper local pour
   que l'audio ne quitte jamais votre VM (Scaleway MaaS = données hébergées à Paris, conforme EU)
 - Le TURN coturn et WireGuard ont des credentials dans le `.env` (`TURN_CREDENTIAL`) : ne les partagez pas
-- `GET /api/admin/stats` est réservé aux noms de `ADMIN_NAMES` (403 sinon)
+- Les routes d’administration vérifient le rôle et le salon côté serveur. Les e-mails des membres sont accessibles dans l’administration du salon.
 - Toujours exposer l'appli derrière **HTTPS** (profil `https` fourni) — obligatoire pour micro/caméra/partage d'écran côté navigateur

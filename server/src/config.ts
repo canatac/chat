@@ -6,6 +6,8 @@ const envSchema = z.object({
   DATA_DIR: z.string().default('./data'),
   JWT_SECRET: z.string().min(8).default('dev-secret-change-me'),
   ADMIN_NAMES: z.string().default(''),
+  SUPERADMIN_NAMES: z.string().default(''),
+  SUPERADMIN_PASSWORD: z.preprocess((value) => value === '' ? undefined : value, z.string().min(10).max(72).optional()),
   LLM_PROVIDER: z.string().default('openai-compatible'),
   LLM_BASE_URL: z.string().optional(),
   LLM_API_KEY: z.string().optional(),

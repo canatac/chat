@@ -11,6 +11,7 @@ let ctx: ServerContext;
 let baseUrl: string;
 let dir: string;
 let token: string;
+let uploadsDir: string;
 
 before(async () => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'chat-docs-'));
@@ -23,9 +24,12 @@ before(async () => {
   const reg = await fetch(`${baseUrl}/api/auth/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: 'Alice', password: 'motdepasse1' }),
+    body: JSON.stringify({ name: 'Alice', email: 'alice@example.test', password: 'motdepasse1' }),
   });
-  token = ((await reg.json()) as { token: string }).token;
+  assert.equal(reg.status, 201);
+  const session = (await reg.json()) as { token: string; roomId: number };
+  token = session.token;
+  uploadsDir = path.join(dir, 'rooms', String(session.roomId), 'uploads');
 });
 
 after(async () => {
@@ -159,7 +163,6 @@ test('fichiers : upload racine, déplacement dans un dossier, filtre folder=, re
   assert.equal(f3.folderId, folder.id);
 
   // suppression : row + disque + événement
-  const uploadsDir = path.join(dir, 'uploads');
   // le nom stocké conserve le nom d'origine à l'upload ('note.txt'), pas le nom renommé
   const stored = fs.readdirSync(uploadsDir).find((n) => n.endsWith('note.txt'));
   assert.ok(stored);

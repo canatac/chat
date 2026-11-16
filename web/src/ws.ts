@@ -18,15 +18,12 @@ type StatusHandler = (open: boolean) => void;
 
 export class ChatSocket {
   private ws: WebSocket | null = null;
-  private readonly token: string;
   private readonly messageHandlers = new Set<MessageHandler>();
   private readonly statusHandlers = new Set<StatusHandler>();
   private retry = 0;
   private closed = false;
 
-  constructor(token: string) {
-    this.token = token;
-  }
+  constructor(private readonly token: string, private readonly room: string | null) {}
 
   onMessage(handler: MessageHandler): () => void {
     this.messageHandlers.add(handler);
@@ -45,7 +42,9 @@ export class ChatSocket {
 
   connect(): void {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(this.token)}`);
+    const params = new URLSearchParams({ token: this.token });
+    if (this.room !== null) params.set('room', this.room);
+    const ws = new WebSocket(`${proto}://${location.host}/ws?${params}`);
     this.ws = ws;
     ws.onopen = () => {
       this.retry = 0;
@@ -59,9 +58,13 @@ export class ChatSocket {
         // événement malformé ignoré
       }
     };
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       this.statusHandlers.forEach((h) => h(false));
       if (this.closed) return;
+      if (event.code === 4001 || event.code === 4003) {
+        this.messageHandlers.forEach((h) => h({ type: 'roomUnavailable', error: event.reason }));
+        return;
+      }
       this.retry += 1;
       setTimeout(() => {
         if (!this.closed) this.connect();

@@ -5,10 +5,11 @@ import { Avatar, Box, ButtonBase, CircularProgress, Link, Tooltip, Typography } 
 import { useState } from 'react';
 import { saveFile } from '../api';
 import { chatColors } from '../theme';
-import type { Message, MessageFile } from '../types';
+import type { Message, MessageFile, User } from '../types';
 
 interface Props {
   message: Message;
+  sender: User;
   own: boolean;
   groupStart: boolean;
 }
@@ -101,10 +102,10 @@ function FileDownload({ file }: { file: MessageFile }) {
   );
 }
 
-export default function MessageRow({ message, own, groupStart }: Props) {
+export default function MessageRow({ message, sender, own, groupStart }: Props) {
   const time = hours.format(new Date(message.createdAt));
   const isBot = message.user.isBot;
-  const author = own ? 'Vous' : isBot ? 'Assistant' : message.user.name;
+  const author = own ? 'Vous' : isBot ? 'Assistant' : sender.name;
   const files = message.files ?? [];
   const attachmentOnly = files.length === 1 && message.content === '📎 ' + files[0].name;
   const bubbleColor = own ? chatColors.accentSoft : isBot ? assistantBackground : chatColors.surface;
@@ -123,6 +124,7 @@ export default function MessageRow({ message, own, groupStart }: Props) {
           {groupStart && (
             <Avatar
               aria-hidden="true"
+              src={sender.avatar ?? undefined}
               sx={{
                 width: { xs: 29, sm: 34 }, height: { xs: 29, sm: 34 }, borderRadius: '9px',
                 fontWeight: 750, fontSize: '0.78rem',
@@ -130,7 +132,7 @@ export default function MessageRow({ message, own, groupStart }: Props) {
                 color: isBot ? assistantColor : chatColors.accent,
               }}
             >
-              {isBot ? <SmartToyOutlinedIcon sx={{ fontSize: 18 }} /> : message.user.name.slice(0, 1).toUpperCase()}
+              {isBot ? <SmartToyOutlinedIcon sx={{ fontSize: 18 }} /> : sender.name.slice(0, 1).toUpperCase()}
             </Avatar>
           )}
         </Box>
