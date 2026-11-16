@@ -114,3 +114,69 @@ test('sur mobile, le nom long laisse les actions accessibles et son détail affi
     await expect(page.getByRole('dialog', { name: 'Espace documentaire' })).toBeHidden();
   });
 });
+
+test('trie et filtre les fichiers depuis les en-têtes sur mobile, y compris au-delà de la première page', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 820 });
+  await page.route('**/api/files?*', (route) => {
+    const url = new URL(route.request().url());
+    url.searchParams.set('limit', '2');
+    return route.continue({ url: url.toString() });
+  });
+  await withExplorer(page, async () => {
+    await page.getByRole('button', { name: 'Ouvrir le dossier Comptes rendus' }).click();
+    const drawer = page.getByRole('dialog', { name: 'Espace documentaire' });
+    const controls = drawer.getByRole('group', { name: 'Tri et filtres des fichiers' });
+    const files = drawer.getByRole('button', { name: /^Détails de / });
+    const expectFiles = async (...names: string[]) => {
+      await expect.poll(() => files.evaluateAll((buttons) => buttons.map((button) => button.getAttribute('aria-label'))))
+        .toEqual(names.map((name) => 'Détails de ' + name));
+    };
+    for (const [name, size] of [['Zèbre.txt', 1024], ['Équipe.txt', 3072], ['Alpha.txt', 8192]] as const) {
+      await drawer.locator('input[type=file]').setInputFiles({ name, mimeType: 'text/plain', buffer: Buffer.alloc(size, 'a') });
+      await expect(drawer.getByRole('button', { name: 'Détails de ' + name, exact: true })).toBeVisible();
+    }
+
+    await expectFiles('Alpha.txt', 'Équipe.txt');
+    await drawer.getByRole('button', { name: 'Afficher plus de fichiers' }).click();
+    await expectFiles('Alpha.txt', 'Équipe.txt', 'Zèbre.txt');
+
+    const nameSort = controls.getByRole('button', { name: /^Trier par nom/ });
+    await nameSort.focus();
+    await page.keyboard.press('Enter');
+    await expectFiles('Zèbre.txt', 'Équipe.txt');
+    const dateSort = controls.getByRole('button', { name: /^Trier par date/ });
+    await dateSort.click();
+    await expectFiles('Alpha.txt', 'Équipe.txt');
+    await dateSort.click();
+    await expectFiles('Zèbre.txt', 'Équipe.txt');
+    const sizeSort = controls.getByRole('button', { name: /^Trier par taille/ });
+    await sizeSort.click();
+    await expectFiles('Zèbre.txt', 'Équipe.txt');
+    await sizeSort.click();
+    await expectFiles('Alpha.txt', 'Équipe.txt');
+
+    await controls.getByRole('button', { name: 'Filtrer par taille' }).click();
+    const sizeFilter = page.getByRole('dialog', { name: 'Filtrer par taille' });
+    await sizeFilter.getByLabel('Minimum (Ko)', { exact: true }).fill('2');
+    await sizeFilter.getByLabel('Maximum (Ko)', { exact: true }).fill('4');
+    await sizeFilter.getByRole('button', { name: 'Appliquer' }).click();
+    await expectFiles('Équipe.txt');
+
+    await controls.getByRole('button', { name: 'Filtrer par nom' }).click();
+    const nameFilter = page.getByRole('dialog', { name: 'Filtrer par nom' });
+    await nameFilter.getByLabel('Le nom contient').fill('EQUIPE');
+    await nameFilter.getByRole('button', { name: 'Appliquer' }).click();
+    await expectFiles('Équipe.txt');
+    await expect(controls.getByRole('button', { name: 'Filtrer par nom, filtre actif' })).toBeVisible();
+
+    const dateFilterButton = controls.getByRole('button', { name: 'Filtrer par date' });
+    await dateFilterButton.click();
+    const dateFilter = page.getByRole('dialog', { name: 'Filtrer par date' });
+    await dateFilter.getByLabel('Du', { exact: true }).fill('2000-01-01');
+    await dateFilter.getByLabel('Au', { exact: true }).fill('2000-01-01');
+    await dateFilter.getByRole('button', { name: 'Appliquer' }).click();
+    await expect(drawer.getByText('Aucun résultat', { exact: true })).toBeVisible();
+    await drawer.getByRole('button', { name: 'Effacer les filtres' }).click();
+    await expectFiles('Alpha.txt', 'Équipe.txt');
+  });
+});

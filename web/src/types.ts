@@ -61,6 +61,21 @@ export interface FileItem {
   user: { id: number; name: string };
 }
 
+export type FileColumn = 'name' | 'date' | 'size';
+
+export interface FileSort {
+  column: FileColumn;
+  direction: 'asc' | 'desc';
+}
+
+export interface FileFilters {
+  name?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  minSizeKiB?: number;
+  maxSizeKiB?: number;
+}
+
 export interface Folder {
   id: number;
   name: string;
