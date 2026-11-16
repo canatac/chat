@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import type { DB } from '../../server/src/db';
 
 const longFileName = '2026-11-15-EXEMPLE_COMPTE_RENDU_EQUIPE_DOCUMENT_ABCDEFGHIJKLMN_12345678901234567890.txt';
 const longLink = 'https://media.example.org/reunions/' + 'archive-de-demonstration-'.repeat(10) + 'enregistrement.m4a';
@@ -15,7 +16,7 @@ async function login(page: Page, base: string, name: string): Promise<Account> {
   return response.json() as Promise<Account>;
 }
 
-async function withChat(page: Page, historySize: number, run: (base: string, colleague: Account) => Promise<void>) {
+async function withChat(page: Page, historySize: number, run: (base: string, colleague: Account, db: DB) => Promise<void>) {
   const { createServer } = await import('../../server/dist/app.js');
   const { loadConfig } = await import('../../server/dist/config.js');
   const { DB } = await import('../../server/dist/db.js');
@@ -39,7 +40,7 @@ async function withChat(page: Page, historySize: number, run: (base: string, col
     await page.goto(base);
     await expect(page.getByRole('heading', { name: "Chat d'équipe" })).toBeVisible();
     await expect(page.getByRole('status').getByText('Connecté', { exact: true })).toBeVisible();
-    await run(base, colleague);
+    await run(base, colleague, ctx.db);
   } finally {
     await ctx.close();
     fs.rmSync(dir, { recursive: true, force: true });
@@ -149,5 +150,112 @@ test('sur mobile, garde la position de lecture et rend les accès aux appels, do
     await expect(link).toBeInViewport();
     const dimensions = await page.evaluate(() => ({ screen: window.innerWidth, scroll: document.documentElement.scrollWidth }));
     expect(dimensions.scroll).toBeLessThanOrEqual(dimensions.screen);
+  });
+});
+
+test('au toucher, suggère les alias puis retrouve un ancien message depuis une notification persistante', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 320, height: 780 }, isMobile: true, hasTouch: true });
+  const page = await context.newPage();
+  try {
+    await withChat(page, 0, async (base, colleague, db) => {
+      const bell = page.getByRole('button', { name: /^Notifications/ });
+      await expect(bell).toBeInViewport();
+      const editor = page.getByRole('textbox', { name: 'Écrire un message' });
+      await editor.fill('Bonjour ');
+      await page.getByRole('button', { name: 'Mentionner quelqu’un' }).tap();
+      const menu = page.getByRole('listbox', { name: 'Suggestions de mentions' });
+      await expect(menu.getByRole('option', { name: /@room/ })).toBeInViewport();
+      await expect(menu.getByRole('option', { name: '@Noémie' })).toBeInViewport();
+      await menu.getByRole('option', { name: '@Noémie' }).tap();
+      await expect(editor).toHaveValue('Bonjour @Noémie ');
+      await editor.pressSequentially('voici le document.');
+      await page.locator('input[aria-label="Fichier à joindre"]').setInputFiles({ name: 'Notes.txt', mimeType: 'text/plain', buffer: Buffer.from('Document de test') });
+      await page.getByRole('button', { name: 'Envoyer', exact: true }).tap();
+      const timeline = page.getByRole('log', { name: 'Messages', exact: true });
+      await expect(timeline.locator('[data-mention="person"]')).toHaveText('@Noémie');
+      await expect(timeline.getByRole('button', { name: 'Télécharger Notes.txt' })).toBeVisible();
+      const headers = { Authorization: 'Bearer ' + colleague.token };
+      const received = await page.request.get(base + '/api/notifications', { headers });
+      expect((await received.json()).unread).toBe(1);
+
+      const posted = await page.request.post(base + '/api/messages', { headers, data: { content: 'Annonce @room à retrouver dans l’historique.' } });
+      expect(posted.status()).toBe(201);
+      const { message } = await posted.json() as { message: { id: number } };
+      await expect(bell).toHaveAccessibleName('Notifications, 1 non lue');
+      for (let index = 1; index <= 64; index++) db.insertMessage(colleague.user.id, 'Plus récent ' + index);
+      await page.reload();
+      await expect(timeline.getByText('Plus récent 64', { exact: true })).toBeInViewport();
+      await expect(timeline.locator(`[data-message-id="${message.id}"]`)).toHaveCount(0);
+
+      await bell.tap();
+      const notifications = page.getByRole('dialog', { name: 'Notifications' });
+      await expect(notifications.getByRole('button', { name: /Noémie a mentionné le salon/ })).toBeVisible();
+      const fit = await notifications.evaluate((element) => element.scrollWidth <= element.clientWidth + 1);
+      expect(fit).toBeTruthy();
+      await notifications.getByRole('button', { name: /Noémie a mentionné le salon/ }).tap();
+      await expect(notifications).toBeHidden();
+      await expect(timeline.locator(`[data-message-id="${message.id}"] [data-mention="room"]`)).toBeInViewport();
+      await expect(bell).toHaveAccessibleName('Notifications');
+      await page.getByRole('button', { name: 'Derniers messages' }).tap();
+      await expect(timeline.getByText('Plus récent 64', { exact: true })).toBeInViewport();
+
+      await page.request.post(base + '/api/messages', { headers, data: { content: 'Autre mention @Camille.' } });
+      await expect(bell).toHaveAccessibleName('Notifications, 1 non lue');
+      await bell.tap();
+      await notifications.getByRole('button', { name: 'Tout marquer comme lu' }).tap();
+      await expect(notifications.getByText('0 non lues', { exact: true })).toBeVisible();
+    });
+  } finally {
+    await context.close();
+  }
+});
+
+test('propose les mentions au clavier et transmet une alerte système après autorisation', async ({ page, context }) => {
+  await withChat(page, 0, async (base, colleague) => {
+    const editor = page.getByRole('textbox', { name: 'Écrire un message' });
+    await editor.fill('Pour @noe');
+    await expect(page.getByRole('option', { name: '@Noémie' })).toBeVisible();
+    await editor.press('ArrowDown');
+    await expect(page.getByRole('option', { name: '@Noémie', selected: true })).toBeVisible();
+    await editor.press('Enter');
+    await expect(editor).toHaveValue('Pour @Noémie ');
+    await editor.press('Enter');
+    await expect(page.getByRole('log', { name: 'Messages' }).locator('[data-mention="person"]')).toHaveText('@Noémie');
+
+    await context.grantPermissions(['notifications'], { origin: base });
+    const bell = page.getByRole('button', { name: /^Notifications/ });
+    await bell.click();
+    const notifications = page.getByRole('dialog', { name: 'Notifications' });
+    await notifications.getByRole('button', { name: 'Activer les alertes système' }).click();
+    await expect(notifications.getByRole('button', { name: 'Désactiver les alertes système' })).toBeVisible();
+    await notifications.getByRole('button', { name: 'Fermer les notifications' }).click();
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+      // Le moteur sans interface ne présente pas de notifications au système d’exploitation.
+      const alerts: { title: string; body?: string; notificationId: number }[] = [];
+      Object.assign(window, { testSystemAlerts: alerts });
+      ServiceWorkerRegistration.prototype.showNotification = async (title, options) => {
+        alerts.push({ title, body: options?.body, notificationId: options?.data?.notificationId as number });
+      };
+    });
+    const response = await page.request.post(base + '/api/messages', {
+      headers: { Authorization: 'Bearer ' + colleague.token }, data: { content: 'Texte de notification @Camille' },
+    });
+    expect(response.status()).toBe(201);
+    const { message } = await response.json() as { message: { id: number } };
+    await expect(bell).toHaveAccessibleName('Notifications, 1 non lue');
+    const system = () => page.evaluate(() => (window as typeof window & {
+      testSystemAlerts: { title: string; body?: string; notificationId: number }[];
+    }).testSystemAlerts);
+    await expect.poll(async () => (await system()).map(({ body }) => body)).toEqual(['Noémie vous a mentionné']);
+    const [delivered] = await system();
+    expect(delivered.title).toBe("Chat d'équipe");
+    const url = new URL(page.url());
+    url.searchParams.set('notification', String(delivered.notificationId));
+    await page.goto(url.toString());
+    const target = page.locator(`[data-message-id="${message.id}"] [data-mention="person"]`);
+    await expect(target).toHaveText('@Camille');
+    await expect(bell).toHaveAccessibleName('Notifications');
+    await expect(page).not.toHaveURL(/notification=/);
   });
 });
