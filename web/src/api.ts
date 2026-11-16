@@ -49,7 +49,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     ...init,
     headers: {
-      'Content-Type': 'application/json',
+      ...(init?.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
       ...sessionHeaders(),
       ...(init?.headers ?? {}),
     },
@@ -211,6 +211,16 @@ export const api = {
   folders: (signal?: AbortSignal) => req<{ folders: Folder[] }>('/api/folders', { signal }),
   createFolder: (name: string, parentId: number | null) =>
     req<{ folder: Folder }>('/api/folders', { method: 'POST', body: JSON.stringify({ name, parentId }) }),
+  groupFiles: (name: string, targetId: number, source: number | File) => {
+    if (typeof source === 'number') {
+      return req<{ folder: Folder }>('/api/files/group', { method: 'POST', body: JSON.stringify({ name, targetId, sourceId: source }) });
+    }
+    const body = new FormData();
+    body.append('name', name);
+    body.append('targetId', String(targetId));
+    body.append('file', source);
+    return req<{ folder: Folder }>('/api/files/group', { method: 'POST', body });
+  },
   patchFolder: (id: number, patch: { name?: string; parentId?: number | null }) =>
     req<{ folder: Folder }>(`/api/folders/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   deleteFolder: (id: number, recursive: boolean) =>

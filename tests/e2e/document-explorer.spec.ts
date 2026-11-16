@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -99,7 +99,7 @@ test('crée un dossier, distingue un doublon et retrouve un fichier par la reche
 test('sur mobile, le nom long laisse les actions accessibles et son détail affiche le nom entier', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 740 });
   await withExplorer(page, async () => {
-    const upload = page.getByRole('button', { name: 'Déposer un fichier' });
+    const upload = page.getByRole('button', { name: 'Déposer des fichiers' });
     const { scrollWidth, clientWidth } = await upload.evaluate((button) => ({
       scrollWidth: button.scrollWidth,
       clientWidth: button.clientWidth,
@@ -203,7 +203,7 @@ test('trie et filtre les fichiers depuis les en-têtes sur mobile, y compris au-
         .toEqual(names.map((name) => 'Détails de ' + name));
     };
     for (const [name, size] of [['Zèbre.txt', 1024], ['Équipe.txt', 3072], ['Alpha.txt', 8192]] as const) {
-      await drawer.locator('input[type=file]').setInputFiles({ name, mimeType: 'text/plain', buffer: Buffer.alloc(size, 'a') });
+      await drawer.locator('input[aria-label="Fichiers à déposer"]').setInputFiles({ name, mimeType: 'text/plain', buffer: Buffer.alloc(size, 'a') });
       await expect(drawer.getByRole('button', { name: 'Détails de ' + name, exact: true })).toBeVisible();
     }
 
@@ -250,4 +250,163 @@ test('trie et filtre les fichiers depuis les en-têtes sur mobile, y compris au-
     await drawer.getByRole('button', { name: 'Effacer les filtres' }).click();
     await expectFiles('Alpha.txt', 'Équipe.txt');
   });
+});
+
+async function center(locator: Locator) {
+  await locator.scrollIntoViewIfNeeded();
+  const box = await locator.boundingBox();
+  if (!box) throw new Error('Élément à déplacer introuvable');
+  return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+}
+
+async function dragWithMouse(page: Page, source: Locator, target: Locator) {
+  const from = await center(source);
+  const to = await center(target);
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  await page.mouse.move(to.x, to.y, { steps: 10 });
+  await page.mouse.up();
+}
+
+test('dépose depuis l’extérieur, regroupe deux fichiers et déplace un dossier dans un sous-dossier', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await withExplorer(page, async () => {
+    const drawer = page.getByRole('dialog', { name: 'Espace documentaire' });
+    const transfer = await page.evaluateHandle(() => {
+      const data = new DataTransfer();
+      data.items.add(new File(['a'], 'Alpha.txt', { type: 'text/plain' }));
+      data.items.add(new File(['b'], 'Bravo.txt', { type: 'text/plain' }));
+      return data;
+    });
+    await drawer.locator('[data-document-scroll][data-document-drop-id="root"]').dispatchEvent('drop', { dataTransfer: transfer });
+    await transfer.dispose();
+    const alpha = drawer.getByRole('button', { name: 'Détails de Alpha.txt', exact: true });
+    const bravo = drawer.getByRole('button', { name: 'Détails de Bravo.txt', exact: true });
+    await expect(bravo).toBeVisible();
+    await dragWithMouse(page, alpha, bravo);
+    const group = page.getByRole('dialog', { name: 'Regrouper les fichiers' });
+    await group.getByRole('textbox', { name: 'Nom du dossier' }).fill('Dossier groupé');
+    await group.getByRole('button', { name: 'Créer et regrouper' }).click();
+    await expect(group).toBeHidden();
+    await expect(alpha).toBeVisible();
+    await expect(bravo).toBeVisible();
+
+    const transfer2 = await page.evaluateHandle(() => {
+      const data = new DataTransfer();
+      data.items.add(new File(['e'], 'Externe.txt', { type: 'text/plain' }));
+      return data;
+    });
+    await bravo.dispatchEvent('drop', { dataTransfer: transfer2 });
+    await transfer2.dispose();
+    await group.getByRole('textbox', { name: 'Nom du dossier' }).fill('Pièces jointes');
+    await group.getByRole('button', { name: 'Créer et regrouper' }).click();
+    await expect(drawer.getByRole('button', { name: 'Détails de Externe.txt' })).toBeVisible();
+
+    const places = drawer.getByRole('navigation', { name: 'Emplacements des documents' });
+    await places.getByRole('button', { name: 'Racine', exact: true }).click();
+    await places.getByRole('button', { name: 'Déplier Archives audio' }).click();
+    const nested = places.getByRole('button', { name: 'Aller au dossier Transcriptions' });
+    await drawer.getByRole('button', { name: 'Vue grille' }).click();
+    const folder = drawer.getByRole('button', { name: 'Ouvrir le dossier Dossier groupé' });
+    await dragWithMouse(page, folder, nested);
+    await expect(folder).toHaveCount(0);
+    await nested.click();
+    await expect(folder).toBeVisible();
+    await folder.click();
+    await expect(alpha).toBeVisible();
+    await drawer.getByRole('button', { name: 'Ouvrir le dossier Pièces jointes' }).click();
+    await expect(bravo).toBeVisible();
+  }, true);
+});
+
+test('déplace un fichier au toucher et parcourt la destination sur mobile', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 320, height: 820 }, hasTouch: true, isMobile: true });
+  const page = await context.newPage();
+  const cdp = await context.newCDPSession(page);
+  try {
+    await withExplorer(page, async () => {
+      const drawer = page.getByRole('dialog', { name: 'Espace documentaire' });
+      await drawer.locator('input[aria-label="Fichiers à déposer"]').setInputFiles([
+        { name: 'Tactile.txt', mimeType: 'text/plain', buffer: Buffer.from('premier') },
+        { name: 'Clavier.txt', mimeType: 'text/plain', buffer: Buffer.from('second') },
+      ]);
+      const tactile = drawer.getByRole('button', { name: 'Détails de Tactile.txt' });
+      await expect(tactile).toBeVisible();
+      const from = await center(drawer.getByRole('button', { name: 'Déplacer Tactile.txt', exact: true }));
+      const to = await center(drawer.getByRole('button', { name: 'Ouvrir le dossier Comptes rendus' }));
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [from] });
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: from.x - 20, y: from.y - 15 }] });
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [to] });
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      await expect(tactile).toHaveCount(0);
+      await expect(drawer.getByText('Déplacé dans « Comptes rendus ».')).toBeVisible();
+
+      await drawer.getByRole('button', { name: 'Déplacer Clavier.txt', exact: true }).tap();
+      const destination = page.getByRole('dialog', { name: 'Déplacer vers' });
+      await expect(destination).toBeVisible();
+      await destination.getByRole('button', { name: 'Archives audio', exact: true }).tap();
+      await destination.getByRole('button', { name: 'Transcriptions', exact: true }).tap();
+      await destination.getByRole('button', { name: 'Déplacer ici' }).tap();
+      await expect(destination).toBeHidden();
+      await drawer.getByRole('button', { name: 'Ouvrir le dossier Comptes rendus' }).tap();
+      await expect(tactile).toBeVisible();
+      await drawer.getByRole('button', { name: 'Afficher les emplacements' }).tap();
+      const places = page.getByRole('dialog', { name: 'Emplacements', exact: true });
+      await places.getByRole('button', { name: 'Déplier Archives audio', exact: true }).tap();
+      await places.getByRole('button', { name: 'Aller au dossier Transcriptions', exact: true }).tap();
+      const keyboardFile = drawer.getByRole('button', { name: 'Détails de Clavier.txt' });
+      await expect(keyboardFile).toBeVisible();
+      await drawer.locator('input[aria-label="Fichiers à déposer"]').setInputFiles({ name: 'Autre.txt', mimeType: 'text/plain', buffer: Buffer.from('autre') });
+      const other = drawer.getByRole('button', { name: 'Détails de Autre.txt' });
+      await expect(other).toBeVisible();
+      await drawer.getByRole('button', { name: 'Actions du fichier Clavier.txt' }).tap();
+      await page.getByRole('menuitem', { name: 'Regrouper avec un fichier…' }).tap();
+      await other.tap();
+      const group = page.getByRole('dialog', { name: 'Regrouper les fichiers' });
+      await group.getByRole('textbox', { name: 'Nom du dossier' }).fill('Réunis');
+      await group.getByRole('button', { name: 'Créer et regrouper' }).tap();
+      await expect(keyboardFile).toBeVisible();
+      await expect(other).toBeVisible();
+    }, true);
+  } finally {
+    await context.close();
+  }
+});
+
+test('importe l’arborescence d’un dossier déposé et celle d’un dossier choisi', async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 800 });
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'chat-import-dossier-'));
+  const directory = path.join(temporary, 'Sélection locale');
+  const deepPath = path.join(directory, ...Array.from({ length: 12 }, (_, index) => 'Niveau ' + (index + 1)));
+  const droppedDirectory = path.join(temporary, 'Dossier déposé');
+  fs.mkdirSync(path.join(droppedDirectory, 'Vide'), { recursive: true });
+  fs.mkdirSync(path.join(droppedDirectory, 'Sous-dossier'));
+  fs.writeFileSync(path.join(droppedDirectory, 'Sous-dossier', 'Feuille.txt'), 'document déposé');
+  fs.mkdirSync(deepPath, { recursive: true });
+  fs.writeFileSync(path.join(deepPath, 'Profondeur.txt'), 'document importé');
+  try {
+    await withExplorer(page, async () => {
+      const drawer = page.getByRole('dialog', { name: 'Espace documentaire' });
+      const pane = await drawer.locator('[data-document-scroll][data-document-drop-id="root"]').boundingBox();
+      if (!pane) throw new Error('Zone de dépôt introuvable');
+      const cdp = await page.context().newCDPSession(page);
+      const drag = { x: pane.x + 24, y: pane.y + pane.height - 24, data: { items: [], files: [droppedDirectory], dragOperationsMask: 1 } };
+      await cdp.send('Input.dispatchDragEvent', { type: 'dragEnter', ...drag });
+      await cdp.send('Input.dispatchDragEvent', { type: 'dragOver', ...drag });
+      await cdp.send('Input.dispatchDragEvent', { type: 'drop', ...drag });
+      await cdp.detach();
+      await drawer.getByRole('button', { name: 'Ouvrir le dossier Dossier déposé' }).click();
+      await expect(drawer.getByRole('button', { name: 'Ouvrir le dossier Vide' })).toBeVisible();
+      await drawer.getByRole('button', { name: 'Ouvrir le dossier Sous-dossier' }).click();
+      await expect(drawer.getByRole('button', { name: 'Détails de Feuille.txt' })).toBeVisible();
+
+      await drawer.getByRole('navigation', { name: 'Emplacements des documents' }).getByRole('button', { name: 'Racine', exact: true }).click();
+      await drawer.locator('input[aria-label="Dossier à importer"]').setInputFiles(directory);
+      await expect(drawer.getByRole('button', { name: 'Ouvrir le dossier Sélection locale' })).toBeVisible();
+      await drawer.getByRole('textbox', { name: 'Rechercher dans tous les dossiers' }).fill('Profondeur');
+      await expect(drawer.getByRole('button', { name: 'Détails de Profondeur.txt' })).toContainText('Niveau 12');
+    });
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
 });

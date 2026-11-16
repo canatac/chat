@@ -1,5 +1,6 @@
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
+import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import CloseIcon from '@mui/icons-material/Close';
 import CreateNewFolderOutlinedIcon from '@mui/icons-material/CreateNewFolderOutlined';
 import DeleteIcon from '@mui/icons-material/Delete';
@@ -8,6 +9,7 @@ import DownloadIcon from '@mui/icons-material/Download';
 import DriveFileMoveIcon from '@mui/icons-material/DriveFileMove';
 import FolderOpenOutlinedIcon from '@mui/icons-material/FolderOpenOutlined';
 import FolderOutlinedIcon from '@mui/icons-material/FolderOutlined';
+import DriveFolderUploadOutlinedIcon from '@mui/icons-material/DriveFolderUploadOutlined';
 import GridViewOutlinedIcon from '@mui/icons-material/GridViewOutlined';
 import HistoryIcon from '@mui/icons-material/History';
 import HomeOutlinedIcon from '@mui/icons-material/HomeOutlined';
@@ -55,8 +57,10 @@ import {
 import { useTheme } from '@mui/material/styles';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, saveFile } from '../api';
+import { documentsFromDrop, documentsFromPicker, importDocuments, type ExternalDocument } from '../documentImport';
 import { formatFileSize } from '../formatFileSize';
 import type { FileFilters, FileItem, FileSort, Folder } from '../types';
+import useDocumentDrag, { documentDropAt, documentDropAttributes, documentDropStyle, type DropTarget } from '../useDocumentDrag';
 import type { ChatSocket } from '../ws';
 import DocumentExplorerList, { explorerColors, type DocumentItem, type DocumentView } from './DocumentExplorerList';
 import DocumentPlaces, { type DocumentPlace } from './DocumentPlaces';
@@ -69,6 +73,7 @@ interface Props {
 
 type NameEdit =
   | { mode: 'new-folder' }
+  | { mode: 'group-files'; source: FileItem | File; target: FileItem }
   | { mode: 'rename-folder'; folder: Folder }
   | { mode: 'rename-file'; file: FileItem };
 
@@ -128,6 +133,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
   const [history, setHistory] = useState<NavigationHistory>({ places: [null], index: 0 });
   const [placesAnchor, setPlacesAnchor] = useState<HTMLButtonElement | null>(null);
   const [view, setView] = useState<DocumentView>(() => localStorage.getItem(VIEW_STORAGE_KEY) === 'grid' ? 'grid' : 'list');
+  const [canPickFolder] = useState(() => 'webkitdirectory' in document.createElement('input'));
   const [query, setQuery] = useState('');
   const [folderSort, setFolderSort] = useState<FileSort>({ column: 'name', direction: 'asc' });
   const [recentSort, setRecentSort] = useState<FileSort>({ column: 'date', direction: 'desc' });
@@ -137,6 +143,8 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
   const [loadingMore, setLoadingMore] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const [groupSource, setGroupSource] = useState<FileItem | null>(null);
   const [uploading, setUploading] = useState(false);
   const [downloading, setDownloading] = useState<ReadonlySet<number>>(new Set());
 
@@ -152,6 +160,9 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
   const [detail, setDetail] = useState<FileDetail | null>(null);
 
   const fileRef = useRef<HTMLInputElement>(null);
+  const folderRef = useRef<HTMLInputElement>(null);
+  const importing = useRef(false);
+  const externalMark = useRef<HTMLElement | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const detailRequest = useRef(0);
   const moreFilesRequest = useRef<AbortController | null>(null);
@@ -218,7 +229,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
   useEffect(() => {
     if (!open || !socket) return;
     return socket.onMessage((event) => {
-      if (event.type === 'docsChanged') reload();
+      if (event.type === 'docsChanged' && !importing.current) reload();
     });
   }, [open, reload, socket]);
 
@@ -263,10 +274,10 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
       seen.add(current);
       const folder = folderById.get(current);
       if (!folder) break;
-      path.unshift(folder);
+      path.push(folder);
       current = folder.parentId;
     }
-    return path;
+    return path.reverse();
   }, [folderById]);
 
   const foldersByParent = useMemo(() => {
@@ -285,6 +296,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
 
   const showPlace = (next: DocumentPlace) => {
     setActionError(null);
+    setActionNotice(null);
     setQuery('');
     setPlacesAnchor(null);
     setHistory((previous) => previous.places[previous.index] === next ? previous : {
@@ -309,20 +321,84 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
     localStorage.setItem(VIEW_STORAGE_KEY, next);
   };
 
-  const onPick = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    event.target.value = '';
-    if (!file || uploading || showPaths) return;
+  const runImport = async (documents: ExternalDocument[] | Promise<ExternalDocument[]>, target: Exclude<DropTarget, { kind: 'destination' }>) => {
+    importing.current = true;
     setActionError(null);
+    setActionNotice(null);
     setUploading(true);
     try {
-      await api.uploadFile(file, '', false, currentId);
-      reload();
+      const items = await documents;
+      if (!items.length) throw new Error('Le navigateur n’a transmis aucun fichier ni dossier.');
+      let destination: number | null;
+      if (target.kind === 'file') {
+        const file = visibleListing?.files.find(({ id }) => id === target.id);
+        if (!file) throw new Error('Le fichier cible est introuvable.');
+        if (items.length === 1 && items[0].kind === 'file') {
+          openGroup(items[0].file, file);
+          return;
+        }
+        destination = file.folderId;
+      } else {
+        destination = target.id;
+      }
+      setActionNotice(await importDocuments(items, destination));
     } catch (error) {
-      setActionError(errorMessage(error, 'Impossible de déposer le fichier.'));
+      setActionError(errorMessage(error, 'Impossible d’importer les documents.'));
     } finally {
+      importing.current = false;
       setUploading(false);
+      reload();
     }
+  };
+
+  const onPick = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files;
+    const items = files ? documentsFromPicker(files) : [];
+    event.target.value = '';
+    if (!items.length || importing.current || showPaths) return;
+    void runImport(items, { kind: 'folder', id: currentId });
+  };
+
+  const markExternal = useCallback((element: HTMLElement | null, group = false) => {
+    if (externalMark.current !== element) externalMark.current?.removeAttribute('data-document-drop-active');
+    externalMark.current = element;
+    element?.setAttribute('data-document-drop-active', group ? 'group' : 'copy');
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const preventFileNavigation = (event: DragEvent) => {
+      if (event.dataTransfer?.types.includes('Files')) event.preventDefault();
+    };
+    window.addEventListener('dragover', preventFileNavigation);
+    window.addEventListener('drop', preventFileNavigation);
+    return () => {
+      window.removeEventListener('dragover', preventFileNavigation);
+      window.removeEventListener('drop', preventFileNavigation);
+      markExternal(null);
+    };
+  }, [open, markExternal]);
+
+  const onExternalDragOver = (event: React.DragEvent<HTMLElement>) => {
+    if (!event.dataTransfer.types.includes('Files')) return;
+    event.preventDefault();
+    const found = documentDropAt(event.target instanceof Element ? event.target : null);
+    const accepted = found && found.target.kind !== 'destination' && !importing.current && !dialogBusy;
+    event.dataTransfer.dropEffect = accepted ? 'copy' : 'none';
+    markExternal(accepted ? found.element : null, found?.target.kind === 'file' && event.dataTransfer.items.length === 1);
+  };
+
+  const onExternalDrop = (event: React.DragEvent<HTMLElement>) => {
+    if (!event.dataTransfer.types.includes('Files')) return;
+    event.preventDefault();
+    markExternal(null);
+    const found = documentDropAt(event.target instanceof Element ? event.target : null);
+    if (importing.current || dialogBusy) return;
+    if (!found || found.target.kind === 'destination') {
+      setActionError('Déposez les éléments sur un dossier ou dans son contenu.');
+      return;
+    }
+    void runImport(documentsFromDrop(event.dataTransfer), found.target);
   };
 
   const download = async (file: FileItem) => {
@@ -346,6 +422,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
   const runFileAction = async (action: () => Promise<unknown>, fallback: string) => {
     setMenu(null);
     setActionError(null);
+    setActionNotice(null);
     try {
       await action();
       reload();
@@ -381,12 +458,26 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
     setNameValue(edit.mode === 'rename-folder' ? edit.folder.name : edit.mode === 'rename-file' ? edit.file.name : '');
   };
 
+  const openGroup = (source: FileItem | File, target: FileItem) => {
+    if ('id' in source && source.id === target.id) {
+      setActionError('Choisissez un autre fichier pour le regroupement.');
+      return;
+    }
+    setGroupSource(null);
+    setActionError(null);
+    openNameDialog({ mode: 'group-files', source, target });
+  };
+
   const submitName = async () => {
     if (!nameDialog) return;
     const name = nameValue.trim();
     if (!name) return;
     await runDialogAction(async () => {
-      if (nameDialog.mode === 'new-folder') await api.createFolder(name, currentId);
+      if (nameDialog.mode === 'group-files') {
+        const { folder } = await api.groupFiles(name, nameDialog.target.id, 'id' in nameDialog.source ? nameDialog.source.id : nameDialog.source);
+        showPlace(folder.id);
+        setActionNotice('Deux fichiers regroupés dans « ' + folder.name + ' ».');
+      } else if (nameDialog.mode === 'new-folder') await api.createFolder(name, currentId);
       else if (nameDialog.mode === 'rename-folder') await api.patchFolder(nameDialog.folder.id, { name });
       else await api.patchFile(nameDialog.file.id, { name });
     }, () => setNameDialog(null), 'Impossible d’enregistrer ce nom.');
@@ -399,12 +490,20 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
     setMoveTarget(target.kind === 'folder' ? target.item.parentId : target.item.folderId);
   };
 
+  const canMove = (item: DocumentItem, destination: number | null) => item.kind === 'file'
+    ? item.item.folderId !== destination
+    : item.item.parentId !== destination && !pathFor(destination).some(({ id }) => id === item.item.id);
+
+  const moveDocument = async (item: DocumentItem, destination: number | null) => {
+    if (item.kind === 'file') await api.patchFile(item.item.id, { folderId: destination });
+    else await api.patchFolder(item.item.id, { parentId: destination });
+    setActionNotice(destination === null ? 'Élément déplacé à la racine.' : 'Déplacé dans « ' + (folderById.get(destination)?.name ?? 'le dossier') + ' ».');
+  };
+
   const submitMove = async () => {
-    if (!moveDialog) return;
+    if (!moveDialog || !canMove(moveDialog, moveTarget)) return;
     await runDialogAction(
-      () => moveDialog.kind === 'folder'
-        ? api.patchFolder(moveDialog.item.id, { parentId: moveTarget })
-        : api.patchFile(moveDialog.item.id, { folderId: moveTarget }),
+      () => moveDocument(moveDialog, moveTarget),
       () => setMoveDialog(null),
       'Déplacement impossible.',
     );
@@ -429,6 +528,10 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
   };
 
   const openDetail = async (file: FileItem) => {
+    if (groupSource) {
+      openGroup(groupSource, file);
+      return;
+    }
     setMenu(null);
     setActionError(null);
     const requestId = ++detailRequest.current;
@@ -440,33 +543,41 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
     }
   };
 
-  const moveTree = useMemo(() => {
-    if (!moveDialog) return [];
-    const rows: { folder: Folder | null; depth: number }[] = [{ folder: null, depth: 0 }];
-    const blockedId = moveDialog.kind === 'folder' ? moveDialog.item.id : null;
-    const addChildren = (parent: number | null, depth: number) => {
-      for (const folder of foldersByParent.get(parent) ?? []) {
-        if (folder.id === blockedId) continue;
-        rows.push({ folder, depth });
-        addChildren(folder.id, depth + 1);
+  const movePath = pathFor(moveTarget);
+  const moveFolders = (foldersByParent.get(moveTarget) ?? []).filter(({ id }) => moveDialog?.kind !== 'folder' || id !== moveDialog.item.id);
+  const drag = useDocumentDrag({
+    enabled: open && !uploading && !dialogBusy,
+    canDrop: (source, target) => {
+      if (target.kind === 'destination') return true;
+      if (target.kind === 'folder') return canMove(source, target.id);
+      return source.kind === 'file' && source.item.id !== target.id;
+    },
+    onDrop: (source, target) => {
+      if (target.kind === 'destination') openMove(source);
+      else if (target.kind === 'folder') void runFileAction(() => moveDocument(source, target.id), 'Déplacement impossible.');
+      else if (source.kind === 'file') {
+        const targetFile = visibleListing?.files.find(({ id }) => id === target.id);
+        if (targetFile) openGroup(source.item, targetFile);
       }
-    };
-    addChildren(null, 1);
-    return rows;
-  }, [moveDialog, foldersByParent]);
+    },
+    onChoose: openMove,
+  });
 
   const closeExplorer = () => {
     detailRequest.current += 1;
     setDetail(null);
     setMenu(null);
     setPlacesAnchor(null);
+    setGroupSource(null);
+    setActionNotice(null);
     setActionError(null);
     onClose();
   };
 
   const menuTarget = menu?.target;
   const editingFile = nameDialog?.mode === 'rename-file';
-  const nameDialogTitle = nameDialog?.mode === 'new-folder' ? 'Nouveau dossier' : editingFile ? 'Renommer le fichier' : 'Renommer le dossier';
+  const grouping = nameDialog?.mode === 'group-files' ? nameDialog : null;
+  const nameDialogTitle = grouping ? 'Regrouper les fichiers' : nameDialog?.mode === 'new-folder' ? 'Nouveau dossier' : editingFile ? 'Renommer le fichier' : 'Renommer le dossier';
   const places = <DocumentPlaces foldersByParent={foldersByParent} currentPath={breadcrumb} active={search ? undefined : place} onNavigate={showPlace} />;
 
   return (
@@ -480,6 +591,11 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
           role: 'dialog',
           'aria-modal': true,
           'aria-labelledby': 'doc-explorer-title',
+          onDragOver: onExternalDragOver,
+          onDrop: onExternalDrop,
+          onDragLeave: (event: React.DragEvent<HTMLElement>) => {
+            if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) markExternal(null);
+          },
           sx: {
             width: { xs: '100%', md: 'min(1180px, calc(100% - 32px))' },
             bgcolor: explorerColors.background,
@@ -523,7 +639,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
 
       <Box sx={{ display: 'grid', gridTemplateColumns: wide ? '218px minmax(0, 1fr)' : 'minmax(0, 1fr)', flex: 1, minHeight: 0 }}>
         {wide && (
-          <Box component="aside" sx={{ bgcolor: '#edf3f2', borderRight: '1px solid ' + explorerColors.border, overflowY: 'auto', overscrollBehavior: 'contain' }}>
+          <Box component="aside" data-document-scroll sx={{ bgcolor: '#edf3f2', borderRight: '1px solid ' + explorerColors.border, overflowY: 'auto', overscrollBehavior: 'contain' }}>
             {places}
           </Box>
         )}
@@ -540,7 +656,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
               <Box sx={{ gridArea: 'navigation', display: 'flex', alignItems: 'center', gap: 0.5 }}>
                 {!wide && (
                   <Tooltip disableInteractive title="Emplacements">
-                    <IconButton aria-label="Afficher les emplacements" aria-haspopup="dialog" aria-expanded={Boolean(placesAnchor)} onClick={(event) => setPlacesAnchor(event.currentTarget)} sx={headerActionStyle}>
+                    <IconButton aria-label="Afficher les emplacements" aria-haspopup="dialog" aria-expanded={Boolean(placesAnchor)} {...documentDropAttributes({ kind: 'destination' })} onClick={(event) => setPlacesAnchor(event.currentTarget)} sx={{ ...headerActionStyle, ...documentDropStyle }}>
                       <MenuOutlinedIcon fontSize="small" />
                     </IconButton>
                   </Tooltip>
@@ -568,13 +684,14 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
                     maxItems={3}
                     sx={{ minWidth: 0, '& .MuiBreadcrumbs-ol': { flexWrap: 'nowrap', minWidth: 0 }, '& .MuiBreadcrumbs-li': { minWidth: 0 }, '& .MuiBreadcrumbs-separator': { mx: 0.55 } }}
                   >
-                    <Link component="button" aria-current={currentId === null ? 'page' : undefined} onClick={() => showPlace(null)} color="inherit" underline="hover" sx={{ display: 'flex', alignItems: 'center', gap: 0.6, fontSize: '0.83rem', fontWeight: 700 }}>
+                    <Link component="button" {...documentDropAttributes({ kind: 'folder', id: null })} aria-current={currentId === null ? 'page' : undefined} onClick={() => showPlace(null)} color="inherit" underline="hover" sx={{ display: 'flex', alignItems: 'center', gap: 0.6, fontSize: '0.83rem', fontWeight: 700, borderRadius: '5px', ...documentDropStyle }}>
                       <HomeOutlinedIcon fontSize="small" /> Racine
                     </Link>
                     {breadcrumb.map((folder) => (
                       <Link
                         key={folder.id}
                         component="button"
+                        {...documentDropAttributes({ kind: 'folder', id: folder.id })}
                         aria-current={currentId === folder.id ? 'page' : undefined}
                         onClick={() => showPlace(folder.id)}
                         title={folder.name}
@@ -582,6 +699,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
                         sx={{
                           display: 'block', maxWidth: { xs: '31vw', sm: 128, xl: 205 }, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                           color: currentId === folder.id ? explorerColors.ink : explorerColors.accent, fontSize: '0.83rem', fontWeight: currentId === folder.id ? 750 : 600,
+                          borderRadius: '5px', ...documentDropStyle,
                         }}
                       >
                         {folder.name}
@@ -626,7 +744,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
                   '& input::placeholder': { color: explorerColors.muted, opacity: 1 },
                 }}
               />
-              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: 'minmax(0, 1fr) minmax(0, 1fr)', sm: 'auto auto' }, gap: 1 }}>
+              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: 'minmax(0, 1fr) minmax(0, 1fr)' + (canPickFolder ? ' 42px' : ''), sm: canPickFolder ? 'auto auto 42px' : 'auto auto' }, gap: { xs: 0.7, sm: 1 } }}>
                 <Button
                   variant="outlined"
                   startIcon={<CreateNewFolderOutlinedIcon />}
@@ -642,18 +760,30 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
                   startIcon={uploading ? <CircularProgress color="inherit" size={16} /> : <UploadFileOutlinedIcon />}
                   disabled={uploading || showPaths}
                   onClick={() => fileRef.current?.click()}
-                  sx={primaryButtonStyle}
+                  sx={{ ...primaryButtonStyle, whiteSpace: 'normal', lineHeight: 1.15 }}
                 >
-                  {uploading ? 'Dépôt en cours…' : 'Déposer un fichier'}
+                  {uploading ? 'Dépôt en cours…' : 'Déposer des fichiers'}
                 </Button>
+                {canPickFolder && (
+                  <Tooltip disableInteractive title="Importer un dossier">
+                    <span><IconButton aria-label="Importer un dossier" disabled={uploading || showPaths} onClick={() => folderRef.current?.click()} sx={{ ...headerActionStyle, width: 42, height: 42 }}><DriveFolderUploadOutlinedIcon fontSize="small" /></IconButton></span>
+                  </Tooltip>
+                )}
               </Box>
-              <input hidden type="file" ref={fileRef} onChange={onPick} />
+              <input hidden type="file" multiple aria-label="Fichiers à déposer" ref={fileRef} onChange={onPick} />
+              {canPickFolder && <input hidden type="file" multiple {...{ webkitdirectory: '' }} aria-label="Dossier à importer" ref={folderRef} onChange={onPick} />}
             </Box>
             {loading && <LinearProgress aria-label="Actualisation des documents" sx={{ position: 'absolute', height: 2, left: 0, right: 0, bottom: 0 }} />}
           </Box>
 
-          <Box ref={contentRef} sx={{ px: horizontalPadding, pt: { xs: 1.55, sm: 2 }, pb: 3, flex: 1, minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain' }} aria-busy={loading || loadingMore}>
+          <Box ref={contentRef} data-document-scroll {...(!showPaths ? documentDropAttributes({ kind: 'folder', id: currentId }) : {})} sx={{ px: horizontalPadding, pt: { xs: 1.55, sm: 2 }, pb: 3, flex: 1, minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain', ...documentDropStyle }} aria-busy={loading || loadingMore}>
             {actionError && <Alert severity="error" onClose={() => setActionError(null)} sx={{ mb: 2 }}>{actionError}</Alert>}
+            {actionNotice && <Alert severity="success" role="status" onClose={() => setActionNotice(null)} closeText="Fermer" sx={{ mb: 1.5 }}>{actionNotice}</Alert>}
+            {groupSource && (
+              <Alert severity="info" onClose={() => setGroupSource(null)} closeText="Annuler le regroupement" sx={{ mb: 1.5, overflowWrap: 'anywhere' }}>
+                Choisissez le fichier à regrouper avec « {groupSource.name} ».
+              </Alert>
+            )}
             {listError && (
               <Alert severity="error" sx={{ mb: 2 }} action={<Button color="inherit" size="small" onClick={reload}>Réessayer</Button>}>
                 {listError}
@@ -676,6 +806,8 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
               onOpenFile={(file) => void openDetail(file)}
               onDownload={(file) => void download(file)}
               onMenu={(target, anchor) => setMenu({ target, anchor })}
+              drag={drag}
+              dragDisabled={uploading || dialogBusy}
             />
             {visibleListing?.nextBefore != null && (
               <Box sx={{ display: 'flex', justifyContent: 'center', mt: 1.5 }}>
@@ -687,6 +819,8 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
           </Box>
         </Box>
       </Box>
+
+      {drag.preview}
 
       {!wide && (
         <Popover
@@ -743,6 +877,9 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
             <MenuItem onClick={() => openMove({ kind: 'file', item: menuTarget.item })}>
               <ListItemIcon><DriveFileMoveIcon fontSize="small" /></ListItemIcon>Déplacer…
             </MenuItem>
+            <MenuItem onClick={() => { setMenu(null); setActionError(null); setActionNotice(null); setGroupSource(menuTarget.item); }}>
+              <ListItemIcon><CreateNewFolderOutlinedIcon fontSize="small" /></ListItemIcon>Regrouper avec un fichier…
+            </MenuItem>
             <MenuItem onClick={() => void openDetail(menuTarget.item)}>
               <ListItemIcon><HistoryIcon fontSize="small" /></ListItemIcon>Détails & historique
             </MenuItem>
@@ -783,6 +920,11 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
         <Box component="form" onSubmit={(event) => { event.preventDefault(); void submitName(); }}>
           <DialogTitle id="doc-name-title">{nameDialogTitle}</DialogTitle>
           <DialogContent>
+            {grouping && (
+              <Typography variant="body2" sx={{ overflowWrap: 'anywhere' }}>
+                « {grouping.source.name} » et « {grouping.target.name} » seront placés dans le nouveau dossier.
+              </Typography>
+            )}
             <TextField
               autoFocus
               fullWidth
@@ -800,7 +942,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
           <DialogActions>
             <Button disabled={dialogBusy} onClick={() => setNameDialog(null)}>Annuler</Button>
             <Button type="submit" variant="contained" disableElevation sx={primaryButtonStyle} disabled={dialogBusy || !nameValue.trim()}>
-              {nameDialog?.mode === 'new-folder' ? 'Créer le dossier' : 'Enregistrer'}
+              {grouping ? 'Créer et regrouper' : nameDialog?.mode === 'new-folder' ? 'Créer le dossier' : 'Enregistrer'}
             </Button>
           </DialogActions>
         </Box>
@@ -810,28 +952,29 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
         <DialogTitle id="doc-move-title">Déplacer vers</DialogTitle>
         <DialogContent dividers>
           {dialogError && <Alert severity="error" sx={{ mb: 1 }}>{dialogError}</Alert>}
-          <List dense disablePadding aria-label="Dossier de destination">
-            {moveTree.map((row) => {
-              const id = row.folder?.id ?? null;
-              return (
-                <ListItemButton
-                  key={id ?? 'root'}
-                  selected={id === moveTarget}
-                  aria-current={id === moveTarget ? 'true' : undefined}
-                  disabled={dialogBusy}
-                  onClick={() => setMoveTarget(id)}
-                  sx={{ pl: 1.5 + Math.min(5, row.depth) * 2, borderRadius: 2, minHeight: 42 }}
-                >
-                  <ListItemIcon sx={{ minWidth: 32, color: explorerColors.folder }}><FolderOutlinedIcon fontSize="small" /></ListItemIcon>
-                  <ListItemText primary={row.folder?.name ?? 'Racine'} sx={{ overflowWrap: 'anywhere' }} />
-                </ListItemButton>
-              );
-            })}
+          <Typography variant="body2" sx={{ mb: 1, overflowWrap: 'anywhere' }}>« {moveDialog?.item.name} »</Typography>
+          <Breadcrumbs aria-label="Chemin de destination" maxItems={3} sx={{ mb: 1.4, overflowWrap: 'anywhere' }}>
+            <Link component="button" color="inherit" disabled={dialogBusy} aria-current={moveTarget === null ? 'page' : undefined} onClick={() => setMoveTarget(null)}>Racine</Link>
+            {movePath.map((folder) => (
+              <Link key={folder.id} component="button" color="inherit" disabled={dialogBusy} aria-current={folder.id === moveTarget ? 'page' : undefined} onClick={() => setMoveTarget(folder.id)}>
+                {folder.name}
+              </Link>
+            ))}
+          </Breadcrumbs>
+          <List component="div" dense disablePadding aria-label="Dossiers de destination">
+            {moveFolders.map((folder) => (
+              <ListItemButton key={folder.id} component="button" disabled={dialogBusy} onClick={() => setMoveTarget(folder.id)} sx={{ width: '100%', textAlign: 'left', borderRadius: 2, minHeight: 44 }}>
+                <ListItemIcon sx={{ minWidth: 32, color: explorerColors.folder }}><FolderOutlinedIcon fontSize="small" /></ListItemIcon>
+                <ListItemText primary={folder.name} sx={{ overflowWrap: 'anywhere' }} />
+                <ChevronRightIcon fontSize="small" sx={{ color: explorerColors.muted }} />
+              </ListItemButton>
+            ))}
           </List>
+          {moveFolders.length === 0 && <Typography variant="body2" sx={{ color: explorerColors.muted }}>Aucun sous-dossier.</Typography>}
         </DialogContent>
         <DialogActions>
           <Button disabled={dialogBusy} onClick={() => setMoveDialog(null)}>Annuler</Button>
-          <Button variant="contained" disableElevation sx={primaryButtonStyle} disabled={dialogBusy} onClick={() => void submitMove()}>Déplacer</Button>
+          <Button variant="contained" disableElevation sx={primaryButtonStyle} disabled={dialogBusy || !moveDialog || !canMove(moveDialog, moveTarget)} onClick={() => void submitMove()}>Déplacer ici</Button>
         </DialogActions>
       </Dialog>
 
