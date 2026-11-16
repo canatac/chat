@@ -1,6 +1,6 @@
 import ArrowDownwardRoundedIcon from '@mui/icons-material/ArrowDownwardRounded';
 import ForumOutlinedIcon from '@mui/icons-material/ForumOutlined';
-import { Alert, Box, Button, CircularProgress, Typography } from '@mui/material';
+import { Alert, Box, Button, CircularProgress, Snackbar, Typography } from '@mui/material';
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { api, selectedRoom } from './api';
 import AdminDialog from './components/AdminDialog';
@@ -9,8 +9,11 @@ import ChatComposer from './components/ChatComposer';
 import ChatHeader, { type ConnectionStatus } from './components/ChatHeader';
 import DocDrawer from './components/DocDrawer';
 import MessageRow from './components/MessageRow';
+import NotificationsDrawer from './components/NotificationsDrawer';
+import { mentionLabel } from './systemNotifications';
 import { chatColors } from './theme';
-import type { CallInfo, Message, Room, User } from './types';
+import type { CallInfo, MentionNotification, Message, Room, User } from './types';
+import useMentionNotifications from './useMentionNotifications';
 import { ChatSocket } from './ws';
 
 const PAGE_SIZE = 50;
@@ -29,6 +32,11 @@ function mergeMessages(current: Message[], incoming: Message[]): Message[] {
   const byId = new Map(current.map((message) => [message.id, message]));
   for (const message of incoming) byId.set(message.id, message);
   return [...byId.values()].sort((left, right) => left.id - right.id);
+}
+
+function mergeLiveTail(messages: Message[], tail: Message[]): Message[] {
+  const latest = messages[messages.length - 1]?.id ?? 0;
+  return mergeMessages(messages, tail.filter(({ id }) => id > latest));
 }
 
 function DayDivider({ date }: { date: Date }) {
@@ -74,6 +82,13 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
   const [statsOpen, setStatsOpen] = useState(false);
   const [callOpen, setCallOpen] = useState(false);
   const [call, setCall] = useState<CallInfo | null>(null);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [openingNotification, setOpeningNotification] = useState<number | null>(null);
+  const [notificationError, setNotificationError] = useState<string | null>(null);
+  const [highlighted, setHighlighted] = useState<{ id: number } | null>(null);
+  const [historical, setHistorical] = useState(false);
+  const feed = useMentionNotifications(socket, connection === 'online', room, user.id);
+  const { dismissToast, read } = feed;
 
   const usersById = useMemo(() => new Map(users.map((member) => [member.id, member])), [users]);
   const displayUser = { ...user, ...usersById.get(user.id) };
@@ -81,19 +96,35 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
   const listRef = useRef<HTMLDivElement>(null);
   const followMessages = useRef(true);
   const historyPosition = useRef<{ id: number; top: number } | null>(null);
+  const focusMessage = useRef<number | null>(null);
+  const archive = useRef(false);
+  const liveTail = useRef<Message[]>([]);
+  const timelineVersion = useRef(0);
+  const noticeRequest = useRef<AbortController | null>(null);
 
-  const loadRecent = useCallback(async (signal?: AbortSignal, reconnect = false) => {
+  const loadRecent = useCallback(async (signal?: AbortSignal, reconnect = false, replace = false) => {
+    if (archive.current && !replace) return;
+    const version = timelineVersion.current;
     if (!reconnect) setLoading(true);
     try {
       const { messages: recent } = await api.messages(undefined, PAGE_SIZE, signal);
-      if (signal?.aborted) return;
-      setMessages((previous) => mergeMessages(previous, recent));
+      if (signal?.aborted || timelineVersion.current !== version) return;
+      if (replace) {
+        archive.current = false;
+        timelineVersion.current++;
+        followMessages.current = true;
+        setHistorical(false);
+        setHighlighted(null);
+        setLoadingOlder(false);
+        setLoading(false);
+        setMessages(mergeLiveTail(recent, liveTail.current));
+      } else setMessages((previous) => mergeMessages(previous, recent));
       if (!reconnect) setHasMore(recent.length === PAGE_SIZE);
       setHistoryError(null);
     } catch {
-      if (!signal?.aborted && !reconnect) setHistoryError('recent');
+      if (!signal?.aborted && !reconnect && timelineVersion.current === version) setHistoryError('recent');
     } finally {
-      if (!signal?.aborted && !reconnect) setLoading(false);
+      if (!signal?.aborted && !reconnect && timelineVersion.current === version) setLoading(false);
     }
   }, []);
 
@@ -132,6 +163,8 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
     const unsubscribe = activeSocket.onMessage((event) => {
       if (event.type === 'message' && event.message) {
         const message = event.message;
+        liveTail.current = [...liveTail.current.slice(1 - PAGE_SIZE), message];
+        if (archive.current) return;
         setMessages((previous) =>
           previous.some((item) => item.id === message.id) ? previous : mergeMessages(previous, [message]),
         );
@@ -169,6 +202,18 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
   useLayoutEffect(() => {
     const list = listRef.current;
     if (!list) return;
+    const focus = focusMessage.current;
+    if (focus !== null) {
+      const row = list.querySelector<HTMLElement>('[data-message-id="' + focus + '"]');
+      if (row) {
+        focusMessage.current = null;
+        historyPosition.current = null;
+        list.scrollTop += row.getBoundingClientRect().top - list.getBoundingClientRect().top - Math.max(10, (list.clientHeight - row.offsetHeight) / 3);
+        row.focus({ preventScroll: true });
+        syncScroll();
+        return;
+      }
+    }
     const anchor = historyPosition.current;
     if (anchor) {
       historyPosition.current = null;
@@ -178,7 +223,7 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
       list.scrollTop = list.scrollHeight;
     }
     syncScroll();
-  }, [hasMore, loading, messages, syncScroll]);
+  }, [hasMore, highlighted, loading, messages, notificationsOpen, syncScroll]);
 
   useLayoutEffect(() => {
     const list = listRef.current;
@@ -192,6 +237,10 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
   }, [syncScroll]);
 
   const jumpToLatest = () => {
+    if (archive.current) {
+      if (!loading) void loadRecent(undefined, false, true);
+      return;
+    }
     const list = listRef.current;
     if (list) list.scrollTop = list.scrollHeight;
     followMessages.current = true;
@@ -201,27 +250,110 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
   const loadOlder = async () => {
     const oldest = messages[0];
     if (!oldest || loadingOlder) return;
+    const version = timelineVersion.current;
     setLoadingOlder(true);
     setHistoryError(null);
     try {
       const result = await api.messages(oldest.id, PAGE_SIZE);
+      if (timelineVersion.current !== version) return;
       const row = listRef.current?.querySelector('[data-message-id="' + oldest.id + '"]');
       if (row) historyPosition.current = { id: oldest.id, top: row.getBoundingClientRect().top };
       setHasMore(result.messages.length === PAGE_SIZE);
       setMessages((previous) => mergeMessages(previous, result.messages));
     } catch {
-      setHistoryError('older');
+      if (timelineVersion.current === version) setHistoryError('older');
     } finally {
-      setLoadingOlder(false);
+      if (timelineVersion.current === version) setLoadingOlder(false);
     }
   };
 
   const publish = (message: Message) => {
+    liveTail.current = [...liveTail.current.slice(1 - PAGE_SIZE), message];
+    if (archive.current) {
+      jumpToLatest();
+      return;
+    }
     jumpToLatest();
     setMessages((previous) =>
       previous.some((item) => item.id === message.id) ? previous : mergeMessages(previous, [message]),
     );
   };
+
+  const openNotification = useCallback(async (item: MentionNotification) => {
+    noticeRequest.current?.abort();
+    const request = new AbortController();
+    noticeRequest.current = request;
+    setOpeningNotification(item.id);
+    setNotificationError(null);
+    try {
+      const existing = listRef.current?.querySelector('[data-message-id="' + item.messageId + '"]');
+      if (!existing) {
+        const context = await api.messageWindow(item.messageId, request.signal);
+        if (request.signal.aborted) return;
+        timelineVersion.current++;
+        archive.current = context.hasNewer;
+        setHistorical(context.hasNewer);
+        setHasMore(context.hasMore);
+        setMessages(context.hasNewer ? context.messages : mergeLiveTail(context.messages, liveTail.current));
+        setLoading(false);
+        setLoadingOlder(false);
+        setHistoryError(null);
+      }
+      followMessages.current = false;
+      focusMessage.current = item.messageId;
+      setHighlighted({ id: item.messageId });
+      setNotificationsOpen(false);
+      dismissToast();
+      if (!item.readAt) void read({ id: item.id });
+    } catch {
+      if (!request.signal.aborted) {
+        setNotificationError('Impossible d’ouvrir le message.');
+        setNotificationsOpen(true);
+      }
+    } finally {
+      if (noticeRequest.current === request) {
+        noticeRequest.current = null;
+        setOpeningNotification(null);
+      }
+    }
+  }, [dismissToast, read]);
+
+  useEffect(() => {
+    const request = new AbortController();
+    const openFromSystem = async (id: number) => {
+      try {
+        const { notification } = await api.notification(id, request.signal);
+        if (!request.signal.aborted) await openNotification(notification);
+      } catch {
+        if (!request.signal.aborted) {
+          setNotificationError('Impossible d’ouvrir cette notification.');
+          setNotificationsOpen(true);
+        }
+      }
+    };
+    const fromWorker = (event: MessageEvent) => {
+      const data = event.data;
+      if (data?.type === 'openMentionNotification' && data.roomId === room.id && Number.isSafeInteger(data.notificationId) && data.notificationId > 0) {
+        void openFromSystem(data.notificationId);
+      }
+    };
+    const url = new URL(location.href);
+    const id = Number(url.searchParams.get('notification'));
+    if (Number.isSafeInteger(id) && id > 0) {
+      void openFromSystem(id).then(() => {
+        if (!request.signal.aborted) {
+          url.searchParams.delete('notification');
+          history.replaceState(null, '', url);
+        }
+      });
+    }
+    navigator.serviceWorker?.addEventListener('message', fromWorker);
+    return () => {
+      request.abort();
+      noticeRequest.current?.abort();
+      navigator.serviceWorker?.removeEventListener('message', fromWorker);
+    };
+  }, [openNotification, room.id]);
 
   return (
     <Box sx={{ height: '100vh', '@supports (height: 100dvh)': { height: '100dvh' }, display: 'flex', flexDirection: 'column', bgcolor: chatColors.background }}>
@@ -232,8 +364,11 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
         onlineIds={onlineIds}
         connection={connection}
         hasCall={Boolean(call)}
+        unreadNotifications={feed.page.unread}
+        notificationsOpen={notificationsOpen}
         onCall={() => setCallOpen(true)}
         onDocuments={() => setDocOpen(true)}
+        onNotifications={() => { setNotificationError(null); setNotificationsOpen(true); dismissToast(); void feed.load(); }}
         onAdmin={onAdmin}
         onStats={() => setStatsOpen(true)}
         onLogout={onLogout}
@@ -256,7 +391,7 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
           >
             {historyError && (
               <Alert severity="error" sx={{ mt: 1.5 }} action={(
-                <Button color="inherit" size="small" onClick={() => void (historyError === 'recent' ? loadRecent() : loadOlder())}>
+                <Button color="inherit" size="small" onClick={() => void (historyError === 'recent' ? loadRecent(undefined, false, historical) : loadOlder())}>
                   Réessayer
                 </Button>
               )}>
@@ -309,6 +444,7 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
                         sender={usersById.get(message.user.id) ?? message.user}
                         own={message.user.id === user.id}
                         groupStart={groupStart}
+                        highlighted={highlighted?.id === message.id}
                       />
                     </Fragment>
                   );
@@ -317,13 +453,14 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
             )}
           </Box>
         </Box>
-        {!atEnd && messages.length > 0 && (
+        {(!atEnd || historical) && messages.length > 0 && (
           <Box sx={{ position: 'absolute', bottom: 12, insetInline: 0, maxWidth: 980, mx: 'auto', px: { xs: 1.65, sm: 3 }, display: 'flex', justifyContent: 'flex-end', pointerEvents: 'none' }}>
             <Button
               variant="contained"
               disableElevation
               startIcon={<ArrowDownwardRoundedIcon fontSize="small" />}
               onClick={jumpToLatest}
+              disabled={loading && historical}
               sx={{
                 pointerEvents: 'auto', fontWeight: 700, textTransform: 'none', borderRadius: '9px',
                 bgcolor: chatColors.accent, '&:hover': { bgcolor: '#0d524b' },
@@ -334,7 +471,19 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
           </Box>
         )}
       </Box>
-      <ChatComposer onPublished={publish} />
+      <ChatComposer onPublished={publish} members={users} ownId={user.id} />
+
+      <NotificationsDrawer open={notificationsOpen} onClose={() => setNotificationsOpen(false)} feed={feed}
+        opening={openingNotification} openError={notificationError} onOpenMessage={(item) => void openNotification(item)} />
+      {feed.toast && (
+        <Snackbar key={feed.toast.id} open={!notificationsOpen} autoHideDuration={5500} onClose={dismissToast}
+          anchorOrigin={{ horizontal: 'right', vertical: 'top' }} sx={{ mt: { xs: 7, sm: 8 } }}>
+          <Alert severity="info" role="status" sx={{ alignItems: 'center', maxWidth: '100%', overflowWrap: 'anywhere' }}
+            action={<Button color="inherit" size="small" onClick={() => { if (feed.toast) void openNotification(feed.toast); }}>Voir</Button>}>
+            {mentionLabel(feed.toast)}
+          </Alert>
+        </Snackbar>
+      )}
 
       <DocDrawer open={docOpen} onClose={() => setDocOpen(false)} socket={socket} />
       {(user.role === 'admin' || user.role === 'superadmin') && <AdminDialog open={statsOpen} onClose={() => setStatsOpen(false)} />}

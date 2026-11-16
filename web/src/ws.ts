@@ -1,9 +1,10 @@
-import type { CallInfo, Message, User } from './types';
+import type { CallInfo, MentionNotification, Message, User } from './types';
 
 export interface WsEvent {
   type: string;
   message?: Message;
   messages?: Message[];
+  notification?: MentionNotification;
   user?: User;
   online?: number[];
   call?: CallInfo | null;

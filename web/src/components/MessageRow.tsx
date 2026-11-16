@@ -2,16 +2,17 @@ import AttachFileOutlinedIcon from '@mui/icons-material/AttachFileOutlined';
 import DownloadOutlinedIcon from '@mui/icons-material/DownloadOutlined';
 import SmartToyOutlinedIcon from '@mui/icons-material/SmartToyOutlined';
 import { Avatar, Box, ButtonBase, CircularProgress, Link, Tooltip, Typography } from '@mui/material';
-import { useState } from 'react';
+import { Fragment, useState, type ReactNode } from 'react';
 import { saveFile } from '../api';
 import { chatColors } from '../theme';
-import type { Message, MessageFile, User } from '../types';
+import type { Mention, Message, MessageFile, User } from '../types';
 
 interface Props {
   message: Message;
   sender: User;
   own: boolean;
   groupStart: boolean;
+  highlighted: boolean;
 }
 
 const hours = new Intl.DateTimeFormat('fr-FR', { hour: '2-digit', minute: '2-digit' });
@@ -19,36 +20,55 @@ const assistantColor = '#604785';
 const assistantBackground = '#f3eef9';
 const urlPattern = /(https?:\/\/[^\s<>"«»]+)/gi;
 
-function MessageText({ content }: { content: string }) {
+function linkText(content: string) {
+  return content.split(urlPattern).map((part, index) => {
+    if (index % 2 === 0) return part;
+    const href = part.replace(/[.,!?;]+$/, '');
+    let url: URL;
+    try {
+      url = new URL(href);
+    } catch {
+      return part;
+    }
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return part;
+
+    return (
+      <span key={index}>
+        <Link
+          href={url.href}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={href}
+          underline="always"
+          sx={{ color: chatColors.accent, textUnderlineOffset: '0.15em', fontWeight: 650 }}
+        >
+          {href.length <= 80 ? href : url.hostname + ' / …'}
+        </Link>
+        {part.slice(href.length)}
+      </span>
+    );
+  });
+}
+
+function MessageText({ content, mentions }: { content: string; mentions: Mention[] }) {
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  for (const { start, end, userId } of mentions) {
+    if (start < cursor || end <= start || end > content.length) continue;
+    parts.push(<Fragment key={'text-' + cursor}>{linkText(content.slice(cursor, start))}</Fragment>);
+    parts.push(
+      <Box key={'mention-' + start} component="strong" data-mention={userId === null ? 'room' : 'person'} sx={{
+        fontWeight: 750, color: chatColors.accent, bgcolor: '#dbeee8', borderRadius: '4px', px: 0.35, boxDecorationBreak: 'clone',
+      }}>
+        {content.slice(start, end)}
+      </Box>,
+    );
+    cursor = end;
+  }
+  parts.push(<Fragment key={'text-' + cursor}>{linkText(content.slice(cursor))}</Fragment>);
   return (
     <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', lineHeight: 1.57, fontSize: '0.91rem' }}>
-      {content.split(urlPattern).map((part, index) => {
-        if (index % 2 === 0) return part;
-        const href = part.replace(/[.,!?;]+$/, '');
-        let url: URL;
-        try {
-          url = new URL(href);
-        } catch {
-          return part;
-        }
-        if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return part;
-
-        return (
-          <span key={index}>
-            <Link
-              href={url.href}
-              target="_blank"
-              rel="noopener noreferrer"
-              title={href}
-              underline="always"
-              sx={{ color: chatColors.accent, textUnderlineOffset: '0.15em', fontWeight: 650 }}
-            >
-              {href.length <= 80 ? href : url.hostname + ' / …'}
-            </Link>
-            {part.slice(href.length)}
-          </span>
-        );
-      })}
+      {parts}
     </Typography>
   );
 }
@@ -102,7 +122,7 @@ function FileDownload({ file }: { file: MessageFile }) {
   );
 }
 
-export default function MessageRow({ message, sender, own, groupStart }: Props) {
+export default function MessageRow({ message, sender, own, groupStart, highlighted }: Props) {
   const time = hours.format(new Date(message.createdAt));
   const isBot = message.user.isBot;
   const author = own ? 'Vous' : isBot ? 'Assistant' : sender.name;
@@ -158,6 +178,7 @@ export default function MessageRow({ message, sender, own, groupStart }: Props) 
         )}
         <Box
           data-message-id={message.id}
+          tabIndex={highlighted ? -1 : undefined}
           title={groupStart ? undefined : time}
           sx={{
             minWidth: 0, maxWidth: '100%', px: 1.45, py: 0.95, bgcolor: bubbleColor,
@@ -165,9 +186,11 @@ export default function MessageRow({ message, sender, own, groupStart }: Props) 
             borderRadius: '13px',
             borderTopLeftRadius: !own && groupStart ? '5px' : undefined,
             borderTopRightRadius: own && groupStart ? '5px' : undefined,
+            outline: highlighted ? '2px solid #378578' : undefined,
+            outlineOffset: 2,
           }}
         >
-          {!attachmentOnly && <MessageText content={message.content} />}
+          {!attachmentOnly && <MessageText content={message.content} mentions={message.mentions ?? []} />}
           {files.length > 0 && (
             <Box sx={{ display: 'grid', minWidth: 0, gap: 0.7, mt: attachmentOnly ? 0 : 0.8 }}>
               {files.map((file) => <FileDownload key={file.id} file={file} />)}

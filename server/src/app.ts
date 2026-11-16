@@ -9,12 +9,13 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { z } from 'zod';
 import { hashPassword } from './auth.js';
 import type { Config } from './config.js';
-import { DB, type CallRow, type FileEventListRow, type FileListRow, type FileRow, type FolderRow, type MessageRow, type UserRow } from './db.js';
+import { DB, type CallRow, type FileEventListRow, type FileListRow, type FileRow, type FolderRow, type MentionNotificationRow, type MessageRow, type UserRow } from './db.js';
 import { deriveDocument, HttpError, type DeriveKind } from './llm/derive.js';
 import { handleCommand } from './llm/run.js';
 import { chunkText, extractText } from './llm/rag.js';
 import { pricesFor } from './llm/pricing.js';
 import { isAudioMime, sttConfigured, transcribeFile } from './llm/stt.js';
+import { mentionHints, mentionRecipients, positiveId, resolveMentions, type Mention } from './mentions.js';
 import { mountRoomAdmin, parseRoomId, publicAccount } from './room-admin.js';
 import { LEGACY_ROOM_ID, RoomDirectory, type Account } from './rooms.js';
 
@@ -60,6 +61,7 @@ export interface SerializedMessage {
   createdAt: string;
   user: PublicUser;
   files: PublicFile[];
+  mentions: Mention[];
 }
 
 export function toPublicUser(u: UserRow): PublicUser {
@@ -87,6 +89,24 @@ export function serializeMessage(db: DB, row: MessageRow): SerializedMessage {
     createdAt: new Date(row.created_at).toISOString(),
     user: toPublicUser(user),
     files: db.listFilesByMessage(row.id).map(toPublicFile),
+    mentions: JSON.parse(row.mentions) as Mention[],
+  };
+}
+
+function messagePreview(content: string): string {
+  const text = Array.from(content.replace(/\s+/g, ' ').trim());
+  return text.length > 180 ? text.slice(0, 179).join('') + '…' : text.join('');
+}
+
+function publicNotification(row: MentionNotificationRow) {
+  return {
+    id: row.id,
+    messageId: row.message_id,
+    kind: row.kind,
+    senderName: row.sender_name,
+    preview: messagePreview(row.content),
+    createdAt: new Date(row.created_at).toISOString(),
+    readAt: row.read_at === null ? null : new Date(row.read_at).toISOString(),
   };
 }
 
@@ -158,6 +178,15 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
     }
   }
 
+  function notifyUser(userId: number, payload: unknown): void {
+    const sockets = online.get(userId);
+    if (!sockets) return;
+    const data = JSON.stringify(payload);
+    for (const socket of sockets) {
+      if (socket.readyState === WebSocket.OPEN) socket.send(data);
+    }
+  }
+
   function broadcastPresence(): void {
     broadcast({ type: 'presence', online: onlineUserIds() });
   }
@@ -198,10 +227,32 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
     broadcast({ type: 'docsChanged' });
   }
 
-  function postMessage(userId: number, content: string): SerializedMessage {
-    const row = db.insertMessage(userId, content);
+  function saveUserMessage(userId: number, content: string, hints: Mention[] = [], useMentions = true) {
+    const members = useMentions && content.includes('@') ? directory.listMembers(roomId) : [];
+    const mentions = members.length ? resolveMentions(content, members, hints) : [];
+    const row = db.insertMessage(userId, content, mentions);
+    const notifications = db.createMentionNotifications(row.id, mentionRecipients(userId, mentions, members));
+    return { row, notifications };
+  }
+
+  function publishUserMessage({ row, notifications }: ReturnType<typeof saveUserMessage>): SerializedMessage {
     const msg = serializeMessage(db, row);
     broadcast({ type: 'message', message: msg });
+    if (notifications.length) {
+      const preview = messagePreview(msg.content);
+      for (const { id, kind, recipientId } of notifications) {
+        notifyUser(recipientId, {
+          type: 'notificationsChanged',
+          notification: { id, kind, messageId: msg.id, senderName: msg.user.name, preview, createdAt: msg.createdAt, readAt: null },
+        });
+      }
+    }
+    return msg;
+  }
+
+  function postMessage(userId: number, content: string, hints: Mention[] = []): SerializedMessage {
+    const publication = db.transaction(() => saveUserMessage(userId, content, hints));
+    const msg = publishUserMessage(publication);
     if (content.trimStart().startsWith('/')) {
       void handleCommand(
         {
@@ -214,7 +265,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
             broadcast({ type: 'message', message: serializeMessage(db, botRow) });
           },
         },
-        { id: row.id, content: row.content },
+        { id: msg.id, content: msg.content },
       );
     }
     return msg;
@@ -326,6 +377,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       users: [...members.values()].map((member) => ({
         ...publicAccount(directory, member),
         online: onlineIds.has(member.id),
+        mentionable: member.room_id === roomId && member.removed_at === null,
       })),
     });
   });
@@ -413,8 +465,23 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
     res.json({ messages: rows.reverse().map((r) => serializeMessage(db, r)) });
   });
 
+  app.get('/api/messages/around/:id', (req, res) => {
+    const id = positiveId.safeParse(Number(req.params.id));
+    const row = id.success ? db.getMessageById(id.data) : undefined;
+    if (!row) {
+      res.status(404).json({ error: 'Message introuvable' });
+      return;
+    }
+    const side = 25;
+    const older = db.listMessages(side + 1, row.id);
+    const newer = db.listMessagesAfter(side + 1, row.id);
+    const messages = [...older.slice(0, side).reverse(), row, ...newer.slice(0, side)];
+    res.json({ messages: messages.map((item) => serializeMessage(db, item)), hasMore: older.length > side, hasNewer: newer.length > side });
+  });
+
   const postSchema = z.object({
     content: z.string().trim().min(1).max(4000),
+    mentions: mentionHints.optional(),
   });
 
   app.post('/api/messages', (req, res) => {
@@ -423,7 +490,52 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       res.status(400).json({ error: 'content requis (1-4000 caractères)' });
       return;
     }
-    res.status(201).json({ message: postMessage(req.user?.id ?? -1, parsed.data.content) });
+    res.status(201).json({ message: postMessage(req.user?.id ?? -1, parsed.data.content, parsed.data.mentions) });
+  });
+
+  const notificationsQuery = z.object({
+    limit: z.coerce.number().int().min(1).max(100).default(30),
+    before: z.coerce.number().pipe(positiveId).optional(),
+  });
+
+  app.get('/api/notifications', (req, res) => {
+    const parsed = notificationsQuery.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Paramètres invalides' });
+      return;
+    }
+    const userId = req.user?.id ?? -1;
+    const { limit, before } = parsed.data;
+    const rows = db.listMentionNotifications(userId, limit + 1, before);
+    const page = rows.slice(0, limit);
+    res.json({ notifications: page.map(publicNotification), unread: db.unreadMentions(userId), nextBefore: rows.length > limit ? page[page.length - 1].id : null });
+  });
+
+  app.get('/api/notifications/:id', (req, res) => {
+    const id = positiveId.safeParse(Number(req.params.id));
+    const row = id.success ? db.getMentionNotification(req.user?.id ?? -1, id.data) : undefined;
+    if (!row) {
+      res.status(404).json({ error: 'Notification introuvable' });
+      return;
+    }
+    res.json({ notification: publicNotification(row) });
+  });
+
+  const notificationRead = z.union([z.object({ id: positiveId }).strict(), z.object({ through: positiveId }).strict()]);
+  app.patch('/api/notifications/read', (req, res) => {
+    const parsed = notificationRead.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Notification ou borne de lecture requise' });
+      return;
+    }
+    const userId = req.user?.id ?? -1;
+    if ('id' in parsed.data && !db.getMentionNotification(userId, parsed.data.id)) {
+      res.status(404).json({ error: 'Notification introuvable' });
+      return;
+    }
+    db.markMentionsRead(userId, parsed.data);
+    notifyUser(userId, { type: 'notificationsChanged' });
+    res.json({ unread: db.unreadMentions(userId) });
   });
 
   const upload = multer({
@@ -474,6 +586,15 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       const displayName = uploadedName(uploaded);
       const post = req.body.post !== 'false';
       const text = typeof req.body.message === 'string' ? req.body.message.trim().slice(0, 4000) : '';
+      let hints: Mention[] = [];
+      if (post && text && typeof req.body.mentions === 'string') {
+        try {
+          const parsed = mentionHints.safeParse(JSON.parse(req.body.mentions));
+          if (parsed.success) hints = parsed.data;
+        } catch {
+          // Le texte du message reste utilisable sans indication de sélection.
+        }
+      }
       const userId = req.user?.id ?? -1;
       let folderId: number | null = null;
       if (req.body.folderId !== undefined && req.body.folderId !== '' && req.body.folderId !== 'root') {
@@ -484,17 +605,16 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
           return;
         }
       }
-      const { fileRow, messageRow } = db.transaction(() => {
-        const messageRow = post ? db.insertMessage(userId, text || `📎 ${displayName}`) : null;
-        const fileRow = db.insertFile(userId, messageRow?.id ?? null, displayName, uploaded.mimetype || 'application/octet-stream', uploaded.size, uploaded.filename, null, folderId);
+      const { fileRow, publication } = db.transaction(() => {
+        const publication = post ? saveUserMessage(userId, text || `📎 ${displayName}`, hints, Boolean(text)) : null;
+        const fileRow = db.insertFile(userId, publication?.row.id ?? null, displayName, uploaded.mimetype || 'application/octet-stream', uploaded.size, uploaded.filename, null, folderId);
         logDocEvent(userId, { fileId: fileRow.id, folderId, action: 'file_created', detail: `« ${displayName} » déposé (${(uploaded.size / 1048576).toFixed(1)} Mo)` });
-        return { fileRow, messageRow };
+        return { fileRow, publication };
       });
       registered = true;
       docsChanged();
       void indexUploadedDocument(fileRow);
-      const message = messageRow ? serializeMessage(db, messageRow) : null;
-      if (message) broadcast({ type: 'message', message });
+      const message = publication ? publishUserMessage(publication) : null;
       res.status(201).json({ file: toPublicFile(fileRow), message });
     } catch (err) {
       if (!registered) discardUploadedFile(uploaded);
