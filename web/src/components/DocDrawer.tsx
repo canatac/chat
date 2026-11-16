@@ -18,6 +18,7 @@ import RecordVoiceOverIcon from '@mui/icons-material/RecordVoiceOver';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import RenameIcon from '@mui/icons-material/DriveFileRenameOutline';
 import SearchIcon from '@mui/icons-material/Search';
+import SelectAllIcon from '@mui/icons-material/SelectAll';
 import SummarizeIcon from '@mui/icons-material/Summarize';
 import UploadFileOutlinedIcon from '@mui/icons-material/UploadFileOutlined';
 import ViewListOutlinedIcon from '@mui/icons-material/ViewListOutlined';
@@ -61,6 +62,7 @@ import { documentsFromDrop, documentsFromPicker, importDocuments, type ExternalD
 import { formatFileSize } from '../formatFileSize';
 import type { FileFilters, FileItem, FileSort, Folder } from '../types';
 import useDocumentDrag, { documentDropAt, documentDropAttributes, documentDropStyle, type DropTarget } from '../useDocumentDrag';
+import useDocumentSelection, { documentIds, type SelectedDocuments } from '../useDocumentSelection';
 import type { ChatSocket } from '../ws';
 import DocumentExplorerList, { explorerColors, type DocumentItem, type DocumentView } from './DocumentExplorerList';
 import DocumentPlaces, { type DocumentPlace } from './DocumentPlaces';
@@ -80,6 +82,7 @@ type NameEdit =
 type FileDetail = Awaited<ReturnType<typeof api.fileDetail>>;
 type FileListing = Awaited<ReturnType<typeof api.files>> & { scope: string };
 type NavigationHistory = { places: DocumentPlace[]; index: number };
+type DocumentAction = DocumentItem | { kind: 'selection'; documents: SelectedDocuments; origin: number | null | undefined };
 
 const dateTime = new Intl.DateTimeFormat('fr-FR', { dateStyle: 'medium', timeStyle: 'short' });
 const FILE_LIMIT = 200;
@@ -97,6 +100,10 @@ const ACTION_LABELS: Record<string, string> = {
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
+}
+
+function selectionLabel(count: number): string {
+  return count === 1 ? '1 élément' : `${count} éléments`;
 }
 
 const buttonStyle = {
@@ -151,9 +158,9 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
   const [menu, setMenu] = useState<{ anchor: HTMLElement; target: DocumentItem } | null>(null);
   const [nameDialog, setNameDialog] = useState<NameEdit | null>(null);
   const [nameValue, setNameValue] = useState('');
-  const [moveDialog, setMoveDialog] = useState<DocumentItem | null>(null);
+  const [moveDialog, setMoveDialog] = useState<DocumentAction | null>(null);
   const [moveTarget, setMoveTarget] = useState<number | null>(null);
-  const [deleteDialog, setDeleteDialog] = useState<DocumentItem | null>(null);
+  const [deleteDialog, setDeleteDialog] = useState<DocumentAction | null>(null);
   const [deleteRecursive, setDeleteRecursive] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
   const [dialogBusy, setDialogBusy] = useState(false);
@@ -172,6 +179,11 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
   const recent = !search && place === 'recent';
   const showPaths = Boolean(search) || recent;
   const folderScope = search ? 'search:' + search : 'place:' + place;
+  const selection = useDocumentSelection(JSON.stringify([open, folderScope, filters]));
+  const selectedCount = (selection.documents?.file.size ?? 0) + (selection.documents?.folder.size ?? 0);
+  const selectedBatch: DocumentAction | null = selection.documents && selectedCount > 0
+    ? { kind: 'selection', documents: selection.documents, origin: showPaths ? undefined : currentId }
+    : null;
   const sort = recent ? recentSort : folderSort;
   const fileRequest = useMemo(() => ({
     query: search,
@@ -293,6 +305,22 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
 
   const breadcrumb = useMemo(() => pathFor(currentId), [currentId, pathFor]);
   const childFolders = showPaths ? [] : foldersByParent.get(currentId) ?? [];
+
+  const beginSelection = () => {
+    setGroupSource(null);
+    selection.start();
+  };
+
+  const selectAll = async () => {
+    if (!visibleListing || uploading || dialogBusy) return;
+    setGroupSource(null);
+    setActionError(null);
+    try {
+      await selection.selectAll((signal) => api.documentIds(fileRequest, signal));
+    } catch (error) {
+      setActionError(errorMessage(error, 'Impossible de sélectionner les documents.'));
+    }
+  };
 
   const showPlace = (next: DocumentPlace) => {
     setActionError(null);
@@ -483,21 +511,33 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
     }, () => setNameDialog(null), 'Impossible d’enregistrer ce nom.');
   };
 
-  const openMove = (target: DocumentItem) => {
+  const openMove = (target: DocumentAction) => {
     setMenu(null);
     setDialogError(null);
     setMoveDialog(target);
-    setMoveTarget(target.kind === 'folder' ? target.item.parentId : target.item.folderId);
+    setMoveTarget(target.kind === 'selection' ? target.origin ?? null : target.kind === 'folder' ? target.item.parentId : target.item.folderId);
   };
 
-  const canMove = (item: DocumentItem, destination: number | null) => item.kind === 'file'
-    ? item.item.folderId !== destination
-    : item.item.parentId !== destination && !pathFor(destination).some(({ id }) => id === item.item.id);
+  const canMove = (item: DocumentAction, destination: number | null) => {
+    if (item.kind === 'file') return item.item.folderId !== destination;
+    if (item.kind === 'selection') {
+      return item.origin !== destination && !pathFor(destination).some(({ id }) => item.documents.folder.has(id));
+    }
+    return item.item.parentId !== destination && !pathFor(destination).some(({ id }) => id === item.item.id);
+  };
 
-  const moveDocument = async (item: DocumentItem, destination: number | null) => {
+  const moveDocument = async (item: DocumentAction, destination: number | null) => {
+    const placeName = destination === null ? 'à la racine' : 'dans « ' + (folderById.get(destination)?.name ?? 'le dossier') + ' »';
+    if (item.kind === 'selection') {
+      const moved = await api.documentBatch({ action: 'move', destination, ...documentIds(item.documents) });
+      const count = moved.files + moved.folders;
+      selection.clear();
+      setActionNotice(count ? `${selectionLabel(count)} déplacé${count === 1 ? '' : 's'} ${placeName}.` : 'Les éléments sont déjà dans ce dossier.');
+      return;
+    }
     if (item.kind === 'file') await api.patchFile(item.item.id, { folderId: destination });
     else await api.patchFolder(item.item.id, { parentId: destination });
-    setActionNotice(destination === null ? 'Élément déplacé à la racine.' : 'Déplacé dans « ' + (folderById.get(destination)?.name ?? 'le dossier') + ' ».');
+    setActionNotice(destination === null ? 'Élément déplacé à la racine.' : `Déplacé ${placeName}.`);
   };
 
   const submitMove = async () => {
@@ -509,7 +549,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
     );
   };
 
-  const openDelete = (target: DocumentItem) => {
+  const openDelete = (target: DocumentAction) => {
     setMenu(null);
     setDialogError(null);
     setDeleteDialog(target);
@@ -519,9 +559,15 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
   const submitDelete = async () => {
     if (!deleteDialog) return;
     await runDialogAction(
-      () => deleteDialog.kind === 'folder'
-        ? api.deleteFolder(deleteDialog.item.id, deleteRecursive)
-        : api.deleteFile(deleteDialog.item.id),
+      async () => {
+        if (deleteDialog.kind === 'selection') {
+          const deleted = await api.documentBatch({ action: 'delete', ...documentIds(deleteDialog.documents) });
+          const count = deleted.files + deleted.folders;
+          selection.clear();
+          setActionNotice(count ? `${selectionLabel(count)} supprimé${count === 1 ? '' : 's'}.` : 'La sélection était déjà supprimée.');
+        } else if (deleteDialog.kind === 'folder') await api.deleteFolder(deleteDialog.item.id, deleteRecursive);
+        else await api.deleteFile(deleteDialog.item.id);
+      },
       () => setDeleteDialog(null),
       'Suppression impossible.',
     );
@@ -544,23 +590,30 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
   };
 
   const movePath = pathFor(moveTarget);
-  const moveFolders = (foldersByParent.get(moveTarget) ?? []).filter(({ id }) => moveDialog?.kind !== 'folder' || id !== moveDialog.item.id);
+  const moveFolders = (foldersByParent.get(moveTarget) ?? []).filter(({ id }) => {
+    if (moveDialog?.kind === 'selection') return !moveDialog.documents.folder.has(id);
+    return moveDialog?.kind !== 'folder' || id !== moveDialog.item.id;
+  });
+  const dragAction = (source: DocumentItem): DocumentAction => selectedBatch && selection.documents?.[source.kind].has(source.item.id) ? selectedBatch : source;
   const drag = useDocumentDrag({
-    enabled: open && !uploading && !dialogBusy,
+    enabled: open && !uploading && !dialogBusy && !selection.loading,
+    label: (source) => dragAction(source).kind === 'selection' ? selectionLabel(selectedCount) : source.item.name,
     canDrop: (source, target) => {
+      const action = dragAction(source);
       if (target.kind === 'destination') return true;
-      if (target.kind === 'folder') return canMove(source, target.id);
-      return source.kind === 'file' && source.item.id !== target.id;
+      if (target.kind === 'folder') return canMove(action, target.id);
+      return action.kind === 'file' && action.item.id !== target.id;
     },
     onDrop: (source, target) => {
-      if (target.kind === 'destination') openMove(source);
-      else if (target.kind === 'folder') void runFileAction(() => moveDocument(source, target.id), 'Déplacement impossible.');
-      else if (source.kind === 'file') {
+      const action = dragAction(source);
+      if (target.kind === 'destination') openMove(action);
+      else if (target.kind === 'folder') void runFileAction(() => moveDocument(action, target.id), 'Déplacement impossible.');
+      else if (action.kind === 'file') {
         const targetFile = visibleListing?.files.find(({ id }) => id === target.id);
-        if (targetFile) openGroup(source.item, targetFile);
+        if (targetFile) openGroup(action.item, targetFile);
       }
     },
-    onChoose: openMove,
+    onChoose: (source) => openMove(dragAction(source)),
   });
 
   const closeExplorer = () => {
@@ -569,6 +622,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
     setMenu(null);
     setPlacesAnchor(null);
     setGroupSource(null);
+    selection.clear();
     setActionNotice(null);
     setActionError(null);
     onClose();
@@ -578,19 +632,38 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
   const editingFile = nameDialog?.mode === 'rename-file';
   const grouping = nameDialog?.mode === 'group-files' ? nameDialog : null;
   const nameDialogTitle = grouping ? 'Regrouper les fichiers' : nameDialog?.mode === 'new-folder' ? 'Nouveau dossier' : editingFile ? 'Renommer le fichier' : 'Renommer le dossier';
-  const places = <DocumentPlaces foldersByParent={foldersByParent} currentPath={breadcrumb} active={search ? undefined : place} onNavigate={showPlace} />;
+  const places = (
+    <DocumentPlaces
+      foldersByParent={foldersByParent}
+      currentPath={breadcrumb}
+      active={search ? undefined : place}
+      onNavigate={showPlace}
+      onFolderMenu={(folder, anchor) => setMenu({ anchor, target: { kind: 'folder', item: folder } })}
+      drag={drag}
+    />
+  );
 
   return (
     <Drawer
       anchor="right"
       open={open}
-      onClose={closeExplorer}
+      onClose={(_event, reason) => {
+        if (reason === 'escapeKeyDown' && selection.documents) selection.clear();
+        else closeExplorer();
+      }}
       slotProps={{
         backdrop: { sx: { bgcolor: 'rgba(13, 34, 39, 0.42)' } },
         paper: {
           role: 'dialog',
           'aria-modal': true,
           'aria-labelledby': 'doc-explorer-title',
+          onKeyDown: (event: React.KeyboardEvent<HTMLElement>) => {
+            if (!(event.ctrlKey || event.metaKey) || event.altKey || event.key.toLowerCase() !== 'a') return;
+            if (!(event.target instanceof HTMLElement) || !event.currentTarget.contains(event.target)) return;
+            if (event.target.closest('input, textarea, select, [contenteditable="true"]') || menu || placesAnchor || detail || moveDialog || deleteDialog || nameDialog) return;
+            event.preventDefault();
+            void selectAll();
+          },
           onDragOver: onExternalDragOver,
           onDrop: onExternalDrop,
           onDragLeave: (event: React.DragEvent<HTMLElement>) => {
@@ -776,6 +849,33 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
             {loading && <LinearProgress aria-label="Actualisation des documents" sx={{ position: 'absolute', height: 2, left: 0, right: 0, bottom: 0 }} />}
           </Box>
 
+          {selection.documents && (
+            <Box role="group" aria-label="Actions de sélection" aria-busy={selection.loading} sx={{
+              display: 'grid', alignItems: 'center', gap: 0.4, flexShrink: 0, px: horizontalPadding, py: 0.4,
+              gridTemplateColumns: { xs: 'minmax(0, 1fr) auto', sm: 'minmax(0, 1fr) auto auto' },
+              gridTemplateAreas: { xs: '"count close" "actions actions"', sm: '"count actions close"' },
+              bgcolor: explorerColors.accentSoft, borderBottom: '1px solid ' + explorerColors.border,
+            }}>
+              <Typography role="status" variant="body2" sx={{ gridArea: 'count', fontWeight: 750, minWidth: 0 }}>
+                {selection.loading ? 'Sélection en cours…' : `${selectionLabel(selectedCount)} sélectionné${selectedCount === 1 ? '' : 's'}`}
+              </Typography>
+              <Box sx={{ gridArea: 'actions', display: 'flex', flexWrap: 'wrap', gap: 0.35 }}>
+                <Button startIcon={<SelectAllIcon />} onClick={() => void selectAll()} disabled={selection.loading || uploading || dialogBusy || !visibleListing} sx={{ ...buttonStyle, color: explorerColors.accent }}>
+                  Tout sélectionner
+                </Button>
+                <Button startIcon={<DriveFileMoveIcon />} onClick={() => { if (selectedBatch) openMove(selectedBatch); }} disabled={!selectedBatch || selection.loading || dialogBusy} sx={{ ...buttonStyle, color: explorerColors.accent }}>
+                  Déplacer…
+                </Button>
+                <Button startIcon={<DeleteIcon />} color="error" onClick={() => { if (selectedBatch) openDelete(selectedBatch); }} disabled={!selectedBatch || selection.loading || dialogBusy} sx={buttonStyle}>
+                  Supprimer…
+                </Button>
+              </Box>
+              <IconButton aria-label="Quitter la sélection" onClick={selection.clear} sx={{ gridArea: 'close', color: explorerColors.muted, width: 40, height: 40 }}>
+                <CloseIcon fontSize="small" />
+              </IconButton>
+            </Box>
+          )}
+
           <Box ref={contentRef} data-document-scroll {...(!showPaths ? documentDropAttributes({ kind: 'folder', id: currentId }) : {})} sx={{ px: horizontalPadding, pt: { xs: 1.55, sm: 2 }, pb: 3, flex: 1, minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain', ...documentDropStyle }} aria-busy={loading || loadingMore}>
             {actionError && <Alert severity="error" onClose={() => setActionError(null)} sx={{ mb: 2 }}>{actionError}</Alert>}
             {actionNotice && <Alert severity="success" role="status" onClose={() => setActionNotice(null)} closeText="Fermer" sx={{ mb: 1.5 }}>{actionNotice}</Alert>}
@@ -807,7 +907,10 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
               onDownload={(file) => void download(file)}
               onMenu={(target, anchor) => setMenu({ target, anchor })}
               drag={drag}
-              dragDisabled={uploading || dialogBusy}
+              dragDisabled={uploading || dialogBusy || selection.loading}
+              selection={selection.documents}
+              onStartSelection={beginSelection}
+              onToggleSelection={selection.toggle}
             />
             {visibleListing?.nextBefore != null && (
               <Box sx={{ display: 'flex', justifyContent: 'center', mt: 1.5 }}>
@@ -829,7 +932,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
           anchorEl={placesAnchor}
           onClose={() => setPlacesAnchor(null)}
           anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
-          slotProps={{ paper: { role: 'dialog', 'aria-label': 'Emplacements', sx: { bgcolor: '#edf3f2', width: 280, maxWidth: 'calc(100% - 32px)' } } }}
+          slotProps={{ paper: { role: 'dialog', 'aria-label': 'Emplacements', ...{ 'data-document-scroll': true }, sx: { bgcolor: '#edf3f2', width: 280, maxWidth: 'calc(100% - 32px)' } } }}
         >
           {places}
         </Popover>
@@ -877,7 +980,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
             <MenuItem onClick={() => openMove({ kind: 'file', item: menuTarget.item })}>
               <ListItemIcon><DriveFileMoveIcon fontSize="small" /></ListItemIcon>Déplacer…
             </MenuItem>
-            <MenuItem onClick={() => { setMenu(null); setActionError(null); setActionNotice(null); setGroupSource(menuTarget.item); }}>
+            <MenuItem onClick={() => { setMenu(null); selection.clear(); setActionError(null); setActionNotice(null); setGroupSource(menuTarget.item); }}>
               <ListItemIcon><CreateNewFolderOutlinedIcon fontSize="small" /></ListItemIcon>Regrouper avec un fichier…
             </MenuItem>
             <MenuItem onClick={() => void openDetail(menuTarget.item)}>
@@ -952,7 +1055,9 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
         <DialogTitle id="doc-move-title">Déplacer vers</DialogTitle>
         <DialogContent dividers>
           {dialogError && <Alert severity="error" sx={{ mb: 1 }}>{dialogError}</Alert>}
-          <Typography variant="body2" sx={{ mb: 1, overflowWrap: 'anywhere' }}>« {moveDialog?.item.name} »</Typography>
+          <Typography variant="body2" sx={{ mb: 1, overflowWrap: 'anywhere' }}>
+            {moveDialog?.kind === 'selection' ? `${selectionLabel(moveDialog.documents.file.size + moveDialog.documents.folder.size)} à déplacer` : `« ${moveDialog?.item.name ?? ''} »`}
+          </Typography>
           <Breadcrumbs aria-label="Chemin de destination" maxItems={3} sx={{ mb: 1.4, overflowWrap: 'anywhere' }}>
             <Link component="button" color="inherit" disabled={dialogBusy} aria-current={moveTarget === null ? 'page' : undefined} onClick={() => setMoveTarget(null)}>Racine</Link>
             {movePath.map((folder) => (
@@ -979,11 +1084,16 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
       </Dialog>
 
       <Dialog {...preparedDialogProps} open={Boolean(deleteDialog)} onClose={() => { if (!dialogBusy) setDeleteDialog(null); }} aria-labelledby="doc-delete-title">
-        <DialogTitle id="doc-delete-title">Supprimer {deleteDialog?.kind === 'folder' ? 'le dossier' : 'le fichier'} ?</DialogTitle>
+        <DialogTitle id="doc-delete-title">Supprimer {deleteDialog?.kind === 'selection' ? 'la sélection' : deleteDialog?.kind === 'folder' ? 'le dossier' : 'le fichier'} ?</DialogTitle>
         <DialogContent>
           <Typography variant="body2" sx={{ overflowWrap: 'anywhere' }}>
-            « {deleteDialog?.item.name} » sera supprimé définitivement.
+            {deleteDialog?.kind === 'selection'
+              ? `${selectionLabel(deleteDialog.documents.file.size + deleteDialog.documents.folder.size)} à supprimer définitivement.`
+              : `« ${deleteDialog?.item.name ?? ''} » sera supprimé définitivement.`}
           </Typography>
+          {deleteDialog?.kind === 'selection' && deleteDialog.documents.folder.size > 0 && (
+            <Typography variant="body2" sx={{ mt: 1 }}>Le contenu des dossiers sélectionnés sera aussi supprimé.</Typography>
+          )}
           {deleteDialog?.kind === 'folder' && (
             <FormControlLabel
               disabled={dialogBusy}

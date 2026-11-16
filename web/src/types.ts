@@ -76,6 +76,11 @@ export interface FileFilters {
   maxSizeKiB?: number;
 }
 
+export interface DocumentIds {
+  fileIds: number[];
+  folderIds: number[];
+}
+
 export interface Folder {
   id: number;
   name: string;

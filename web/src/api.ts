@@ -1,4 +1,4 @@
-import type { AdminStats, CallInfo, FileEvent, FileFilters, FileItem, FileSort, Folder, Message, MessageFile, Room, RoomInvitation, RoomMember, RoomSession, User } from './types';
+import type { AdminStats, CallInfo, DocumentIds, FileEvent, FileFilters, FileItem, FileSort, Folder, Message, MessageFile, Room, RoomInvitation, RoomMember, RoomSession, User } from './types';
 
 interface FileListRequest {
   query: string;
@@ -8,6 +8,26 @@ interface FileListRequest {
   recentSince?: number;
   sort: FileSort;
   filters: FileFilters;
+}
+
+function fileListParams({ query, folderId, limit, before, recentSince, sort, filters }: FileListRequest): URLSearchParams | null {
+  const params = new URLSearchParams({ limit: String(limit), sort: sort.column, direction: sort.direction });
+  if (before !== undefined) params.set('before', String(before));
+  if (query) params.set('query', query);
+  if (folderId !== undefined) params.set('folder', folderId === null ? 'root' : String(folderId));
+  if (filters.name) params.set('name', filters.name);
+  const dateFrom = filters.dateFrom ? new Date(filters.dateFrom + 'T00:00:00').getTime() : undefined;
+  const activityFrom = recentSince === undefined ? dateFrom : Math.max(recentSince, dateFrom ?? recentSince);
+  if (activityFrom !== undefined) params.set('activityFrom', String(activityFrom));
+  if (filters.dateTo) {
+    const nextDay = new Date(filters.dateTo + 'T00:00:00');
+    nextDay.setDate(nextDay.getDate() + 1);
+    if (activityFrom !== undefined && activityFrom >= nextDay.getTime()) return null;
+    params.set('activityBefore', String(nextDay.getTime()));
+  }
+  if (filters.minSizeKiB !== undefined) params.set('minBytes', String(filters.minSizeKiB * 1024));
+  if (filters.maxSizeKiB !== undefined) params.set('maxBytes', String(filters.maxSizeKiB * 1024));
+  return params;
 }
 
 const TOKEN_KEY = 'chat.token';
@@ -117,25 +137,18 @@ export const api = {
     req<{ messages: Message[] }>(`/api/messages?limit=${limit}${before !== undefined ? `&before=${before}` : ''}`, { signal }),
   send: (content: string) =>
     req<{ message: Message }>('/api/messages', { method: 'POST', body: JSON.stringify({ content }) }),
-  files: async ({ query, folderId, limit, before, recentSince, sort, filters }: FileListRequest, signal?: AbortSignal) => {
-    const params = new URLSearchParams({ limit: String(limit), sort: sort.column, direction: sort.direction });
-    if (before !== undefined) params.set('before', String(before));
-    if (query) params.set('query', query);
-    if (folderId !== undefined) params.set('folder', folderId === null ? 'root' : String(folderId));
-    if (filters.name) params.set('name', filters.name);
-    const dateFrom = filters.dateFrom ? new Date(filters.dateFrom + 'T00:00:00').getTime() : undefined;
-    const activityFrom = recentSince === undefined ? dateFrom : Math.max(recentSince, dateFrom ?? recentSince);
-    if (activityFrom !== undefined) params.set('activityFrom', String(activityFrom));
-    if (filters.dateTo) {
-      const nextDay = new Date(filters.dateTo + 'T00:00:00');
-      nextDay.setDate(nextDay.getDate() + 1);
-      if (activityFrom !== undefined && activityFrom >= nextDay.getTime()) return { files: [], nextBefore: null };
-      params.set('activityBefore', String(nextDay.getTime()));
-    }
-    if (filters.minSizeKiB !== undefined) params.set('minBytes', String(filters.minSizeKiB * 1024));
-    if (filters.maxSizeKiB !== undefined) params.set('maxBytes', String(filters.maxSizeKiB * 1024));
-    return req<{ files: FileItem[]; nextBefore: number | null }>('/api/files?' + params, { signal });
+  files: async (request: FileListRequest, signal?: AbortSignal) => {
+    const params = fileListParams(request);
+    return params ? req<{ files: FileItem[]; nextBefore: number | null }>('/api/files?' + params, { signal }) : { files: [], nextBefore: null };
   },
+  documentIds: async (request: FileListRequest, signal: AbortSignal): Promise<DocumentIds> => {
+    const params = fileListParams(request);
+    if (!params) return { fileIds: [], folderIds: [] };
+    params.set('select', 'all');
+    return req<DocumentIds>('/api/files?' + params, { signal });
+  },
+  documentBatch: (operation: DocumentIds & ({ action: 'move'; destination: number | null } | { action: 'delete' })) =>
+    req<{ files: number; folders: number }>('/api/documents/batch', { method: 'POST', body: JSON.stringify(operation) }),
   uploadFile: async (file: File, message: string, post: boolean, folderId?: number | null) => {
     const fd = new FormData();
     fd.append('file', file);

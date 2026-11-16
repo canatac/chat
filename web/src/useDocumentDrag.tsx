@@ -42,6 +42,7 @@ interface Drag {
 
 interface Options {
   enabled: boolean;
+  label: (source: DocumentItem) => string;
   canDrop: (source: DocumentItem, target: DropTarget) => boolean;
   onDrop: (source: DocumentItem, target: DropTarget) => void;
   onChoose: (source: DocumentItem) => void;
@@ -134,7 +135,7 @@ export default function useDocumentDrag(options: Options) {
           if (Math.hypot(drag.x - drag.startX, drag.y - drag.startY) < 6) return;
           if (!drag.handle.hasPointerCapture(drag.pointerId)) drag.handle.setPointerCapture(drag.pointerId);
           drag.started = true;
-          setLabel(source.item.name);
+          setLabel(optionsRef.current.label(drag.source));
           drag.frame = requestAnimationFrame(() => {
             if (current.current === drag) update(drag);
             scrollNearEdge(drag);

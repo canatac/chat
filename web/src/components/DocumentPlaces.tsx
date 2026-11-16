@@ -4,11 +4,13 @@ import FolderOpenOutlinedIcon from '@mui/icons-material/FolderOpenOutlined';
 import FolderOutlinedIcon from '@mui/icons-material/FolderOutlined';
 import HistoryIcon from '@mui/icons-material/History';
 import HomeOutlinedIcon from '@mui/icons-material/HomeOutlined';
+import MoreHorizIcon from '@mui/icons-material/MoreHoriz';
 import { Box, IconButton, List, ListItem, ListItemButton, Tooltip, Typography } from '@mui/material';
 import { useEffect, useRef, useState } from 'react';
 import { chatColors } from '../theme';
 import type { Folder } from '../types';
 import { documentDropAttributes, documentDropStyle } from '../useDocumentDrag';
+import type useDocumentDrag from '../useDocumentDrag';
 
 export type DocumentPlace = number | null | 'recent';
 
@@ -17,6 +19,8 @@ interface Props {
   currentPath: Folder[];
   active: DocumentPlace | undefined;
   onNavigate: (place: DocumentPlace) => void;
+  onFolderMenu: (folder: Folder, anchor: HTMLElement) => void;
+  drag: Pick<ReturnType<typeof useDocumentDrag>, 'surface'>;
 }
 
 const placeStyle = {
@@ -27,7 +31,7 @@ const placeStyle = {
   '&.Mui-focusVisible': { outline: '2px solid ' + chatColors.accent, outlineOffset: -2 },
 };
 
-export default function DocumentPlaces({ foldersByParent, currentPath, active, onNavigate }: Props) {
+export default function DocumentPlaces({ foldersByParent, currentPath, active, onNavigate, onFolderMenu, drag }: Props) {
   const [expanded, setExpanded] = useState<ReadonlySet<number>>(new Set());
   const lastPath = useRef('');
 
@@ -65,7 +69,7 @@ export default function DocumentPlaces({ foldersByParent, currentPath, active, o
       const toggleLabel = (isOpen ? 'Replier ' : 'Déplier ') + folder.name;
       return (
         <Box component="li" key={folder.id}>
-          <Box {...documentDropAttributes({ kind: 'folder', id: folder.id })} sx={{ display: 'flex', alignItems: 'center', minWidth: 0, pl: Math.min(depth, 5) * 1.5, borderRadius: '8px', ...documentDropStyle }}>
+          <Box {...documentDropAttributes({ kind: 'folder', id: folder.id })} sx={{ display: 'flex', alignItems: 'center', minWidth: 0, pl: Math.min(depth, 4) * 1.25, borderRadius: '8px', ...documentDropStyle }}>
             {hasChildren ? (
               <Tooltip disableInteractive title={toggleLabel}>
                 <IconButton
@@ -84,12 +88,26 @@ export default function DocumentPlaces({ foldersByParent, currentPath, active, o
               aria-current={isCurrent ? 'page' : undefined}
               aria-label={'Aller au dossier ' + folder.name}
               title={folder.name}
-              onClick={() => onNavigate(folder.id)}
-              sx={placeStyle}
+              {...drag.surface({ kind: 'folder', item: folder }, () => onNavigate(folder.id))}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                onFolderMenu(folder, event.currentTarget);
+              }}
+              sx={{ ...placeStyle, width: 'auto', flex: 1, gap: 0.6, px: 0.65 }}
             >
               {isCurrent ? <FolderOpenOutlinedIcon fontSize="small" /> : <FolderOutlinedIcon fontSize="small" />}
               <Typography component="span" noWrap sx={{ fontSize: '0.83rem', fontWeight: isCurrent ? 750 : 550 }}>{folder.name}</Typography>
             </ListItemButton>
+            <Tooltip disableInteractive title="Actions du dossier">
+              <IconButton
+                aria-label={'Actions de ' + folder.name + ' dans l’arborescence'}
+                aria-haspopup="menu"
+                onClick={(event) => onFolderMenu(folder, event.currentTarget)}
+                sx={{ width: { xs: 44, md: 34 }, height: { xs: 44, md: 38 }, flexShrink: 0, borderRadius: '8px', color: chatColors.muted }}
+              >
+                <MoreHorizIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
           </Box>
         </Box>
       );

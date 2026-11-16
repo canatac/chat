@@ -359,6 +359,8 @@ Le serveur vérifie l’accès au salon à chaque requête.
 - `POST /api/files/group` crée un dossier nommé `name` à l’emplacement de `targetId` et y place les deux fichiers. Fournir `sourceId` en JSON ou joindre `file` avec `name` et `targetId` en multipart. La création et le déplacement des fichiers sont atomiques.
 - `GET /api/files?limit=&before=&query=&folder=root|<id>` → `{files: [...], nextBefore}`. Le tri explicite utilise `sort=name|date|size` et `direction=asc|desc`. Avec ce tri, passer `nextBefore` comme `before` pour charger la suite. `name` filtre par texte contenu dans le nom. `activityFrom` (inclus) et `activityBefore` (exclu) délimitent la période en millisecondes. `minBytes` et `maxBytes` bornent la taille, valeurs limites comprises. Ces critères se combinent avec `folder` et `query`.
 - `GET /api/files/:id` → détail (métadonnées + `folderPath` + `history`)
+- `GET /api/files?select=all` renvoie `{fileIds, folderIds}` avec les mêmes critères que la liste et sans pagination. Les dossiers apparaissent dans la sélection en parcourant un dossier sans filtre de fichiers ni recherche.
+- `POST /api/documents/batch` reçoit `{action, fileIds, folderIds}` et renvoie `{files, folders}`. Pour `action: "move"`, fournir `destination` (identifiant ou `null` pour la racine). `action: "delete"` supprime les dossiers sélectionnés avec leur contenu. Les modifications et leur journal sont enregistrés dans une transaction.
 - `PATCH /api/files/:id` `{name?|folderId?}` → renommer / déplacer (409 si nom déjà pris dans le dossier cible)
 - `DELETE /api/files/:id` → supprime le fichier (disque + chunks + entrée)
 - `GET /api/folders` → `{folders: [...]}` (arbre aplati avec `parentId`)

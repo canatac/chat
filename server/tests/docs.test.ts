@@ -345,3 +345,67 @@ test('regroupe deux fichiers dans le dossier cible, avec annulation en cas d’�
   assert.equal((await j('/api/folders/' + sameName.id, { method: 'PATCH', body: JSON.stringify({ parentId: destination.id }) })).status, 409);
   assert.equal((await j('/api/folders/' + parent.id, { method: 'PATCH', body: JSON.stringify({ parentId: importedFolder.id }) })).status, 409);
 });
+
+test('sélection complète et mutations groupées sans déplacement partiel ni suppression en double', async () => {
+  const source = await mkFolder('Source du lot');
+  const destination = await mkFolder('Destination du lot');
+  const parent = await mkFolder('Pièces du lot', source.id);
+  const child = await mkFolder('Annexes du lot', parent.id);
+  const alpha = await upload('Lot Actif.txt', 'document actif', source.id);
+  const bravo = await upload('Lot Final.txt', 'document final', source.id);
+  const keep = await upload('À conserver.txt', 'à conserver', source.id);
+  const nested = await upload('Note interne.txt', 'pièce imbriquée', child.id);
+  const selection = await j(`/api/files?folder=${source.id}&select=all&sort=name&limit=1`);
+  assert.equal(selection.status, 200);
+  const all = await selection.json() as { fileIds: number[]; folderIds: number[] };
+  assert.deepEqual(new Set(all.fileIds), new Set([alpha.id, bravo.id, keep.id]));
+  assert.deepEqual(all.folderIds, [parent.id]);
+  const query = await j(`/api/files?folder=${source.id}&select=all&name=lot&limit=1`);
+  const filtered = await query.json() as typeof all;
+  assert.deepEqual(new Set(filtered.fileIds), new Set([alpha.id, bravo.id]));
+  assert.deepEqual(filtered.folderIds, []);
+  const addedAfterSelection = await upload('Lot ultérieur.txt', 'nouveau document', source.id);
+
+  const fileIds = [...filtered.fileIds, nested.id, nested.id];
+  const folderIds = [child.id, parent.id];
+  const batch = (operation: { action: 'move'; destination: number } | { action: 'delete' }) =>
+    j('/api/documents/batch', { method: 'POST', body: JSON.stringify({ ...operation, fileIds, folderIds }) });
+  const fileLocation = async (id: number) => ((await (await j('/api/files/' + id)).json()) as { file: FileBody }).file.folderId;
+  const folderLocation = async (id: number) => ((await (await j('/api/folders')).json()) as { folders: FolderBody[] }).folders.find((folder) => folder.id === id)?.parentId;
+
+  assert.equal((await batch({ action: 'move', destination: child.id })).status, 409);
+  const duplicate = await upload('LOT FINAL.txt', 'doublon', destination.id);
+  const refused = await batch({ action: 'move', destination: destination.id });
+  assert.equal(refused.status, 409);
+  assert.equal(await fileLocation(alpha.id), source.id);
+  assert.equal(await folderLocation(parent.id), source.id);
+  assert.equal((await j('/api/files/' + duplicate.id, { method: 'DELETE' })).status, 200);
+
+  const moved = await batch({ action: 'move', destination: destination.id });
+  assert.equal(moved.status, 200);
+  assert.deepEqual(await moved.json(), { files: 2, folders: 1 });
+  assert.equal(await fileLocation(alpha.id), destination.id);
+  assert.equal(await fileLocation(bravo.id), destination.id);
+  assert.equal(await fileLocation(nested.id), child.id);
+  assert.equal(await folderLocation(child.id), parent.id);
+  assert.equal(await folderLocation(parent.id), destination.id);
+  assert.equal(await fileLocation(addedAfterSelection.id), source.id);
+
+  const database = new DatabaseSync(path.join(path.dirname(uploadsDir), 'chat.db'));
+  try {
+    database.exec(`CREATE TRIGGER test_batch_delete BEFORE DELETE ON folders WHEN OLD.id = ${parent.id} BEGIN SELECT RAISE(ABORT, 'échec attendu'); END;`);
+    assert.equal((await batch({ action: 'delete' })).status, 500);
+  } finally {
+    database.exec('DROP TRIGGER IF EXISTS test_batch_delete');
+    database.close();
+  }
+  assert.equal(await folderLocation(child.id), parent.id);
+  assert.equal(await (await j(`/api/files/${nested.id}/download`)).text(), 'pièce imbriquée');
+
+  const deleted = await batch({ action: 'delete' });
+  assert.deepEqual(await deleted.json(), { files: 3, folders: 2 });
+  assert.equal((await j('/api/files/' + nested.id)).status, 404);
+  assert.equal(await folderLocation(parent.id), undefined);
+  assert.equal(await fileLocation(keep.id), source.id);
+  assert.deepEqual(await (await batch({ action: 'delete' })).json(), { files: 0, folders: 0 });
+});
