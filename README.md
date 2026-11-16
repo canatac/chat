@@ -356,7 +356,7 @@ Le serveur vérifie l’accès au salon à chaque requête.
 - `GET /api/messages?limit=50&before=<id>` → `{messages: [...]}` (ordre chronologique, avec `files`)
 - `POST /api/messages` `{content}` → `{message}`
 - `POST /api/files` (multipart : `file`, `message?`, `post=true|false`, `folderId?`) → `{file, message?}` — **fichier audio transcrit automatiquement si STT configuré**
-- `GET /api/files?limit=&before=&query=&folder=root|<id>` → `{files: [...]}` (espace documentaire ; `folder` filtre par dossier)
+- `GET /api/files?limit=&before=&query=&folder=root|<id>` → `{files: [...], nextBefore}`. Le tri explicite utilise `sort=name|date|size` et `direction=asc|desc`. Avec ce tri, passer `nextBefore` comme `before` pour charger la suite. `name` filtre par texte contenu dans le nom. `activityFrom` (inclus) et `activityBefore` (exclu) délimitent la période en millisecondes. `minBytes` et `maxBytes` bornent la taille, valeurs limites comprises. Ces critères se combinent avec `folder` et `query`.
 - `GET /api/files/:id` → détail (métadonnées + `folderPath` + `history`)
 - `PATCH /api/files/:id` `{name?|folderId?}` → renommer / déplacer (409 si nom déjà pris dans le dossier cible)
 - `DELETE /api/files/:id` → supprime le fichier (disque + chunks + entrée)
