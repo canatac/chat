@@ -1,42 +1,21 @@
-import AdminPanelSettingsIcon from '@mui/icons-material/AdminPanelSettings';
-import AttachFileIcon from '@mui/icons-material/AttachFile';
-import FolderSharedIcon from '@mui/icons-material/FolderShared';
-import ForumIcon from '@mui/icons-material/Forum';
-import LogoutIcon from '@mui/icons-material/Logout';
-import PhoneIcon from '@mui/icons-material/Phone';
-import SendIcon from '@mui/icons-material/Send';
-import {
-  AppBar,
-  Avatar,
-  Badge,
-  Box,
-  Button,
-  Chip,
-  IconButton,
-  Paper,
-  TextField,
-  Toolbar,
-  Tooltip,
-  Typography,
-} from '@mui/material';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import ArrowDownwardRoundedIcon from '@mui/icons-material/ArrowDownwardRounded';
+import ForumOutlinedIcon from '@mui/icons-material/ForumOutlined';
+import { Alert, Box, Button, CircularProgress, Typography } from '@mui/material';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { api } from './api';
 import AdminDialog from './components/AdminDialog';
 import CallDialog from './components/CallDialog';
+import ChatComposer from './components/ChatComposer';
+import ChatHeader, { type ConnectionStatus } from './components/ChatHeader';
 import DocDrawer from './components/DocDrawer';
 import MessageRow from './components/MessageRow';
-import PresenceMenu from './components/PresenceMenu';
+import { chatColors } from './theme';
 import type { CallInfo, Message, User } from './types';
 import { ChatSocket } from './ws';
 
 const PAGE_SIZE = 50;
-
-const COMMAND_HINTS: Record<string, string> = {
-  '/resume': 'Compte-rendu des derniers messages',
-  '/solve': 'Suggestions de solutions pour un problème',
-  '/ask': 'Question à l’assistant (chatroom + documents déposés)',
-  '/aide': 'Liste des commandes disponibles',
-};
+const groupWindow = 4 * 60 * 1000;
+const calendarDate = new Intl.DateTimeFormat('fr-FR', { dateStyle: 'long' });
 
 interface Props {
   token: string;
@@ -44,211 +23,302 @@ interface Props {
   onLogout: () => void;
 }
 
+function mergeMessages(current: Message[], incoming: Message[]): Message[] {
+  const byId = new Map(current.map((message) => [message.id, message]));
+  for (const message of incoming) byId.set(message.id, message);
+  return [...byId.values()].sort((left, right) => left.id - right.id);
+}
+
+function DayDivider({ date }: { date: Date }) {
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+  const day = date.toDateString();
+
+  let label = calendarDate.format(date);
+  if (day === today.toDateString()) label = 'Aujourd’hui';
+  if (day === yesterday.toDateString()) label = 'Hier';
+
+  return (
+    <Box
+      sx={{
+        display: 'flex', alignItems: 'center', gap: { xs: 0.9, sm: 1.5 }, mt: 2.25,
+        '&::before, &::after': { content: '""', height: '1px', flex: 1, bgcolor: chatColors.border },
+      }}
+    >
+      <Typography
+        variant="caption"
+        component="span"
+        sx={{ color: chatColors.muted, fontWeight: 700, px: 1.1, py: 0.35, borderRadius: '7px', bgcolor: '#e8f0f0' }}
+      >
+        {label}
+      </Typography>
+    </Box>
+  );
+}
+
 export default function Chat({ token, user, onLogout }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [onlineIds, setOnlineIds] = useState<number[]>([]);
-  const [input, setInput] = useState('');
+  const [connection, setConnection] = useState<ConnectionStatus>('connecting');
+  const [socket, setSocket] = useState<ChatSocket | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const [hasMore, setHasMore] = useState(false);
-  const [connected, setConnected] = useState(false);
+  const [historyError, setHistoryError] = useState<'recent' | 'older' | null>(null);
+  const [atEnd, setAtEnd] = useState(true);
   const [docOpen, setDocOpen] = useState(false);
   const [adminOpen, setAdminOpen] = useState(false);
   const [callOpen, setCallOpen] = useState(false);
   const [call, setCall] = useState<CallInfo | null>(null);
+
   const listRef = useRef<HTMLDivElement>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
-  const nearBottomRef = useRef(true);
-  const socketRef = useRef<ChatSocket | null>(null);
-  const [socket, setSocket] = useState<ChatSocket | null>(null);
+  const followMessages = useRef(true);
+  const historyPosition = useRef<{ id: number; top: number } | null>(null);
+
+  const loadRecent = useCallback(async (signal?: AbortSignal, reconnect = false) => {
+    if (!reconnect) setLoading(true);
+    try {
+      const { messages: recent } = await api.messages(undefined, PAGE_SIZE, signal);
+      if (signal?.aborted) return;
+      setMessages((previous) => mergeMessages(previous, recent));
+      if (!reconnect) setHasMore(recent.length === PAGE_SIZE);
+      setHistoryError(null);
+    } catch {
+      if (!signal?.aborted && !reconnect) setHistoryError('recent');
+    } finally {
+      if (!signal?.aborted && !reconnect) setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    api
-      .messages(undefined, PAGE_SIZE)
-      .then((r) => {
-        setMessages(r.messages);
-        setHasMore(r.messages.length === PAGE_SIZE);
-      })
+    const request = new AbortController();
+    const activeSocket = new ChatSocket(token);
+    let receivedPresence = false;
+    let connectedBefore = false;
+    let receivedCall = false;
+    let knownUsers = new Set<number>();
+    const refreshUsers = () => {
+      void api.users()
+        .then((result) => {
+          if (request.signal.aborted) return;
+          knownUsers = new Set(result.users.map((member) => member.id));
+          setUsers(result.users);
+          if (!receivedPresence) setOnlineIds(result.users.filter((member) => member.online).map((member) => member.id));
+        })
+        .catch(() => {});
+    };
+    void loadRecent(request.signal);
+    refreshUsers();
+    void api.calls.active()
+      .then((result) => { if (!request.signal.aborted && !receivedCall) setCall(result.call); })
       .catch(() => {});
-    api
-      .users()
-      .then((r) => setUsers(r.users))
-      .catch(() => {});
-    api
-      .calls.active()
-      .then((r) => setCall(r.call))
-      .catch(() => {});
-    const socket = new ChatSocket(token);
-    socket.onStatus(setConnected);
-    socket.onMessage((event) => {
+
+    activeSocket.onStatus((online) => {
+      if (request.signal.aborted) return;
+      setConnection(online ? 'online' : 'offline');
+      if (online && connectedBefore) {
+        void loadRecent(request.signal, true);
+        refreshUsers();
+      }
+      if (online) connectedBefore = true;
+    });
+    const unsubscribe = activeSocket.onMessage((event) => {
       if (event.type === 'message' && event.message) {
-        setMessages((prev) =>
-          prev.some((m) => m.id === event.message?.id) ? prev : [...prev, event.message as Message],
+        const message = event.message;
+        setMessages((previous) =>
+          previous.some((item) => item.id === message.id) ? previous : mergeMessages(previous, [message]),
         );
       } else if (event.type === 'presence' && Array.isArray(event.online)) {
+        receivedPresence = true;
         setOnlineIds(event.online);
+        if (event.online.some((id) => !knownUsers.has(id))) refreshUsers();
       } else if (event.type === 'call') {
+        receivedCall = true;
         setCall(event.call ?? null);
       }
     });
-    socket.connect();
-    socketRef.current = socket;
-    setSocket(socket);
-    return () => socket.close();
-  }, [token]);
 
-  useEffect(() => {
-    const el = listRef.current;
-    if (el && nearBottomRef.current) el.scrollTop = el.scrollHeight;
-  }, [messages]);
+    activeSocket.connect();
+    setSocket(activeSocket);
+    return () => {
+      request.abort();
+      unsubscribe();
+      activeSocket.close();
+    };
+  }, [token, loadRecent]);
 
-  const onScroll = () => {
-    const el = listRef.current;
-    if (!el) return;
-    nearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  const syncScroll = useCallback(() => {
+    const list = listRef.current;
+    if (!list) return;
+    const nearEnd = list.scrollHeight - list.clientHeight - list.scrollTop < 72;
+    followMessages.current = nearEnd;
+    setAtEnd(nearEnd);
+  }, []);
+
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    if (!list) return;
+    const anchor = historyPosition.current;
+    if (anchor) {
+      historyPosition.current = null;
+      const row = list.querySelector('[data-message-id="' + anchor.id + '"]');
+      if (row) list.scrollTop += row.getBoundingClientRect().top - anchor.top;
+    } else if (followMessages.current) {
+      list.scrollTop = list.scrollHeight;
+    }
+    syncScroll();
+  }, [hasMore, loading, messages, syncScroll]);
+
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    if (!list || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => {
+      if (followMessages.current) list.scrollTop = list.scrollHeight;
+      syncScroll();
+    });
+    observer.observe(list);
+    return () => observer.disconnect();
+  }, [syncScroll]);
+
+  const jumpToLatest = () => {
+    const list = listRef.current;
+    if (list) list.scrollTop = list.scrollHeight;
+    followMessages.current = true;
+    setAtEnd(true);
   };
 
-  const loadMore = async () => {
+  const loadOlder = async () => {
     const oldest = messages[0];
-    if (!oldest) return;
-    const r = await api.messages(oldest.id, PAGE_SIZE);
-    setHasMore(r.messages.length === PAGE_SIZE);
-    setMessages((prev) => [...r.messages, ...prev]);
-  };
-
-  const send = () => {
-    const content = input.trim();
-    if (!content) return;
-    if (socketRef.current?.isOpen()) {
-      socketRef.current.sendMessage(content);
-    } else {
-      api
-        .send(content)
-        .then((r) => setMessages((prev) => [...prev, r.message]))
-        .catch(() => {});
-    }
-    setInput('');
-  };
-
-  const onFilePicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0];
-    e.target.value = '';
-    if (!f) return;
-    const text = input.trim();
+    if (!oldest || loadingOlder) return;
+    setLoadingOlder(true);
+    setHistoryError(null);
     try {
-      await api.uploadFile(f, text, true);
-      setInput('');
+      const result = await api.messages(oldest.id, PAGE_SIZE);
+      const row = listRef.current?.querySelector('[data-message-id="' + oldest.id + '"]');
+      if (row) historyPosition.current = { id: oldest.id, top: row.getBoundingClientRect().top };
+      setHasMore(result.messages.length === PAGE_SIZE);
+      setMessages((previous) => mergeMessages(previous, result.messages));
     } catch {
-      // l'upload a échoué : le message texte reste envoyable
+      setHistoryError('older');
+    } finally {
+      setLoadingOlder(false);
     }
   };
 
-  const hint = useMemo(() => {
-    const key = Object.keys(COMMAND_HINTS).find((k) => input.trimStart().startsWith(k));
-    return key ? COMMAND_HINTS[key] : null;
-  }, [input]);
+  const publish = (message: Message) => {
+    jumpToLatest();
+    setMessages((previous) =>
+      previous.some((item) => item.id === message.id) ? previous : mergeMessages(previous, [message]),
+    );
+  };
 
   return (
-    <Box sx={{ height: '100dvh', display: 'flex', flexDirection: 'column' }}>
-      <AppBar position="static" enableColorOnDark>
-        <Toolbar>
-          <ForumIcon sx={{ mr: 1 }} />
-          <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
-            Chat d'équipe
-          </Typography>
-          <Tooltip title={call ? "Appel en cours" : "Appel d'équipe"}>
-            <IconButton color="inherit" onClick={() => setCallOpen(true)}>
-              <Badge variant="dot" color="error" invisible={!call}>
-                <PhoneIcon />
-              </Badge>
-            </IconButton>
-          </Tooltip>
-          <PresenceMenu users={users} onlineIds={onlineIds} />
-          <Chip
-            label={connected ? 'en ligne' : 'hors ligne'}
-            size="small"
-            sx={{ mr: 1, bgcolor: connected ? '#dcf8c6' : '#eeeeee', color: '#333333' }}
-          />
-          <Tooltip title="Espace documentaire">
-            <IconButton color="inherit" onClick={() => setDocOpen(true)}>
-              <FolderSharedIcon />
-            </IconButton>
-          </Tooltip>
-          {user.isAdmin && (
-            <Tooltip title="Administration (conso LLM)">
-              <IconButton color="inherit" onClick={() => setAdminOpen(true)}>
-                <AdminPanelSettingsIcon />
-              </IconButton>
-            </Tooltip>
-          )}
-          <Chip
-            avatar={<Avatar>{user.name.slice(0, 1).toUpperCase()}</Avatar>}
-            label={user.name}
-            variant="outlined"
-            sx={{ mx: 1, color: 'inherit', borderColor: 'rgba(255,255,255,0.5)' }}
-          />
-          <Tooltip title="Se déconnecter">
-            <IconButton color="inherit" onClick={onLogout}>
-              <LogoutIcon />
-            </IconButton>
-          </Tooltip>
-        </Toolbar>
-      </AppBar>
-
-      <Box
-        ref={listRef}
-        onScroll={onScroll}
-        sx={{
-          flex: 1,
-          overflowY: 'auto',
-          p: 2,
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 1,
-        }}
-      >
-        {hasMore && (
-          <Button size="small" onClick={loadMore} sx={{ alignSelf: 'center' }}>
-            Charger les messages précédents
-          </Button>
-        )}
-        {messages.map((m) => (
-          <MessageRow key={m.id} message={m} own={m.user.id === user.id} />
-        ))}
-      </Box>
-
-      <Paper elevation={3} sx={{ p: 1 }}>
-        {hint && (
-          <Typography variant="caption" color="text.secondary" sx={{ px: 1 }}>
-            {hint}
-          </Typography>
-        )}
-        <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-end' }}>
-          <input hidden type="file" ref={fileRef} onChange={onFilePicked} />
-          <Tooltip title="Joindre un fichier à la conversation">
-            <IconButton color="primary" onClick={() => fileRef.current?.click()}>
-              <AttachFileIcon />
-            </IconButton>
-          </Tooltip>
-          <TextField
-            fullWidth
-            multiline
-            maxRows={4}
-            size="small"
-            placeholder="Écrivez un message… (/aide pour les commandes LLM)"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                send();
-              }
+    <Box sx={{ height: '100vh', '@supports (height: 100dvh)': { height: '100dvh' }, display: 'flex', flexDirection: 'column', bgcolor: chatColors.background }}>
+      <ChatHeader
+        user={user}
+        users={users}
+        onlineIds={onlineIds}
+        connection={connection}
+        hasCall={Boolean(call)}
+        onCall={() => setCallOpen(true)}
+        onDocuments={() => setDocOpen(true)}
+        onAdmin={() => setAdminOpen(true)}
+        onLogout={onLogout}
+      />
+      <Box component="main" sx={{ position: 'relative', flex: 1, minHeight: 0 }}>
+        <Box
+          ref={listRef}
+          role="region"
+          aria-label="Historique de la conversation"
+          tabIndex={0}
+          onScroll={syncScroll}
+          sx={{ height: '100%', overflowY: 'auto', overflowX: 'hidden', overflowAnchor: 'none', overscrollBehavior: 'contain' }}
+        >
+          <Box
+            sx={{
+              maxWidth: 980, mx: 'auto', minHeight: '100%', px: { xs: 1.65, sm: 3 },
+              pt: { xs: 0.75, sm: 1 }, pb: { xs: 2.25, sm: 2.75 }, minWidth: 0,
+              display: 'flex', flexDirection: 'column',
             }}
-          />
-          <IconButton color="primary" onClick={send} disabled={!input.trim() || !connected}>
-            <SendIcon />
-          </IconButton>
+          >
+            {historyError && (
+              <Alert severity="error" sx={{ mt: 1.5 }} action={(
+                <Button color="inherit" size="small" onClick={() => void (historyError === 'recent' ? loadRecent() : loadOlder())}>
+                  Réessayer
+                </Button>
+              )}>
+                {historyError === 'recent' ? 'Impossible de charger la conversation.' : 'Impossible de charger les messages précédents.'}
+              </Alert>
+            )}
+            {loading && messages.length === 0 && (
+              <Box sx={{ m: 'auto' }}><CircularProgress aria-label="Chargement des messages" size={25} /></Box>
+            )}
+            {!loading && messages.length === 0 && !historyError && (
+              <Box sx={{ m: 'auto', textAlign: 'center', p: 2 }}>
+                <Box
+                  sx={{ width: 52, height: 52, mx: 'auto', mb: 1.5, display: 'grid', placeItems: 'center', borderRadius: '14px', bgcolor: chatColors.accentSoft, color: chatColors.accent }}
+                >
+                  <ForumOutlinedIcon />
+                </Box>
+                <Typography component="h2" sx={{ color: chatColors.ink, fontWeight: 750 }}>Aucun message</Typography>
+                <Typography variant="body2" sx={{ color: chatColors.muted, mt: 0.5 }}>Écris le premier message de l’équipe.</Typography>
+              </Box>
+            )}
+            {hasMore && (
+              <Button
+                size="small"
+                variant="outlined"
+                onClick={() => void loadOlder()}
+                disabled={loadingOlder}
+                sx={{
+                  alignSelf: 'center', mt: 1.1, borderColor: chatColors.border, bgcolor: chatColors.surface,
+                  color: chatColors.accent, textTransform: 'none', fontWeight: 650, borderRadius: '8px',
+                }}
+              >
+                {loadingOlder ? 'Chargement…' : 'Charger les messages précédents'}
+              </Button>
+            )}
+            {messages.length > 0 && (
+              <Box role="log" aria-label="Messages" sx={{ mt: 'auto', minWidth: 0 }}>
+                {messages.map((message, index) => {
+                  const date = new Date(message.createdAt);
+                  const previous = messages[index - 1];
+                  const previousDate = previous && new Date(previous.createdAt);
+                  const newDay = !previousDate || date.toDateString() !== previousDate.toDateString();
+                  const groupStart = newDay || previous.user.id !== message.user.id
+                    || date.getTime() - previousDate.getTime() > groupWindow;
+
+                  return (
+                    <Fragment key={message.id}>
+                      {newDay && <DayDivider date={date} />}
+                      <MessageRow message={message} own={message.user.id === user.id} groupStart={groupStart} />
+                    </Fragment>
+                  );
+                })}
+              </Box>
+            )}
+          </Box>
         </Box>
-      </Paper>
+        {!atEnd && messages.length > 0 && (
+          <Box sx={{ position: 'absolute', bottom: 12, insetInline: 0, maxWidth: 980, mx: 'auto', px: { xs: 1.65, sm: 3 }, display: 'flex', justifyContent: 'flex-end', pointerEvents: 'none' }}>
+            <Button
+              variant="contained"
+              disableElevation
+              startIcon={<ArrowDownwardRoundedIcon fontSize="small" />}
+              onClick={jumpToLatest}
+              sx={{
+                pointerEvents: 'auto', fontWeight: 700, textTransform: 'none', borderRadius: '9px',
+                bgcolor: chatColors.accent, '&:hover': { bgcolor: '#0d524b' },
+              }}
+            >
+              Derniers messages
+            </Button>
+          </Box>
+        )}
+      </Box>
+      <ChatComposer onPublished={publish} />
 
       <DocDrawer open={docOpen} onClose={() => setDocOpen(false)} socket={socket} />
       <AdminDialog open={adminOpen} onClose={() => setAdminOpen(false)} />

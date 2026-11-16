@@ -1,84 +1,176 @@
-import AttachFileIcon from '@mui/icons-material/AttachFile';
-import SmartToyIcon from '@mui/icons-material/SmartToy';
-import { Avatar, Box, Chip, Paper, Typography } from '@mui/material';
-import { api } from '../api';
+import AttachFileOutlinedIcon from '@mui/icons-material/AttachFileOutlined';
+import DownloadOutlinedIcon from '@mui/icons-material/DownloadOutlined';
+import SmartToyOutlinedIcon from '@mui/icons-material/SmartToyOutlined';
+import { Avatar, Box, ButtonBase, CircularProgress, Link, Tooltip, Typography } from '@mui/material';
+import { useState } from 'react';
+import { saveFile } from '../api';
+import { chatColors } from '../theme';
 import type { Message, MessageFile } from '../types';
 
 interface Props {
   message: Message;
   own: boolean;
+  groupStart: boolean;
 }
 
-function FileChip({ file }: { file: MessageFile }) {
-  const download = async () => {
-    try {
-      const blob = await api.downloadFile(file.id);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = file.name;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch {
-      // ignore
-    }
-  };
+const hours = new Intl.DateTimeFormat('fr-FR', { hour: '2-digit', minute: '2-digit' });
+const assistantColor = '#604785';
+const assistantBackground = '#f3eef9';
+const urlPattern = /(https?:\/\/[^\s<>"«»]+)/gi;
+
+function MessageText({ content }: { content: string }) {
   return (
-    <Chip
-      size="small"
-      icon={<AttachFileIcon />}
-      label={file.name}
-      onClick={() => void download()}
-      sx={{ maxWidth: '100%' }}
-    />
+    <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', lineHeight: 1.57, fontSize: '0.91rem' }}>
+      {content.split(urlPattern).map((part, index) => {
+        if (index % 2 === 0) return part;
+        const href = part.replace(/[.,!?;]+$/, '');
+        let url: URL;
+        try {
+          url = new URL(href);
+        } catch {
+          return part;
+        }
+        if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return part;
+
+        return (
+          <span key={index}>
+            <Link
+              href={url.href}
+              target="_blank"
+              rel="noopener noreferrer"
+              title={href}
+              underline="always"
+              sx={{ color: chatColors.accent, textUnderlineOffset: '0.15em', fontWeight: 650 }}
+            >
+              {href.length <= 80 ? href : url.hostname + ' / …'}
+            </Link>
+            {part.slice(href.length)}
+          </span>
+        );
+      })}
+    </Typography>
   );
 }
 
-export default function MessageRow({ message, own }: Props) {
-  const time = new Date(message.createdAt).toLocaleTimeString('fr-FR', {
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+function FileDownload({ file }: { file: MessageFile }) {
+  const [status, setStatus] = useState<'idle' | 'busy' | 'error'>('idle');
+
+  const download = async () => {
+    if (status === 'busy') return;
+    setStatus('busy');
+    try {
+      await saveFile(file);
+      setStatus('idle');
+    } catch {
+      setStatus('error');
+    }
+  };
+
   return (
-    <Box sx={{ display: 'flex', justifyContent: own ? 'flex-end' : 'flex-start' }}>
-      <Box sx={{ display: 'flex', flexDirection: own ? 'row-reverse' : 'row', gap: 1, maxWidth: '75%' }}>
-        {message.user.isBot ? (
-          <Avatar sx={{ bgcolor: 'secondary.main' }}>
-            <SmartToyIcon fontSize="small" />
-          </Avatar>
-        ) : (
-          <Avatar>{message.user.name.slice(0, 1).toUpperCase()}</Avatar>
-        )}
-        <Box>
-          <Typography
-            variant="caption"
-            color="text.secondary"
-            sx={{ display: 'block', textAlign: own ? 'right' : 'left' }}
-          >
-            {message.user.isBot ? 'Assistant' : message.user.name} · {time}
-          </Typography>
-          <Paper
-            elevation={1}
+    <Box sx={{ minWidth: 0 }}>
+      <Tooltip title={file.name} enterDelay={500}>
+        <span>
+          <ButtonBase
+            disabled={status === 'busy'}
+            onClick={() => void download()}
+            aria-label={'Télécharger ' + file.name}
             sx={{
-              px: 1.5,
-              py: 1,
-              borderRadius: 2,
-              bgcolor: own ? '#dcf8c6' : message.user.isBot ? '#fff8e1' : '#ffffff',
-              borderTopRightRadius: own ? 4 : 12,
-              borderTopLeftRadius: own ? 12 : 4,
+              minWidth: 0, width: '100%', justifyContent: 'flex-start', gap: 0.85, textAlign: 'left',
+              px: 1, py: 0.75, borderRadius: '8px', minHeight: 39,
+              border: '1px solid ' + chatColors.border, bgcolor: chatColors.surface, color: chatColors.ink,
+              '&:hover': { bgcolor: chatColors.background },
+              '&.Mui-focusVisible': { outline: '2px solid ' + chatColors.accent },
             }}
           >
-            <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-              {message.content}
+            <AttachFileOutlinedIcon sx={{ flexShrink: 0, color: chatColors.accent, fontSize: 17 }} />
+            <Typography component="span" noWrap sx={{ minWidth: 0, flex: 1, fontSize: '0.83rem', fontWeight: 650 }}>
+              {file.name}
             </Typography>
-            {message.files && message.files.length > 0 && (
-              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mt: 0.5 }}>
-                {message.files.map((f) => (
-                  <FileChip key={f.id} file={f} />
-                ))}
-              </Box>
-            )}
-          </Paper>
+            {status === 'busy'
+              ? <CircularProgress size={16} sx={{ flexShrink: 0 }} />
+              : <DownloadOutlinedIcon sx={{ flexShrink: 0, color: chatColors.muted, fontSize: 18 }} />}
+          </ButtonBase>
+        </span>
+      </Tooltip>
+      {status === 'error' && (
+        <Typography role="alert" variant="caption" color="error" sx={{ mt: 0.35, display: 'block' }}>
+          Téléchargement impossible. Réessaie en cliquant sur le fichier.
+        </Typography>
+      )}
+    </Box>
+  );
+}
+
+export default function MessageRow({ message, own, groupStart }: Props) {
+  const time = hours.format(new Date(message.createdAt));
+  const isBot = message.user.isBot;
+  const author = own ? 'Vous' : isBot ? 'Assistant' : message.user.name;
+  const files = message.files ?? [];
+  const attachmentOnly = files.length === 1 && message.content === '📎 ' + files[0].name;
+  const bubbleColor = own ? chatColors.accentSoft : isBot ? assistantBackground : chatColors.surface;
+
+  return (
+    <Box
+      component="article"
+      aria-label={author + ' à ' + time}
+      sx={{
+        display: 'flex', justifyContent: own ? 'flex-end' : 'flex-start', alignItems: 'flex-start', gap: 1,
+        mt: groupStart ? 1.75 : 0.6, color: chatColors.ink,
+      }}
+    >
+      {!own && (
+        <Box sx={{ flexShrink: 0, width: { xs: 29, sm: 34 } }}>
+          {groupStart && (
+            <Avatar
+              aria-hidden="true"
+              sx={{
+                width: { xs: 29, sm: 34 }, height: { xs: 29, sm: 34 }, borderRadius: '9px',
+                fontWeight: 750, fontSize: '0.78rem',
+                bgcolor: isBot ? assistantBackground : '#e1eeee',
+                color: isBot ? assistantColor : chatColors.accent,
+              }}
+            >
+              {isBot ? <SmartToyOutlinedIcon sx={{ fontSize: 18 }} /> : message.user.name.slice(0, 1).toUpperCase()}
+            </Avatar>
+          )}
+        </Box>
+      )}
+      <Box
+        sx={{
+          minWidth: 0,
+          maxWidth: { xs: own ? '89%' : 'calc(100% - 37px)', sm: 'min(79%, 690px)' },
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: own ? 'flex-end' : 'flex-start',
+        }}
+      >
+        {groupStart && (
+          <Box sx={{ display: 'flex', gap: 0.75, minWidth: 0, maxWidth: '100%', alignItems: 'baseline', mb: 0.35, px: 0.25 }}>
+            <Typography noWrap component="span" sx={{ color: isBot ? assistantColor : chatColors.ink, fontSize: '0.78rem', fontWeight: 720 }}>
+              {author}
+            </Typography>
+            <Typography component="time" dateTime={message.createdAt} variant="caption" sx={{ flexShrink: 0, color: chatColors.muted }}>
+              {time}
+            </Typography>
+          </Box>
+        )}
+        <Box
+          data-message-id={message.id}
+          title={groupStart ? undefined : time}
+          sx={{
+            minWidth: 0, maxWidth: '100%', px: 1.45, py: 0.95, bgcolor: bubbleColor,
+            border: '1px solid ' + (isBot ? '#e9e1f4' : chatColors.border),
+            borderRadius: '13px',
+            borderTopLeftRadius: !own && groupStart ? '5px' : undefined,
+            borderTopRightRadius: own && groupStart ? '5px' : undefined,
+          }}
+        >
+          {!attachmentOnly && <MessageText content={message.content} />}
+          {files.length > 0 && (
+            <Box sx={{ display: 'grid', minWidth: 0, gap: 0.7, mt: attachmentOnly ? 0 : 0.8 }}>
+              {files.map((file) => <FileDownload key={file.id} file={file} />)}
+            </Box>
+          )}
         </Box>
       </Box>
     </Box>

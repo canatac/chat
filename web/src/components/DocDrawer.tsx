@@ -45,10 +45,11 @@ import {
   Typography,
 } from '@mui/material';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api } from '../api';
+import { api, saveFile } from '../api';
+import { formatFileSize } from '../formatFileSize';
 import type { FileItem, Folder } from '../types';
 import type { ChatSocket } from '../ws';
-import DocumentExplorerList, { explorerColors, formatFileSize, type DocumentItem } from './DocumentExplorerList';
+import DocumentExplorerList, { explorerColors, type DocumentItem } from './DocumentExplorerList';
 
 interface Props {
   open: boolean;
@@ -226,14 +227,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
     setActionError(null);
     setDownloading((previous) => new Set(previous).add(file.id));
     try {
-      const url = URL.createObjectURL(await api.downloadFile(file.id));
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = file.name;
-      document.body.append(link);
-      link.click();
-      link.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+      await saveFile(file);
     } catch (error) {
       setActionError(errorMessage(error, 'Impossible de télécharger le fichier.'));
     } finally {

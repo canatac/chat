@@ -1,4 +1,4 @@
-import type { AdminStats, CallInfo, FileEvent, FileItem, Folder, Message, User } from './types';
+import type { AdminStats, CallInfo, FileEvent, FileItem, Folder, Message, MessageFile, User } from './types';
 
 const TOKEN_KEY = 'chat.token';
 
@@ -47,8 +47,8 @@ export const api = {
     }),
   me: () => req<{ user: User }>('/api/me'),
   users: () => req<{ users: User[] }>('/api/users'),
-  messages: (before?: number, limit = 50) =>
-    req<{ messages: Message[] }>(`/api/messages?limit=${limit}${before !== undefined ? `&before=${before}` : ''}`),
+  messages: (before?: number, limit = 50, signal?: AbortSignal) =>
+    req<{ messages: Message[] }>(`/api/messages?limit=${limit}${before !== undefined ? `&before=${before}` : ''}`, { signal }),
   send: (content: string) =>
     req<{ message: Message }>('/api/messages', { method: 'POST', body: JSON.stringify({ content }) }),
   files: (query = '', before?: number, limit = 100, folder?: number | null, signal?: AbortSignal) =>
@@ -148,3 +148,15 @@ export const api = {
   events: (limit = 100) => req<{ events: FileEvent[] }>(`/api/events?limit=${limit}`),
   rtcConfig: () => req<{ iceServers: RTCIceServer[] }>('/api/rtc-config'),
 };
+
+
+export async function saveFile(file: Pick<MessageFile, 'id' | 'name'>): Promise<void> {
+  const url = URL.createObjectURL(await api.downloadFile(file.id));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = file.name;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+}

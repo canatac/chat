@@ -1,5 +1,7 @@
-import { Avatar, AvatarGroup, Badge, Box, Chip, List, ListItem, ListItemAvatar, ListItemText, ListSubheader, Popover, Tooltip } from '@mui/material';
+import GroupOutlinedIcon from '@mui/icons-material/GroupOutlined';
+import { Avatar, Box, Button, List, ListItem, ListItemAvatar, ListItemText, Popover, Tooltip, Typography } from '@mui/material';
 import { useState } from 'react';
+import { chatColors } from '../theme';
 import type { User } from '../types';
 
 interface Props {
@@ -9,46 +11,30 @@ interface Props {
 
 export default function PresenceMenu({ users, onlineIds }: Props) {
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
-  const online = users.filter((u) => onlineIds.includes(u.id));
+  const online = new Set(onlineIds);
+  const membersOnline = users.filter((user) => online.has(user.id)).length;
+  const orderedUsers = [...users].sort((left, right) =>
+    Number(online.has(right.id)) - Number(online.has(left.id)) || left.name.localeCompare(right.name, 'fr'),
+  );
 
   return (
     <>
-      <Tooltip title="Membres de la chatroom (cliquez pour le détail)">
-        <Box
-          onClick={(e) => setAnchor(e.currentTarget)}
-          sx={{ cursor: 'pointer', mr: 1, display: 'flex', alignItems: 'center' }}
+      <Tooltip title="Membres">
+        <Button
+          aria-label="Membres"
+          aria-haspopup="dialog"
+          aria-expanded={Boolean(anchor)}
+          aria-controls={anchor ? 'chat-members-popover' : undefined}
+          onClick={(event) => setAnchor(event.currentTarget)}
+          sx={{
+            minWidth: { xs: 36, sm: 46 }, minHeight: 40, px: { xs: 0, md: 1.25 }, gap: 0.85, borderRadius: '10px',
+            color: chatColors.ink, fontWeight: 650, textTransform: 'none',
+            '&:hover': { bgcolor: chatColors.accentSoft, color: chatColors.accent },
+          }}
         >
-          <AvatarGroup
-            max={5}
-            sx={{
-              '& .MuiAvatar-root': {
-                width: 30,
-                height: 30,
-                fontSize: 14,
-                bgcolor: 'rgba(255,255,255,0.25)',
-                color: '#fff',
-                borderColor: 'rgba(255,255,255,0.6)',
-              },
-            }}
-          >
-            {users.map((u) => (
-              <Badge
-                key={u.id}
-                overlap="circular"
-                variant="dot"
-                anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
-                sx={{
-                  '& .MuiBadge-badge': {
-                    border: '2px solid #128c7e',
-                    backgroundColor: onlineIds.includes(u.id) ? '#4caf50' : '#9e9e9e',
-                  },
-                }}
-              >
-                <Avatar>{u.name.slice(0, 1).toUpperCase()}</Avatar>
-              </Badge>
-            ))}
-          </AvatarGroup>
-        </Box>
+          <GroupOutlinedIcon fontSize="small" />
+          <Box component="span" sx={{ display: { xs: 'none', md: 'inline' } }}>{membersOnline} en ligne</Box>
+        </Button>
       </Tooltip>
       <Popover
         open={Boolean(anchor)}
@@ -56,50 +42,37 @@ export default function PresenceMenu({ users, onlineIds }: Props) {
         onClose={() => setAnchor(null)}
         anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
         transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+        slotProps={{
+          paper: {
+            id: 'chat-members-popover',
+            role: 'dialog',
+            'aria-labelledby': 'chat-members-title',
+            sx: { minWidth: 260, maxWidth: 'calc(100vw - 32px)', mt: 1, borderRadius: '14px' },
+          },
+        }}
       >
-        <List dense sx={{ minWidth: 260 }}>
-          <ListSubheader>
-            Membres — {online.length} en ligne / {users.length}
-          </ListSubheader>
-          {users.map((u) => {
-            const isOnline = onlineIds.includes(u.id);
+        <Box sx={{ px: 2, py: 1.5, borderBottom: '1px solid ' + chatColors.border }}>
+          <Typography id="chat-members-title" component="h2" variant="subtitle1" sx={{ fontWeight: 750 }}>Membres</Typography>
+          <Typography variant="body2" sx={{ color: chatColors.muted }}>{membersOnline} en ligne sur {users.length}</Typography>
+        </Box>
+        <List dense sx={{ py: 0.5, maxHeight: 'min(55dvh, 390px)', overflowY: 'auto' }}>
+          {orderedUsers.map((user) => {
+            const isOnline = online.has(user.id);
             return (
-              <ListItem
-                key={u.id}
-                secondaryAction={
-                  <Chip
-                    size="small"
-                    label={isOnline ? 'en ligne' : 'hors ligne'}
-                    sx={{
-                      bgcolor: isOnline ? '#dcf8c6' : '#eeeeee',
-                      color: isOnline ? '#075e54' : '#666666',
-                    }}
-                  />
-                }
-              >
-                <ListItemAvatar>
-                  <Badge
-                    overlap="circular"
-                    variant="dot"
-                    anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
-                    sx={{
-                      '& .MuiBadge-badge': {
-                        backgroundColor: isOnline ? '#4caf50' : '#9e9e9e',
-                      },
-                    }}
-                  >
-                    <Avatar>{u.name.slice(0, 1).toUpperCase()}</Avatar>
-                  </Badge>
+              <ListItem key={user.id} sx={{ gap: 1 }}>
+                <ListItemAvatar sx={{ minWidth: 35 }}>
+                  <Avatar aria-hidden="true" sx={{ width: 30, height: 30, bgcolor: chatColors.accentSoft, color: chatColors.accent, fontSize: '0.83rem', fontWeight: 700 }}>
+                    {user.name.slice(0, 1).toUpperCase()}
+                  </Avatar>
                 </ListItemAvatar>
-                <ListItemText primary={u.name} />
+                <ListItemText primary={user.name} sx={{ overflowWrap: 'anywhere' }} />
+                <Typography component="span" variant="caption" sx={{ flexShrink: 0, color: isOnline ? chatColors.accent : chatColors.muted }}>
+                  {isOnline ? 'En ligne' : 'Hors ligne'}
+                </Typography>
               </ListItem>
             );
           })}
-          {users.length === 0 && (
-            <ListItem>
-              <ListItemText primary="Aucun membre" />
-            </ListItem>
-          )}
+          {orderedUsers.length === 0 && <ListItem><ListItemText primary="Aucun membre" /></ListItem>}
         </List>
       </Popover>
     </>
