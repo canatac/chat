@@ -328,6 +328,18 @@ export class DB {
     return this.db.prepare('SELECT * FROM files WHERE id = ?').get(id) as unknown as FileRow | undefined;
   }
 
+  transaction<T>(write: () => T): T {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const result = write();
+      this.db.exec('COMMIT');
+      return result;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   listFiles(limit: number, before?: number, query?: string, folderId?: number | null, options: FileListOptions = {}): FileListRow[] {
     let sql = 'SELECT f.*, COALESCE(u.display_name, u.name) AS user_name FROM files f JOIN users u ON u.id = f.user_id';
     const params: (string | number)[] = [];

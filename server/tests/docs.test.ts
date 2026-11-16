@@ -286,3 +286,62 @@ test('docsChanged est diffusé en WebSocket lors d une mutation documentaire', a
     ws.close();
   }
 });
+
+test('regroupe deux fichiers dans le dossier cible, avec annulation en cas d’échec', async () => {
+  const from = await mkFolder('Documents à regrouper');
+  const parent = await mkFolder('Classement');
+  let destination = parent;
+  for (let depth = 1; depth <= 18; depth++) destination = await mkFolder('Niveau ' + depth, destination.id);
+  const moving = await upload('Brouillon.txt', 'brouillon', from.id);
+  const target = await upload('Version.txt', 'version', destination.id);
+  const group = (name: string) => j('/api/files/group', { method: 'POST', body: JSON.stringify({ name, sourceId: moving.id, targetId: target.id }) });
+  const detail = async (id: number) => {
+    const response = await j('/api/files/' + id);
+    assert.equal(response.status, 200);
+    return await response.json() as { file: FileBody; folderPath: FolderBody[] };
+  };
+
+  const database = new DatabaseSync(path.join(path.dirname(uploadsDir), 'chat.db'));
+  try {
+    database.exec(`CREATE TRIGGER test_cancel_group BEFORE UPDATE OF folder_id ON files WHEN OLD.id = ${moving.id} BEGIN SELECT RAISE(ABORT, 'échec attendu'); END;`);
+    assert.equal((await group('Tentative')).status, 500);
+  } finally {
+    database.exec('DROP TRIGGER IF EXISTS test_cancel_group');
+    database.close();
+  }
+  assert.equal((await detail(moving.id)).file.folderId, from.id);
+  assert.equal((await detail(target.id)).file.folderId, destination.id);
+  const { folders } = await (await j('/api/folders')).json() as { folders: FolderBody[] };
+  assert.ok(!folders.some(({ name }) => name === 'Tentative'));
+
+  const created = await group('Dossier groupé');
+  assert.equal(created.status, 201);
+  const { folder } = await created.json() as { folder: FolderBody };
+  assert.equal(folder.parentId, destination.id);
+  for (const file of [moving, target]) {
+    const contents = await detail(file.id);
+    assert.equal(contents.file.folderId, folder.id);
+    assert.equal(contents.folderPath.length, 20);
+  }
+
+  const external = (name: string, fileName: string) => {
+    const body = new FormData();
+    body.append('name', name);
+    body.append('targetId', String(target.id));
+    body.append('file', new Blob(['pièce externe']), fileName);
+    return fetch(baseUrl + '/api/files/group', { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body });
+  };
+  const storedBefore = fs.readdirSync(uploadsDir).length;
+  assert.equal((await external('Doublon', target.name)).status, 409);
+  assert.equal(fs.readdirSync(uploadsDir).length, storedBefore);
+  const imported = await external('Avec pièce jointe', 'Externe.txt');
+  assert.equal(imported.status, 201);
+  const importedFolder = ((await imported.json()) as { folder: FolderBody }).folder;
+  assert.equal(importedFolder.parentId, folder.id);
+  const listing = await (await j('/api/files?folder=' + importedFolder.id)).json() as { files: FileBody[] };
+  assert.deepEqual(listing.files.map(({ name }) => name), ['Externe.txt', 'Version.txt']);
+
+  const sameName = await mkFolder('Dossier groupé', from.id);
+  assert.equal((await j('/api/folders/' + sameName.id, { method: 'PATCH', body: JSON.stringify({ parentId: destination.id }) })).status, 409);
+  assert.equal((await j('/api/folders/' + parent.id, { method: 'PATCH', body: JSON.stringify({ parentId: importedFolder.id }) })).status, 409);
+});

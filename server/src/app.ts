@@ -431,11 +431,37 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       destination: uploadsDir,
       filename: (_req, file, cb) => {
         const safe = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-80);
-        cb(null, `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safe}`);
+        cb(null, `${Date.now()}-${randomUUID()}-${safe}`);
       },
     }),
     limits: { fileSize: config.MAX_UPLOAD_MB * 1024 * 1024 },
   });
+
+  function discardUploadedFile(file?: Express.Multer.File): void {
+    if (!file) return;
+    try {
+      fs.rmSync(file.path, { force: true });
+    } catch {
+      // Le fichier peut avoir été retiré entre-temps.
+    }
+  }
+
+  function uploadedName(file: Express.Multer.File): string {
+    return Buffer.from(file.originalname, 'latin1').toString('utf8');
+  }
+
+  async function indexUploadedDocument(file: FileRow): Promise<void> {
+    try {
+      if (isAudioMime(file.mime, file.name)) {
+        await transcribeAndStore(file, file.name, file.mime, file.user_id);
+        return;
+      }
+      const text = await extractText(path.join(uploadsDir, file.path), file.mime, file.name);
+      if (text.trim()) chunkText(text, config.RAG_CHUNK_SIZE).forEach((chunk, i) => db.insertChunk(file.id, i, chunk));
+    } catch {
+      // L’extraction est facultative après l’enregistrement du fichier.
+    }
+  }
 
   app.post('/api/files', upload.single('file'), (req, res) => {
     if (!req.file) {
@@ -443,57 +469,84 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       return;
     }
     const uploaded = req.file;
+    let registered = false;
     try {
-      const displayName = Buffer.from(uploaded.originalname, 'latin1').toString('utf8');
+      const displayName = uploadedName(uploaded);
       const post = req.body.post !== 'false';
       const text = typeof req.body.message === 'string' ? req.body.message.trim().slice(0, 4000) : '';
+      const userId = req.user?.id ?? -1;
       let folderId: number | null = null;
       if (req.body.folderId !== undefined && req.body.folderId !== '' && req.body.folderId !== 'root') {
         folderId = Number(req.body.folderId);
         if (!Number.isInteger(folderId) || !db.getFolderById(folderId)) {
+          discardUploadedFile(uploaded);
           res.status(400).json({ error: 'folderId invalide' });
           return;
         }
       }
-      let messageId: number | null = null;
-      if (post) {
-        messageId = db.insertMessage(req.user?.id ?? -1, text || `📎 ${displayName}`).id;
-      }
-      const fileRow = db.insertFile(
-        req.user?.id ?? -1,
-        messageId,
-        displayName,
-        uploaded.mimetype || 'application/octet-stream',
-        uploaded.size,
-        uploaded.filename,
-        null,
-        folderId,
-      );
-      logDocEvent(req.user?.id ?? -1, { fileId: fileRow.id, folderId, action: 'file_created', detail: `« ${displayName} » déposé (${(uploaded.size / 1048576).toFixed(1)} Mo)` });
+      const { fileRow, messageRow } = db.transaction(() => {
+        const messageRow = post ? db.insertMessage(userId, text || `📎 ${displayName}`) : null;
+        const fileRow = db.insertFile(userId, messageRow?.id ?? null, displayName, uploaded.mimetype || 'application/octet-stream', uploaded.size, uploaded.filename, null, folderId);
+        logDocEvent(userId, { fileId: fileRow.id, folderId, action: 'file_created', detail: `« ${displayName} » déposé (${(uploaded.size / 1048576).toFixed(1)} Mo)` });
+        return { fileRow, messageRow };
+      });
+      registered = true;
       docsChanged();
-      void (async () => {
-        try {
-          if (isAudioMime(uploaded.mimetype, displayName)) {
-            await transcribeAndStore(fileRow, displayName, uploaded.mimetype, req.user?.id ?? -1);
-            return;
-          }
-          const textContent = await extractText(path.join(uploadsDir, uploaded.filename), uploaded.mimetype, displayName);
-          if (textContent.trim()) {
-            chunkText(textContent, config.RAG_CHUNK_SIZE).forEach((c, i) => db.insertChunk(fileRow.id, i, c));
-          }
-        } catch {
-          // extraction non supportée : le fichier reste disponible au téléchargement
-        }
-      })();
-      let message: SerializedMessage | null = null;
-      if (messageId !== null) {
-        message = serializeMessage(db, db.getMessageById(messageId) as MessageRow);
-        broadcast({ type: 'message', message });
-      }
+      void indexUploadedDocument(fileRow);
+      const message = messageRow ? serializeMessage(db, messageRow) : null;
+      if (message) broadcast({ type: 'message', message });
       res.status(201).json({ file: toPublicFile(fileRow), message });
     } catch (err) {
+      if (!registered) discardUploadedFile(uploaded);
       res.status(500).json({ error: err instanceof Error ? err.message : 'Erreur upload' });
     }
+  });
+
+  const fileIdField = z.union([z.number(), z.string().regex(/^\d+$/).transform(Number)]).pipe(z.number().int().positive().safe());
+  const groupFilesSchema = z.object({ name: z.string().trim().min(1).max(120), targetId: fileIdField, sourceId: fileIdField.optional() });
+
+  app.post('/api/files/group', upload.single('file'), (req, res) => {
+    const uploaded = req.file;
+    const parsed = groupFilesSchema.safeParse(req.body);
+    if (!parsed.success || Boolean(parsed.data.sourceId) === Boolean(uploaded)) {
+      discardUploadedFile(uploaded);
+      res.status(400).json({ error: 'Indiquez le nom du dossier et les deux fichiers à regrouper.' });
+      return;
+    }
+    const { name, sourceId, targetId } = parsed.data;
+    const userId = req.user?.id ?? -1;
+    let result: { folder: FolderRow; imported: FileRow | null };
+    try {
+      result = db.transaction(() => {
+        if (sourceId === targetId) throw new HttpError(400, 'Choisissez deux fichiers différents.');
+        const target = db.getFileById(targetId);
+        const source = sourceId === undefined ? undefined : db.getFileById(sourceId);
+        if (!target || (sourceId !== undefined && !source)) throw new HttpError(404, 'Un des fichiers est introuvable.');
+        const incomingName = uploaded ? uploadedName(uploaded) : '';
+        const otherName = source?.name ?? incomingName;
+        if (otherName.toLowerCase() === target.name.toLowerCase()) throw new HttpError(409, 'Les deux fichiers portent le même nom. Renommez-en un pour les regrouper.');
+        if (db.folderExistsWithSiblingName(target.folder_id, name)) throw new HttpError(409, 'Un dossier porte déjà ce nom à cet endroit');
+
+        const folder = db.createFolder(userId, name, target.folder_id);
+        logDocEvent(userId, { folderId: folder.id, action: 'folder_created', detail: `Dossier « ${name} » créé par regroupement` });
+        for (const file of source ? [target, source] : [target]) {
+          db.moveFile(file.id, folder.id);
+          logDocEvent(userId, { fileId: file.id, folderId: folder.id, action: 'file_moved', detail: `déplacé vers le dossier « ${name} »` });
+        }
+        const imported = uploaded
+          ? db.insertFile(userId, null, incomingName, uploaded.mimetype || 'application/octet-stream', uploaded.size, uploaded.filename, null, folder.id)
+          : null;
+        if (imported) logDocEvent(userId, { fileId: imported.id, folderId: folder.id, action: 'file_created', detail: `« ${imported.name} » déposé` });
+        return { folder, imported };
+      });
+    } catch (error) {
+      discardUploadedFile(uploaded);
+      res.status(error instanceof HttpError ? error.statusCode : 500).json({ error: error instanceof HttpError ? error.message : 'Impossible de regrouper les fichiers.' });
+      return;
+    }
+    docsChanged();
+    if (result.imported) void indexUploadedDocument(result.imported);
+    res.status(201).json({ folder: toPublicFolder(result.folder) });
   });
 
   const timestamp = z.string().regex(/^-?\d+$/).transform(Number).pipe(z.number().int().safe());
@@ -603,7 +656,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
     }
     const newName = name ?? folder.name;
     const newParent = parentId === undefined ? folder.parent_id : parentId;
-    if (newName.toLowerCase() !== folder.name.toLowerCase() && db.folderExistsWithSiblingName(newParent, newName, id)) {
+    if ((newParent !== folder.parent_id || newName.toLowerCase() !== folder.name.toLowerCase()) && db.folderExistsWithSiblingName(newParent, newName, id)) {
       res.status(409).json({ error: 'Un dossier porte déjà ce nom à cet endroit' });
       return;
     }
@@ -674,7 +727,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       seen.add(cur);
       const f = db.getFolderById(cur);
       if (!f) break;
-      folderPath.unshift(toPublicFolder(f));
+      folderPath.push(toPublicFolder(f));
       cur = f.parent_id;
     }
     res.json({
@@ -683,7 +736,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
         messageId: file.message_id,
         user: toPublicUser(db.getUserById(file.user_id)!),
       },
-      folderPath,
+      folderPath: folderPath.reverse(),
       history: db.listFileEvents({ fileId: file.id, limit: 200 }).map(toPublicEvent),
     });
   });
