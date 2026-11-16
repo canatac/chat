@@ -1,5 +1,7 @@
 import ArticleOutlinedIcon from '@mui/icons-material/ArticleOutlined';
 import AudioFileOutlinedIcon from '@mui/icons-material/AudioFileOutlined';
+import CheckBoxIcon from '@mui/icons-material/CheckBox';
+import CheckBoxOutlineBlankIcon from '@mui/icons-material/CheckBoxOutlineBlank';
 import DownloadOutlinedIcon from '@mui/icons-material/DownloadOutlined';
 import DragIndicatorIcon from '@mui/icons-material/DragIndicator';
 import FolderOpenOutlinedIcon from '@mui/icons-material/FolderOpenOutlined';
@@ -9,6 +11,7 @@ import MoreHorizIcon from '@mui/icons-material/MoreHoriz';
 import MovieOutlinedIcon from '@mui/icons-material/MovieOutlined';
 import PictureAsPdfOutlinedIcon from '@mui/icons-material/PictureAsPdfOutlined';
 import SearchOffOutlinedIcon from '@mui/icons-material/SearchOffOutlined';
+import SelectAllIcon from '@mui/icons-material/SelectAll';
 import { Box, Button, ButtonBase, CircularProgress, IconButton, Skeleton, Tooltip, Typography } from '@mui/material';
 import type { ReactNode } from 'react';
 import { formatFileSize } from '../formatFileSize';
@@ -16,6 +19,7 @@ import { chatColors } from '../theme';
 import type { FileFilters, FileItem, FileSort, Folder } from '../types';
 import { documentDropAttributes, documentDropStyle } from '../useDocumentDrag';
 import type useDocumentDrag from '../useDocumentDrag';
+import type { SelectedDocuments } from '../useDocumentSelection';
 import DocumentColumnControls from './DocumentColumnControls';
 
 export const explorerColors = {
@@ -46,6 +50,9 @@ interface Props {
   onMenu: (target: DocumentItem, anchor: HTMLElement) => void;
   drag: Pick<ReturnType<typeof useDocumentDrag>, 'handle' | 'surface'>;
   dragDisabled: boolean;
+  selection: SelectedDocuments | null;
+  onStartSelection: () => void;
+  onToggleSelection: (target: DocumentItem) => void;
 }
 
 const dayFormatter = new Intl.DateTimeFormat('fr-FR', { day: 'numeric', month: 'short', year: 'numeric' });
@@ -148,20 +155,28 @@ type EntryProps = Pick<Props, 'onOpenFolder' | 'onOpenFile' | 'onDownload' | 'on
   grid: boolean;
   description: string;
   isDownloading: boolean;
+  selected?: boolean;
+  onSelect: () => void;
 };
 
-function DocumentEntry({ target, grid, description, isDownloading, onOpenFolder, onOpenFile, onDownload, onMenu, drag, dragDisabled }: EntryProps) {
+function DocumentEntry({ target, grid, description, isDownloading, onOpenFolder, onOpenFile, onDownload, onMenu, drag, dragDisabled, selected, onSelect }: EntryProps) {
   const { item } = target;
   const file = target.kind === 'file' ? target.item : null;
   const date = dayFormatter.format(new Date(item.updatedAt ?? item.createdAt));
   const size = file ? formatFileSize(file.size) : '';
+  const selectable = selected !== undefined;
+  const SelectionIcon = selected ? CheckBoxIcon : CheckBoxOutlineBlankIcon;
+  const activate = selectable ? onSelect : () => file ? onOpenFile(file) : onOpenFolder(item.id);
   return (
-    <Box component="li" {...documentDropAttributes({ kind: target.kind, id: item.id })} sx={{ ...(grid ? cardStyle : rowStyle), ...documentDropStyle }}>
+    <Box component="li" {...documentDropAttributes({ kind: target.kind, id: item.id })} sx={{ ...(grid ? cardStyle : rowStyle), ...(selected && { bgcolor: explorerColors.accentSoft }), ...documentDropStyle }}>
       <ButtonBase
-        aria-label={(file ? 'Détails de ' : 'Ouvrir le dossier ') + item.name}
+        role={selectable ? 'checkbox' : undefined}
+        aria-checked={selected}
+        aria-label={(selectable ? 'Sélectionner ' : file ? 'Détails de ' : 'Ouvrir le dossier ') + item.name}
         title={item.name}
-        {...drag.surface(target, () => file ? onOpenFile(file) : onOpenFolder(item.id))}
+        {...drag.surface(target, activate)}
         sx={{
+          position: 'relative',
           display: 'flex', flexDirection: grid ? 'column' : 'row', alignItems: 'center',
           justifyContent: grid ? 'center' : 'flex-start', flex: grid ? 1 : undefined,
           gap: grid ? 1 : 1.2, minWidth: 0, width: '100%', minHeight: grid ? 146 : 58, p: grid ? 1 : 0.9,
@@ -170,7 +185,8 @@ function DocumentEntry({ target, grid, description, isDownloading, onOpenFolder,
           '&.Mui-focusVisible': { outline: '2px solid ' + explorerColors.accent, outlineOffset: -2 },
         }}
       >
-        <DocumentIcon target={target} grid={grid} />
+        {(!selectable || grid) && <DocumentIcon target={target} grid={grid} />}
+        {selectable && <SelectionIcon sx={{ flexShrink: 0, color: selected ? explorerColors.accent : explorerColors.muted, ...(grid ? { position: 'absolute', top: 7, left: 7 } : { mx: 0.7 }), fontSize: 22 }} />}
         <Box component="span" sx={{ display: 'block', minWidth: 0, width: grid ? '100%' : undefined, flex: grid ? undefined : 1 }}>
           <DocumentName name={item.name} grid={grid} />
           <Typography component="span" variant="caption" noWrap display="block" title={description} sx={{ color: explorerColors.muted }}>
@@ -247,6 +263,7 @@ function EmptyFiles({ searching, filtered, recent }: { searching: boolean; filte
 export default function DocumentExplorerList({
   folders, files, loading, searching, recent, view, sort, filters, onSort, onFilter,
   downloading, folderPath, onOpenFolder, onOpenFile, onDownload, onMenu, drag, dragDisabled,
+  selection, onStartSelection, onToggleSelection,
 }: Props) {
   const grid = view === 'grid';
   const filtered = Object.values(filters).some((value) => value !== undefined);
@@ -271,11 +288,18 @@ export default function DocumentExplorerList({
     <Box component="section" aria-label="Contenu documentaire">
       <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, minHeight: 29, mb: 0.65 }}>
         <Typography role="status" variant="caption" sx={{ color: explorerColors.muted, fontWeight: 650 }}>{counts}</Typography>
-        {filtered && (
-          <Button size="small" onClick={() => onFilter({})} sx={{ textTransform: 'none', color: explorerColors.accent, fontWeight: 700 }}>
-            Effacer les filtres
-          </Button>
-        )}
+        <Box sx={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          {filtered && (
+            <Button size="small" onClick={() => onFilter({})} sx={{ textTransform: 'none', color: explorerColors.accent, fontWeight: 700 }}>
+              Effacer les filtres
+            </Button>
+          )}
+          {selection === null && (
+            <Button size="small" startIcon={<SelectAllIcon />} onClick={onStartSelection} disabled={!entries.length || loading || dragDisabled} sx={{ minHeight: 36, textTransform: 'none', color: explorerColors.accent, fontWeight: 700 }}>
+              Sélectionner
+            </Button>
+          )}
+        </Box>
       </Box>
       <Box sx={{ border: '1px solid ' + explorerColors.border, borderRadius: '12px', bgcolor: explorerColors.surface, overflow: 'hidden' }}>
         <DocumentColumnControls desktopColumns={grid ? 'repeat(3, minmax(0, 120px))' : fileColumns} sort={sort} filters={filters} onSort={onSort} onFilter={onFilter} />
@@ -305,6 +329,8 @@ export default function DocumentExplorerList({
                   onMenu={onMenu}
                   drag={drag}
                   dragDisabled={dragDisabled}
+                  selected={selection && (target.kind === 'file' || !filtered) ? selection[target.kind].has(target.item.id) : undefined}
+                  onSelect={() => onToggleSelection(target)}
                 />
               );
             })}
