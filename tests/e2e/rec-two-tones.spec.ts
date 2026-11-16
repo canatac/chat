@@ -105,7 +105,7 @@ test('deux voix dans un seul fichier (440 Hz + 880 Hz), REC lancé par A arrêt�
   await pageA.waitForTimeout(3000);
 
   await pageB.getByRole('button', { name: /Arrêter l/i }).click();
-  await pageA.getByText(/Déposé|Envoi en cours/).first().waitFor({ timeout: 15000 });
+  await expect(pageA.getByText('Déposé ✓', { exact: true })).toBeVisible({ timeout: 15000 });
 
   const files = await callApi(pageA, 'GET', `${BASE}/api/files?query=appel-`);
   const file = (files as { files: { id: number; name: string; size: number }[] }).files[0];

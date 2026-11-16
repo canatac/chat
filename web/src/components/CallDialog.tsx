@@ -87,7 +87,7 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
   const sessionRef = useRef<CallSession | null>(null);
   const knownPeersRef = useRef<Set<number>>(new Set());
   const audioElsRef = useRef<Map<number, HTMLAudioElement>>(new Map());
-  const lastRecordingIdRef = useRef<string | null>(null);
+  const localRecordingIdRef = useRef<string | null>(null);
 
   const rec = call?.recording ?? null;
 
@@ -177,48 +177,47 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
     const session = sessionRef.current;
     if (!session || !joined) return;
     if (recNow) {
-      lastRecordingIdRef.current = recNow.id;
       if (recNow.startedBy.id === user.id && !session.isRecording()) {
         try {
           session.startRecording(() => {});
+          localRecordingIdRef.current = recNow.id;
           setRecStatus('recording');
         } catch (err) {
           setError(err instanceof Error ? err.message : "Erreur d'enregistrement");
         }
       }
-    } else if (lastRecordingIdRef.current && session.isRecording() && rec?.startedBy.id === user.id) {
-      const rid = lastRecordingIdRef.current;
-      lastRecordingIdRef.current = null;
-      if (call && call.id) {
-        const ext = session.recordingExtension();
-        session.stopRecordingWith((blob) => {
-          if (!call) return;
-          if (blob.size === 0) {
-            setError('Enregistrement vide (0 s) — aucun échantillon audio capturé.');
-            setRecStatus('error');
-            return;
-          }
-          setRecStatus('uploading');
-          void api
-            .uploadRecording(call.id, blob, `appel-${call.id}-${Date.now()}.${ext}`, rid)
-            .then((r) => {
-              setRecStatus('done');
-              setNote(
-                r.duplicate
-                  ? 'Fichier déjà déposé (renvoi ignoré — idempotent).'
-                  : r.transcriptPending
-                    ? 'Enregistrement déposé — transcription en cours, à retrouver dans l’espace documentaire'
-                    : 'Enregistrement déposé dans l’espace documentaire (STT non configuré : pas de transcription)',
-              );
-            })
-            .catch((e) => {
-              setRecStatus('error');
-              setError(e instanceof Error ? e.message : "Erreur d'envoi — le fichier reste dispo pour un nouvel essai");
-            });
-        });
-      }
+      return;
     }
-  }, [call?.recording, joined, user.id, rec?.startedBy.id, call]);
+
+    const recordingId = localRecordingIdRef.current;
+    if (!call || !recordingId || !session.isRecording()) return;
+    localRecordingIdRef.current = null;
+    const ext = session.recordingExtension();
+    session.stopRecordingWith((blob) => {
+      if (blob.size === 0) {
+        setError('Enregistrement vide (0 s) — aucun échantillon audio capturé.');
+        setRecStatus('error');
+        return;
+      }
+      setRecStatus('uploading');
+      void api
+        .uploadRecording(call.id, blob, `appel-${call.id}-${Date.now()}.${ext}`, recordingId)
+        .then((r) => {
+          setRecStatus('done');
+          setNote(
+            r.duplicate
+              ? 'Fichier déjà déposé (renvoi ignoré — idempotent).'
+              : r.transcriptPending
+                ? 'Enregistrement déposé — transcription en cours, à retrouver dans l’espace documentaire'
+                : 'Enregistrement déposé dans l’espace documentaire (STT non configuré : pas de transcription)',
+          );
+        })
+        .catch((e) => {
+          setRecStatus('error');
+          setError(e instanceof Error ? e.message : "Erreur d'envoi — le fichier reste dispo pour un nouvel essai");
+        });
+    });
+  }, [call, joined, user.id]);
 
   useEffect(() => {
     return () => {
@@ -330,11 +329,11 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
   const videoStream = sessionRef.current?.getVideoStream() ?? null;
 
   const recChip = () => {
-    if (!rec) return null;
+    if (rec) return <Chip size="small" color="error" label={`REC — ${rec.startedBy.name}`} />;
     if (recStatus === 'uploading') return <Chip size="small" color="warning" label="Envoi en cours…" />;
     if (recStatus === 'done') return <Chip size="small" color="success" label="Déposé ✓" />;
     if (recStatus === 'error') return <Chip size="small" color="error" label="Échec" />;
-    return <Chip size="small" color="error" label={`REC — ${rec.startedBy.name}`} />;
+    return null;
   };
 
   return (
