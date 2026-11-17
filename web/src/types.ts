@@ -180,13 +180,22 @@ export interface MeetingInput {
   participantIds: number[];
 }
 
+export interface MeetingContactInvitation {
+  id: number;
+  email?: string;
+  expiresAt: number;
+}
+
 export interface Meeting extends Omit<MeetingInput, 'participantIds'> {
   id: number;
   organizerId: number;
   participants: { id: number; name: string; response: MeetingResponse }[];
+  pendingContacts: MeetingContactInvitation[];
+  present: { id: number; name: string }[];
   artifacts: MeetingArtifact[];
   status: 'scheduled' | 'live' | 'held' | 'past' | 'cancelled';
   canEdit: boolean;
+  canManageParticipants: boolean;
   canEnter: boolean;
 }
 

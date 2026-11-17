@@ -89,6 +89,7 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
   const [agendaResult, setAgendaResult] = useState<AgendaAssistantResponse>();
   const [agendaRevision, setAgendaRevision] = useState(0);
   const [pendingInvitations, setPendingInvitations] = useState(0);
+  const [liveInvitation, setLiveInvitation] = useState<Pick<Meeting, 'id' | 'title'>>();
   const [document, setDocument] = useState<MeetingArtifact>();
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [openingNotification, setOpeningNotification] = useState<number | null>(null);
@@ -108,6 +109,22 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
 
   const usersById = useMemo(() => new Map(users.map((member) => [member.id, member])), [users]);
   const displayUser = { ...user, ...usersById.get(user.id) };
+  const canInviteContacts = user.role === 'admin' || user.role === 'superadmin';
+
+  function openMeetingCall(meeting: Meeting) {
+    setCallMeeting(meeting);
+    setCallOpen(true);
+  }
+
+  async function openInvitedCall(id: number) {
+    setLiveInvitation(undefined);
+    try {
+      const { meeting } = await api.agenda.get(id);
+      openMeetingCall(meeting);
+    } catch {
+      setAgendaOpen(true);
+    }
+  }
 
   const listRef = useRef<HTMLDivElement>(null);
   const followMessages = useRef(true);
@@ -149,7 +166,7 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
     const activeSocket = new ChatSocket(token, selectedRoom);
     let receivedPresence = false;
     let connectedBefore = false;
-    let receivedCall = false;
+    let callVersion = 0;
     let knownUsers = new Set<number>();
     const refreshUsers = () => {
       void api.users()
@@ -161,11 +178,15 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
         })
         .catch(() => {});
     };
+    const refreshCall = () => {
+      const version = callVersion;
+      void api.calls.active().then((result) => {
+        if (!request.signal.aborted && version === callVersion) setCall(result.call);
+      }).catch(() => {});
+    };
     void loadRecent(request.signal);
     refreshUsers();
-    void api.calls.active()
-      .then((result) => { if (!request.signal.aborted && !receivedCall) setCall(result.call); })
-      .catch(() => {});
+    refreshCall();
 
     activeSocket.onStatus((online) => {
       if (request.signal.aborted) return;
@@ -173,6 +194,7 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
       if (online && connectedBefore) {
         void loadRecent(request.signal, true);
         refreshUsers();
+        refreshCall();
       }
       if (online) {
         connectedBefore = true;
@@ -193,12 +215,16 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
         if (event.online.some((id) => !knownUsers.has(id))) refreshUsers();
       } else if (event.type === 'membersChanged') {
         refreshUsers();
+        setAgendaRevision((value) => value + 1);
       } else if (event.type === 'roomUnavailable') {
         location.reload();
       } else if (event.type === 'call') {
-        receivedCall = true;
+        callVersion++;
         setCall(event.call ?? null);
+        if (!event.call) setLiveInvitation(undefined);
         setAgendaRevision((value) => value + 1);
+      } else if (event.type === 'agendaInvitation' && event.meeting) {
+        setLiveInvitation(event.meeting);
       } else if (event.type === 'agendaChanged' || event.type === 'docsChanged') {
         setAgendaRevision((value) => value + 1);
       }
@@ -512,16 +538,25 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
           </Alert>
         </Snackbar>
       )}
+      {liveInvitation && (
+        <Snackbar key={liveInvitation.id} open={!callOpen} autoHideDuration={8500} onClose={() => setLiveInvitation(undefined)}>
+          <Alert severity="info" role="status" sx={{ alignItems: 'center', maxWidth: '100%', overflowWrap: 'anywhere' }}
+            action={<Button color="inherit" onClick={() => void openInvitedCall(liveInvitation.id)} sx={{ minHeight: 44 }}>Ouvrir l’appel</Button>}>
+            Invitation à « {liveInvitation.title} »
+          </Alert>
+        </Snackbar>
+      )}
 
       <DocDrawer open={docOpen} onClose={() => setDocOpen(false)} socket={socket} />
-      <AgendaDrawer open={agendaOpen} onClose={() => setAgendaOpen(false)} users={users} ownId={user.id}
-        onCall={(meeting) => { setCallMeeting(meeting); setCallOpen(true); }} onRead={setDocument}
+      <AgendaDrawer open={agendaOpen} onClose={() => setAgendaOpen(false)} users={users} ownId={user.id} canInviteContacts={canInviteContacts}
+        onCall={openMeetingCall} onRead={setDocument}
         pending={pendingInvitations} revision={agendaRevision} assistantResult={agendaResult} />
       {(user.role === 'admin' || user.role === 'superadmin') && <AdminDialog open={statsOpen} onClose={() => setStatsOpen(false)} />}
       <CallDialog
         open={callOpen}
         onClose={() => setCallOpen(false)}
         user={user}
+        users={users}
         socket={socket}
         call={call}
         requestedMeeting={callMeeting}

@@ -68,6 +68,13 @@ choix pour faire des comptes-rendus de réunion ou proposer des solutions aux pr
 3. **Suggérer des créneaux** tient compte des invitations du salon et des réponses. **Exporter en .ics** permet d’ajouter la réunion à un calendrier externe.
 4. Ouvre l’appel depuis sa fiche pour y rattacher l’enregistrement, la transcription et le compte rendu. À partir d’une transcription, **Générer le compte rendu** utilise le LLM configuré. **Lire le compte rendu** ouvre le document dans la fiche.
 
+**Gérer les participants et les contacts**
+
+- Dans la fiche de la réunion ou la fenêtre de l’appel, l’organisateur et l’administration du salon peuvent ouvrir **Gérer les participants**. Recherche un contact par alias et ajoute-le. Si l’appel est en cours, le membre connecté reçoit un bouton pour l’ouvrir.
+- **Retirer** déconnecte le participant d’un appel en cours et retire son invitation à cette réunion. Il reste dans les contacts du salon. Les autres invités conservent leurs réponses et l’historique des présences est conservé.
+- Les administrateurs peuvent inviter un nouveau contact par e-mail depuis cette fenêtre. Copie et transmets le lien à usage unique. Quand la personne rejoint le salon, elle est ajoutée aux réunions auxquelles le lien était rattaché. Elle peut y répondre depuis **Agenda → Invitations**.
+- Dans **Membres**, recherche un contact par alias. **Gérer les contacts** ouvre l’administration pour modifier l’alias, l’e-mail ou l’avatar, renouveler ou révoquer une invitation et retirer un membre du salon. Renouveler un lien invalide l’ancien lien et conserve ses réunions associées.
+
 L’assistant de l’agenda utilise le `LLM_MODEL` du salon. Dans le chat, `/agenda` ouvre le panneau et `/agenda <demande>` y affiche la réponse en privé.
 
 - `/agenda Planifie une revue avec Camille demain à 14 h pendant 45 minutes. Ordre du jour : démo et décisions.` ouvre un brouillon à valider.

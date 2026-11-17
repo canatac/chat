@@ -37,7 +37,10 @@ export interface InvitationRow {
   expires_at: number;
   used_at: number | null;
   revoked_at: number | null;
+  accepted_account_id: number | null;
 }
+
+const invitationColumns = 'id, room_id, email, role, expires_at, used_at, revoked_at, accepted_account_id';
 
 function invitationDigest(token: string): string {
   return createHash('sha256').update(token).digest('hex');
@@ -86,10 +89,15 @@ export class RoomDirectory {
         token_hash TEXT NOT NULL UNIQUE,
         expires_at INTEGER NOT NULL,
         used_at INTEGER,
-        revoked_at INTEGER
+        revoked_at INTEGER,
+        accepted_account_id INTEGER REFERENCES accounts(id)
       );
       CREATE INDEX IF NOT EXISTS idx_invitations_room ON invitations(room_id, expires_at);
     `);
+    const columns = this.db.prepare('PRAGMA table_info(invitations)').all();
+    if (!columns.some(({ name }) => name === 'accepted_account_id')) {
+      this.db.exec('ALTER TABLE invitations ADD COLUMN accepted_account_id INTEGER REFERENCES accounts(id)');
+    }
 
     this.transaction(() => {
       if (this.getRoom(LEGACY_ROOM_ID)) return;
@@ -244,8 +252,31 @@ export class RoomDirectory {
 
   listInvitations(roomId: number): InvitationRow[] {
     return this.db.prepare(
-      'SELECT id, room_id, email, role, expires_at, used_at, revoked_at FROM invitations WHERE room_id = ? AND used_at IS NULL AND revoked_at IS NULL AND expires_at > ? ORDER BY id DESC',
+      'SELECT ' + invitationColumns + ' FROM invitations WHERE room_id = ? AND used_at IS NULL AND revoked_at IS NULL AND expires_at > ? ORDER BY id DESC',
     ).all(roomId, Date.now()) as unknown as InvitationRow[];
+  }
+
+  getInvitation(roomId: number, id: number): InvitationRow | undefined {
+    return this.db.prepare(
+      'SELECT ' + invitationColumns + ' FROM invitations WHERE room_id = ? AND id = ?',
+    ).get(roomId, id) as unknown as InvitationRow | undefined;
+  }
+
+  private latestUnclaimedInvitation(roomId: number, email: string): InvitationRow | undefined {
+    return this.db.prepare(
+      'SELECT ' + invitationColumns + ' FROM invitations WHERE room_id = ? AND email = ? AND used_at IS NULL AND revoked_at IS NULL ORDER BY id DESC LIMIT 1',
+    ).get(roomId, email) as unknown as InvitationRow | undefined;
+  }
+
+  pendingInvitation(roomId: number, email: string): InvitationRow | undefined {
+    const invitation = this.latestUnclaimedInvitation(roomId, email);
+    return activeInvite(invitation) ? invitation : undefined;
+  }
+
+  acceptedInvitations(roomId: number, ids: number[]): { id: number; accountId: number }[] {
+    return this.db.prepare(`SELECT id, accepted_account_id AS accountId FROM invitations
+      WHERE room_id = ? AND accepted_account_id IS NOT NULL AND id IN (SELECT value FROM json_each(?))`)
+      .all(roomId, JSON.stringify(ids)) as unknown as { id: number; accountId: number }[];
   }
 
   createInvitation(roomId: number, email: string, role: RoomRole): { invitation: InvitationRow; token: string } | undefined {
@@ -254,16 +285,19 @@ export class RoomDirectory {
       if (existing) {
         if (existing.room_id !== roomId || existing.removed_at === null || this.role(existing) === 'superadmin') return undefined;
       } else if (this.reservedEmail(email)) return undefined;
-      const now = Date.now();
       const token = randomBytes(32).toString('base64url');
-      this.db.prepare('UPDATE invitations SET revoked_at = ? WHERE room_id = ? AND email = ? AND used_at IS NULL AND revoked_at IS NULL').run(now, roomId, email);
+      const digest = invitationDigest(token);
+      const expiresAt = Date.now() + INVITATION_LIFETIME;
+      const pending = this.latestUnclaimedInvitation(roomId, email);
+      if (pending) {
+        this.db.prepare('UPDATE invitations SET token_hash = ?, expires_at = ?, role = ? WHERE id = ?')
+          .run(digest, expiresAt, role, pending.id);
+        return { invitation: { ...pending, expires_at: expiresAt, role }, token };
+      }
       const result = this.db.prepare(
         'INSERT INTO invitations(room_id, email, role, token_hash, expires_at) VALUES (?, ?, ?, ?, ?)',
-      ).run(roomId, email, role, invitationDigest(token), now + INVITATION_LIFETIME);
-      const invitation = this.db.prepare(
-        'SELECT id, room_id, email, role, expires_at, used_at, revoked_at FROM invitations WHERE id = ?',
-      ).get(result.lastInsertRowid) as unknown as InvitationRow;
-      return { invitation, token };
+      ).run(roomId, email, role, digest, expiresAt);
+      return { invitation: this.getInvitation(roomId, Number(result.lastInsertRowid))!, token };
     });
   }
 
@@ -275,7 +309,7 @@ export class RoomDirectory {
 
   invitationFor(token: string): { invitation: InvitationRow; room: RoomRow } | undefined {
     const invitation = this.db.prepare(
-      'SELECT id, room_id, email, role, expires_at, used_at, revoked_at FROM invitations WHERE token_hash = ?',
+      'SELECT ' + invitationColumns + ' FROM invitations WHERE token_hash = ?',
     ).get(invitationDigest(token)) as unknown as InvitationRow | undefined;
     if (!activeInvite(invitation)) return undefined;
     const room = this.getRoom(invitation.room_id);
@@ -301,7 +335,8 @@ export class RoomDirectory {
       } else {
         account = this.insertAccount(email, alias, email, hash, roomId, role);
       }
-      this.db.prepare('UPDATE invitations SET used_at = ? WHERE id = ?').run(Date.now(), invitation.id);
+      this.db.prepare('UPDATE invitations SET used_at = ?, accepted_account_id = ? WHERE id = ?')
+        .run(Date.now(), account.id, invitation.id);
       return account;
     });
   }

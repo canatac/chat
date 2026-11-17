@@ -8,6 +8,7 @@ import multer from 'multer';
 import { WebSocket, WebSocketServer } from 'ws';
 import { z } from 'zod';
 import { canEnterMeeting, mountAgenda } from './agenda.js';
+import type { MeetingRow } from './agenda-store.js';
 import { hashPassword } from './auth.js';
 import type { Config } from './config.js';
 import { DB, type CallRow, type FileEventListRow, type FileListRow, type FileRow, type FolderRow, type MentionNotificationRow, type MessageRow, type UserRow } from './db.js';
@@ -190,6 +191,36 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
     for (const socket of sockets) {
       if (socket.readyState === WebSocket.OPEN) socket.send(data);
     }
+  }
+
+  function notifyMeetingInvite(meeting: MeetingRow, userId: number): void {
+    if (activeCall?.row.meeting_id === meeting.id) {
+      notifyUser(userId, { type: 'agendaInvitation', meeting: { id: meeting.id, title: meeting.title } });
+    }
+  }
+
+  function activateContact(invitationId: number, account: Account): void {
+    const meetings = db.transaction(() => {
+      if (account.removed_at !== null) {
+        db.agenda.discardContactInvitation(invitationId);
+        return [];
+      }
+      db.ensureActor(account);
+      return db.agenda.acceptContact(invitationId, account.id, activeCall?.row.meeting_id ?? null);
+    });
+    for (const meeting of meetings) notifyMeetingInvite(meeting, account.id);
+    if (meetings.length) broadcast({ type: 'agendaChanged' });
+  }
+
+  function dropCallParticipant(userId: number, removed = false): void {
+    if (!activeCall?.participants.delete(userId)) return;
+    if (removed) notifyUser(userId, { type: 'callParticipantRemoved', callId: activeCall.row.id });
+    if (activeCall.recording?.startedBy === userId) activeCall.recording = null;
+    if (activeCall.participants.size === 0) {
+      db.endCall(activeCall.row.id);
+      activeCall = null;
+    }
+    broadcastCall();
   }
 
   function broadcastPresence(): void {
@@ -390,8 +421,16 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
     });
   });
 
-  mountAgenda(app, { db, config, directory, roomId, activeMeeting: () => activeCall?.row.meeting_id ?? null,
-    changed: () => broadcast({ type: 'agendaChanged' }) });
+  mountAgenda(app, {
+    db, config, directory, roomId,
+    activeMeeting: () => activeCall?.row.meeting_id ?? null,
+    activeParticipants: (meetingId) => activeCall?.row.meeting_id === meetingId ? [...activeCall.participants] : [],
+    removeFromCall: (meetingId, userId) => {
+      if (activeCall?.row.meeting_id === meetingId) dropCallParticipant(userId, true);
+    },
+    invited: notifyMeetingInvite,
+    changed: () => broadcast({ type: 'agendaChanged' }),
+  });
 
   app.get('/api/calls/active', (req, res) => {
     res.json({ call: serializeCall() });
@@ -413,6 +452,11 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
 
   const callTitleSchema = z.object({ title: z.string().trim().max(120).optional(), meetingId: positiveId.optional() });
   const callJoinSchema = z.object({ callId: positiveId.optional(), meetingId: positiveId.optional() });
+  const callActionSchema = callJoinSchema.pick({ callId: true });
+  const isCurrentCall = (body: unknown) => {
+    const parsed = callActionSchema.safeParse(body ?? {});
+    return parsed.success && (parsed.data.callId === undefined || parsed.data.callId === activeCall?.row.id);
+  };
   const canUseCall = (row: CallRow, req: express.Request) => row.meeting_id === null || canEnterMeeting(db, row.meeting_id, req.user?.id ?? -1, req.user?.role);
 
   app.post('/api/calls/start', (req, res) => {
@@ -460,12 +504,8 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       res.status(404).json({ error: 'Aucun appel en cours' });
       return;
     }
-    activeCall.participants.delete(req.user?.id ?? -1);
-    if (activeCall.participants.size === 0) {
-      db.endCall(activeCall.row.id);
-      activeCall = null;
-    }
-    broadcastCall();
+    if (!isCurrentCall(req.body)) { res.status(409).json({ error: 'L’appel actif a changé.' }); return; }
+    dropCallParticipant(req.user?.id ?? -1);
     res.json({ call: serializeCall() });
   });
 
@@ -474,6 +514,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       res.status(404).json({ error: 'Aucun appel en cours' });
       return;
     }
+    if (!isCurrentCall(req.body)) { res.status(409).json({ error: 'L’appel actif a changé.' }); return; }
     if (!canUseCall(activeCall.row, req)) { res.status(403).json({ error: 'Cet appel est réservé aux participants invités.' }); return; }
     db.endCall(activeCall.row.id);
     activeCall = null;
@@ -1137,7 +1178,11 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       res.status(404).json({ error: 'Appel introuvable' });
       return;
     }
-    if (!canUseCall(call, req)) {
+    const userId = req.user?.id ?? -1;
+    const recordingId = typeof req.body.recordingId === 'string' && req.body.recordingId ? req.body.recordingId : null;
+    const recording = recordingId ? db.getRecording(recordingId) : undefined;
+    const ownsTake = recording?.call_id === call.id && recording.user_id === userId;
+    if (!canUseCall(call, req) && !ownsTake) {
       discardUploadedFile(req.file);
       res.status(403).json({ error: 'Cet appel est réservé aux participants invités.' });
       return;
@@ -1146,22 +1191,20 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       res.status(400).json({ error: 'Champ "file" requis' });
       return;
     }
-    const recordingId = typeof req.body.recordingId === 'string' && req.body.recordingId ? req.body.recordingId : null;
     if (recordingId) {
-      const existing = db.getRecording(recordingId);
-      if (!existing || existing.call_id !== call.id) {
+      if (!recording || recording.call_id !== call.id) {
         discardUploadedFile(req.file);
         res.status(400).json({ error: 'recordingId inconnu' });
         return;
       }
-      if (existing.user_id !== (req.user?.id ?? -1)) {
+      if (!ownsTake) {
         discardUploadedFile(req.file);
         res.status(403).json({ error: "Seul l'auteur de la prise peut déposer son fichier" });
         return;
       }
-      if (existing.file_id) {
+      if (recording.file_id) {
         discardUploadedFile(req.file);
-        const file = db.getFileById(existing.file_id);
+        const file = db.getFileById(recording.file_id);
         const messageRow = file?.message_id ? db.getMessageById(file.message_id) : undefined;
         res.status(200).json({
           file: file ? toPublicFile(file) : null,
@@ -1371,15 +1414,10 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       for (const ws of sockets) disconnect(ws, 'Accès au salon révoqué');
       broadcastPresence();
     }
-    if (activeCall?.participants.delete(accountId)) {
-      if (activeCall.recording?.startedBy === accountId) activeCall.recording = null;
-      if (activeCall.participants.size === 0) {
-        db.endCall(activeCall.row.id);
-        activeCall = null;
-      }
-      broadcastCall();
-    }
+    db.agenda.removeContact(accountId);
+    dropCallParticipant(accountId);
     broadcast({ type: 'membersChanged' });
+    broadcast({ type: 'agendaChanged' });
   }
 
   function archive(): void {
@@ -1391,7 +1429,12 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
     for (const ws of clients) disconnect(ws, 'Ce salon est archivé');
   }
 
-  return { app, db, broadcast, connect, onlineUserIds, removeMember, archive };
+  const pendingContacts = db.agenda.linkedInvitationIds();
+  for (const { id, accountId } of directory.acceptedInvitations(roomId, pendingContacts)) {
+    const account = directory.getAccount(accountId);
+    if (account) activateContact(id, account);
+  }
+  return { app, db, broadcast, connect, onlineUserIds, activateContact, removeMember, archive };
 }
 
 export function createServer(config: Config, dataDir: string): ServerContext {
@@ -1415,13 +1458,18 @@ export function createServer(config: Config, dataDir: string): ServerContext {
   app.post('/api/documents/batch', express.json({ limit: '1mb' }));
   app.use(express.json({ limit: '64kb' }));
   const { auth, resolveAccount } = mountRoomAdmin(app, config, directory, {
-    memberChanged(roomId, account) {
+    memberChanged(roomId, account, invitationId) {
       const runtime = runtimes.get(roomId);
-      runtime?.db.ensureActor(account);
-      runtime?.broadcast({ type: 'membersChanged' });
+      if (!runtime) return;
+      if (invitationId === undefined) runtime.db.ensureActor(account);
+      else runtime.activateContact(invitationId, account);
+      runtime.broadcast({ type: 'membersChanged' });
+    },
+    invitationsChanged(roomId) {
+      runtimes.get(roomId)?.broadcast({ type: 'agendaChanged' });
     },
     memberRemoved(roomId, accountId) {
-      runtimes.get(roomId)?.removeMember(accountId);
+      runtimeFor(roomId).removeMember(accountId);
     },
     roomArchived(roomId) {
       runtimes.get(roomId)?.archive();

@@ -43,6 +43,12 @@ export function openRoom(roomId: number): void {
   location.assign(url);
 }
 
+export function invitationUrl(token: string): string {
+  const url = new URL(location.pathname, location.origin);
+  url.hash = 'invitation=' + token;
+  return url.href;
+}
+
 function sessionHeaders(): Record<string, string> {
   const token = getToken();
   return {
@@ -199,8 +205,14 @@ export const api = {
       req<{ meetings: Meeting[] }>(`/api/agenda?from=${from}&until=${until}`, { signal }),
     get: (id: number, signal?: AbortSignal) => req<{ meeting: Meeting }>(`/api/agenda/${id}`, { signal }),
     create: (input: MeetingInput) => req<{ meeting: Meeting }>('/api/agenda', { method: 'POST', body: JSON.stringify(input) }),
-    edit: (id: number, input: MeetingInput) =>
+    edit: (id: number, input: Omit<MeetingInput, 'participantIds'> & { participantIds?: number[]; expectedParticipantIds?: number[] }) =>
       req<{ meeting: Meeting }>(`/api/agenda/${id}`, { method: 'PATCH', body: JSON.stringify(input) }),
+    addParticipant: (id: number, contact: { userId: number } | { email: string }) =>
+      req<{ meeting: Meeting; token?: string }>(`/api/agenda/${id}/participants`, { method: 'POST', body: JSON.stringify(contact) }),
+    removeParticipant: (id: number, userId: number) =>
+      req<{ meeting: Meeting }>(`/api/agenda/${id}/participants/${userId}`, { method: 'DELETE' }),
+    removeContactInvitation: (id: number, invitationId: number) =>
+      req<{ meeting: Meeting }>(`/api/agenda/${id}/contact-invitations/${invitationId}`, { method: 'DELETE' }),
     cancel: (id: number) => req<{ meeting: Meeting }>(`/api/agenda/${id}`, { method: 'DELETE' }),
     respond: (id: number, response: Exclude<MeetingResponse, 'pending'>) =>
       req<{ meeting: Meeting }>(`/api/agenda/${id}/response`, { method: 'PATCH', body: JSON.stringify({ response }) }),
@@ -220,8 +232,10 @@ export const api = {
       req<{ call: CallInfo }>('/api/calls/start', { method: 'POST', body: JSON.stringify({ title, meetingId }) }),
     join: (callId?: number, meetingId?: number) =>
       req<{ call: CallInfo }>('/api/calls/join', { method: 'POST', body: JSON.stringify({ callId, meetingId }) }),
-    leave: () => req<{ call: CallInfo | null }>('/api/calls/leave', { method: 'POST' }),
-    end: () => req<{ ok: boolean }>('/api/calls/end', { method: 'POST' }),
+    leave: (callId?: number) =>
+      req<{ call: CallInfo | null }>('/api/calls/leave', { method: 'POST', body: JSON.stringify({ callId }) }),
+    end: (callId?: number) =>
+      req<{ ok: boolean }>('/api/calls/end', { method: 'POST', body: JSON.stringify({ callId }) }),
     recordingStart: (callId: number) =>
       req<{ call: CallInfo; recordingId: string }>(`/api/calls/${callId}/recording/start`, { method: 'POST' }),
     recordingStop: (callId: number, recordingId?: string) =>
