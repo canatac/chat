@@ -112,7 +112,7 @@ export default function App() {
   return (
     <>
       {room ? (
-        <Chat token={token} user={user} room={room} onAdmin={() => setAdminOpen(true)} onLogout={logout} />
+        <Chat key={`${room.id}:${user.id}`} token={token} user={user} room={room} adminOpen={adminOpen} onAdmin={() => setAdminOpen(true)} onLogout={logout} />
       ) : (
         <Stack sx={{ maxWidth: 480, mx: 'auto', px: 2, pt: 8, color: chatColors.ink }} gap={1.25}>
           <Typography variant="h5" component="h1" fontWeight={700}>Aucun salon actif</Typography>

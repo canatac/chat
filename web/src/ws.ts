@@ -1,4 +1,4 @@
-import type { CallInfo, Meeting, MentionNotification, Message, User } from './types';
+import type { CallInfo, ConversationActivity, Meeting, MentionNotification, Message, MessageReceipt, User } from './types';
 
 export interface WsEvent {
   type: string;
@@ -13,6 +13,9 @@ export interface WsEvent {
   data?: unknown;
   callId?: number | null;
   error?: string;
+  typing?: ConversationActivity['typing'];
+  assistantResponding?: boolean;
+  receipts?: MessageReceipt[];
 }
 
 type MessageHandler = (event: WsEvent) => void;

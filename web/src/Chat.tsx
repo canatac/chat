@@ -1,5 +1,6 @@
 import ArrowDownwardRoundedIcon from '@mui/icons-material/ArrowDownwardRounded';
 import ForumOutlinedIcon from '@mui/icons-material/ForumOutlined';
+import MarkChatUnreadOutlinedIcon from '@mui/icons-material/MarkChatUnreadOutlined';
 import { Alert, Box, Button, CircularProgress, Snackbar, Typography } from '@mui/material';
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { api, selectedRoom } from './api';
@@ -14,18 +15,21 @@ import MessageRow from './components/MessageRow';
 import NotificationsDrawer from './components/NotificationsDrawer';
 import { mentionLabel } from './systemNotifications';
 import { chatColors } from './theme';
-import type { AgendaAssistantResponse, CallInfo, Meeting, MeetingArtifact, MentionNotification, Message, Room, User } from './types';
+import type { AgendaAssistantResponse, CallInfo, ConversationActivity, Meeting, MeetingArtifact, MentionNotification, Message, Room, User } from './types';
 import useMentionNotifications from './useMentionNotifications';
+import useMessageActivity from './useMessageActivity';
 import { ChatSocket } from './ws';
 
 const PAGE_SIZE = 50;
 const groupWindow = 4 * 60 * 1000;
 const calendarDate = new Intl.DateTimeFormat('fr-FR', { dateStyle: 'long' });
+const noActivity: ConversationActivity = { typing: [], assistantResponding: false };
 
 interface Props {
   token: string;
   user: User;
   room: Room;
+  adminOpen: boolean;
   onAdmin: () => void;
   onLogout: () => void;
 }
@@ -69,12 +73,13 @@ function DayDivider({ date }: { date: Date }) {
   );
 }
 
-export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
+export default function Chat({ token, user, room, adminOpen, onAdmin, onLogout }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [onlineIds, setOnlineIds] = useState<number[]>([]);
   const [connection, setConnection] = useState<ConnectionStatus>('connecting');
   const [socket, setSocket] = useState<ChatSocket | null>(null);
+  const [activity, setActivity] = useState(noActivity);
   const [loading, setLoading] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [hasMore, setHasMore] = useState(false);
@@ -96,6 +101,8 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
   const [notificationError, setNotificationError] = useState<string | null>(null);
   const [highlighted, setHighlighted] = useState<{ id: number } | null>(null);
   const [historical, setHistorical] = useState(false);
+  const [openingUnread, setOpeningUnread] = useState(false);
+  const [unreadError, setUnreadError] = useState(false);
   const feed = useMentionNotifications(socket, connection === 'online', room, user.id);
 
   useEffect(() => {
@@ -133,7 +140,12 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
   const archive = useRef(false);
   const liveTail = useRef<Message[]>([]);
   const timelineVersion = useRef(0);
-  const noticeRequest = useRef<AbortController | null>(null);
+  const navigationRequest = useRef<AbortController | null>(null);
+  const conversationVisible = !(adminOpen || docOpen || statsOpen || callOpen || agendaOpen || notificationsOpen || document);
+  const { receipts, unread, refreshUnread } = useMessageActivity(socket, connection === 'online', messages, user.id, listRef, conversationVisible);
+  const typing = activity.typing.filter((person) => person.id !== user.id)
+    .map((person) => usersById.get(person.id)?.name ?? person.name);
+  const reportTyping = useCallback((active: boolean) => socket?.sendRaw({ type: 'typing', active }), [socket]);
 
   const loadRecent = useCallback(async (signal?: AbortSignal, reconnect = false, replace = false) => {
     if (archive.current && !replace) return;
@@ -191,6 +203,7 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
     activeSocket.onStatus((online) => {
       if (request.signal.aborted) return;
       setConnection(online ? 'online' : 'offline');
+      if (!online) setActivity(noActivity);
       if (online && connectedBefore) {
         void loadRecent(request.signal, true);
         refreshUsers();
@@ -209,6 +222,8 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
         setMessages((previous) =>
           previous.some((item) => item.id === message.id) ? previous : mergeMessages(previous, [message]),
         );
+      } else if (event.type === 'conversationActivity' && Array.isArray(event.typing)) {
+        setActivity({ typing: event.typing, assistantResponding: Boolean(event.assistantResponding) });
       } else if (event.type === 'presence' && Array.isArray(event.online)) {
         receivedPresence = true;
         setOnlineIds(event.online);
@@ -327,17 +342,15 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
     );
   };
 
-  const openNotification = useCallback(async (item: MentionNotification) => {
-    noticeRequest.current?.abort();
+  const showMessage = useCallback(async (id: number) => {
+    navigationRequest.current?.abort();
     const request = new AbortController();
-    noticeRequest.current = request;
-    setOpeningNotification(item.id);
-    setNotificationError(null);
+    navigationRequest.current = request;
     try {
-      const existing = listRef.current?.querySelector('[data-message-id="' + item.messageId + '"]');
+      const existing = listRef.current?.querySelector('[data-message-id="' + id + '"]');
       if (!existing) {
-        const context = await api.messageWindow(item.messageId, request.signal);
-        if (request.signal.aborted) return;
+        const context = await api.messageWindow(id, request.signal);
+        if (request.signal.aborted) return false;
         timelineVersion.current++;
         archive.current = context.hasNewer;
         setHistorical(context.hasNewer);
@@ -348,23 +361,46 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
         setHistoryError(null);
       }
       followMessages.current = false;
-      focusMessage.current = item.messageId;
-      setHighlighted({ id: item.messageId });
+      focusMessage.current = id;
+      setHighlighted({ id });
+      return true;
+    } catch (error) {
+      if (request.signal.aborted) return false;
+      throw error;
+    } finally {
+      if (navigationRequest.current === request) navigationRequest.current = null;
+    }
+  }, []);
+
+  const openNotification = useCallback(async (item: MentionNotification) => {
+    setOpeningNotification(item.id);
+    setNotificationError(null);
+    try {
+      if (!await showMessage(item.messageId)) return;
       setNotificationsOpen(false);
       dismissToast();
       if (!item.readAt) void read({ id: item.id });
     } catch {
-      if (!request.signal.aborted) {
-        setNotificationError('Impossible d’ouvrir le message.');
-        setNotificationsOpen(true);
-      }
+      setNotificationError('Impossible d’ouvrir le message.');
+      setNotificationsOpen(true);
     } finally {
-      if (noticeRequest.current === request) {
-        noticeRequest.current = null;
-        setOpeningNotification(null);
-      }
+      setOpeningNotification((current) => current === item.id ? null : current);
     }
-  }, [dismissToast, read]);
+  }, [dismissToast, read, showMessage]);
+
+  async function jumpToUnread() {
+    if (unread.firstId === null || openingUnread) return;
+    setOpeningUnread(true);
+    setUnreadError(false);
+    try {
+      await showMessage(unread.firstId);
+    } catch {
+      refreshUnread();
+      setUnreadError(true);
+    } finally {
+      setOpeningUnread(false);
+    }
+  }
 
   useEffect(() => {
     const request = new AbortController();
@@ -398,10 +434,12 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
     navigator.serviceWorker?.addEventListener('message', fromWorker);
     return () => {
       request.abort();
-      noticeRequest.current?.abort();
+      navigationRequest.current?.abort();
       navigator.serviceWorker?.removeEventListener('message', fromWorker);
     };
   }, [openNotification, room.id]);
+
+  const canJumpToLatest = (!atEnd || historical) && messages.length > 0;
 
   return (
     <Box sx={{ height: '100vh', '@supports (height: 100dvh)': { height: '100dvh' }, display: 'flex', flexDirection: 'column', bgcolor: chatColors.background }}>
@@ -496,6 +534,7 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
                         own={message.user.id === user.id}
                         groupStart={groupStart}
                         highlighted={highlighted?.id === message.id}
+                        receipt={receipts.get(message.id)}
                       />
                     </Fragment>
                   );
@@ -504,28 +543,48 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
             )}
           </Box>
         </Box>
-        {(!atEnd || historical) && messages.length > 0 && (
-          <Box sx={{ position: 'absolute', bottom: 12, insetInline: 0, maxWidth: 980, mx: 'auto', px: { xs: 1.65, sm: 3 }, display: 'flex', justifyContent: 'flex-end', pointerEvents: 'none' }}>
-            <Button
-              variant="contained"
-              disableElevation
-              startIcon={<ArrowDownwardRoundedIcon fontSize="small" />}
-              onClick={jumpToLatest}
-              disabled={loading && historical}
-              sx={{
-                pointerEvents: 'auto', fontWeight: 700, textTransform: 'none', borderRadius: '9px',
-                bgcolor: chatColors.accent, '&:hover': { bgcolor: '#0d524b' },
-              }}
-            >
-              Derniers messages
-            </Button>
+        {(unread.count > 0 || canJumpToLatest) && (
+          <Box sx={{ position: 'absolute', bottom: 12, insetInline: 0, maxWidth: 980, mx: 'auto', px: { xs: 1.65, sm: 3 }, display: 'flex', gap: 0.75, flexWrap: 'wrap', justifyContent: 'flex-end', pointerEvents: 'none' }}>
+            {unread.count > 0 && (
+              <Button
+                variant="contained"
+                disableElevation
+                startIcon={<MarkChatUnreadOutlinedIcon fontSize="small" />}
+                onClick={() => void jumpToUnread()}
+                disabled={openingUnread}
+                sx={{ pointerEvents: 'auto', minHeight: 40, fontWeight: 700, textTransform: 'none', borderRadius: '9px', bgcolor: chatColors.accent }}
+              >
+                {unread.count} {unread.count === 1 ? 'nouveau message' : 'nouveaux messages'}
+              </Button>
+            )}
+            {canJumpToLatest && (
+              <Button
+                variant={unread.count ? 'outlined' : 'contained'}
+                disableElevation
+                startIcon={<ArrowDownwardRoundedIcon fontSize="small" />}
+                onClick={jumpToLatest}
+                disabled={loading && historical}
+                sx={{
+                  pointerEvents: 'auto', minHeight: 40, fontWeight: 700, textTransform: 'none', borderRadius: '9px',
+                  bgcolor: unread.count ? chatColors.surface : chatColors.accent,
+                  '&:hover': { bgcolor: unread.count ? chatColors.accentSoft : '#0d524b' },
+                }}
+              >
+                Derniers messages
+              </Button>
+            )}
           </Box>
         )}
       </Box>
-      <ChatComposer onPublished={publish} members={users} ownId={user.id} onAgenda={(result) => {
+      <ChatComposer onPublished={publish} members={users} ownId={user.id} onTyping={reportTyping}
+        typing={typing} assistantResponding={activity.assistantResponding} onAgenda={(result) => {
         setAgendaResult(result);
         setAgendaOpen(true);
       }} />
+
+      <Snackbar open={unreadError} autoHideDuration={5500} onClose={() => setUnreadError(false)}>
+        <Alert severity="error" onClose={() => setUnreadError(false)}>Impossible d’afficher le premier message non lu.</Alert>
+      </Snackbar>
 
       <NotificationsDrawer open={notificationsOpen} onClose={() => setNotificationsOpen(false)} feed={feed}
         opening={openingNotification} openError={notificationError} onOpenMessage={(item) => void openNotification(item)} />
