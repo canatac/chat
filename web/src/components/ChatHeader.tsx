@@ -1,4 +1,5 @@
 import AdminPanelSettingsOutlinedIcon from '@mui/icons-material/AdminPanelSettingsOutlined';
+import CalendarMonthOutlinedIcon from '@mui/icons-material/CalendarMonthOutlined';
 import InsightsOutlinedIcon from '@mui/icons-material/InsightsOutlined';
 import FolderOpenOutlinedIcon from '@mui/icons-material/FolderOpenOutlined';
 import ForumOutlinedIcon from '@mui/icons-material/ForumOutlined';
@@ -20,9 +21,12 @@ interface Props {
   onlineIds: number[];
   connection: ConnectionStatus;
   hasCall: boolean;
+  pendingInvitations: number;
+  agendaOpen: boolean;
   unreadNotifications: number;
   notificationsOpen: boolean;
   onCall: () => void;
+  onAgenda: () => void;
   onDocuments: () => void;
   onNotifications: () => void;
   onAdmin: () => void;
@@ -57,7 +61,7 @@ const actionStyle = {
 
 export default function ChatHeader({
   roomName, user, users, onlineIds, connection, hasCall, onCall, onDocuments, onAdmin, onStats, onLogout,
-  unreadNotifications, notificationsOpen, onNotifications,
+  pendingInvitations, agendaOpen, onAgenda, unreadNotifications, notificationsOpen, onNotifications,
 }: Props) {
   const [accountAnchor, setAccountAnchor] = useState<HTMLElement | null>(null);
   const callLabel = hasCall ? 'Appel en cours' : "Appel d'équipe";
@@ -113,6 +117,15 @@ export default function ChatHeader({
                 <PhoneIcon fontSize="small" />
               </Badge>
               <Box component="span" sx={{ display: { xs: 'none', md: 'inline' } }}>{hasCall ? 'Appel en cours' : 'Appel'}</Box>
+            </Button>
+          </Tooltip>
+          <Tooltip title="Agenda">
+            <Button aria-label={pendingInvitations ? `Agenda, ${pendingInvitations} en attente` : 'Agenda'}
+              aria-haspopup="dialog" aria-expanded={agendaOpen} onClick={onAgenda} sx={actionStyle}>
+              <Badge badgeContent={pendingInvitations} color="error" max={99} aria-hidden="true">
+                <CalendarMonthOutlinedIcon fontSize="small" />
+              </Badge>
+              <Box component="span" sx={{ display: { xs: 'none', md: 'inline' } }}>Agenda</Box>
             </Button>
           </Tooltip>
           <Tooltip title="Espace documentaire">

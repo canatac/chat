@@ -8,11 +8,12 @@ import {
   Alert, Avatar, Box, Button, CircularProgress, IconButton, ListItemButton, ListItemText, Menu, MenuItem, Paper, TextField, Tooltip, Typography,
 } from '@mui/material';
 import { useEffect, useMemo, useRef, useState, type FocusEvent, type SyntheticEvent } from 'react';
+import { agendaTimeZone } from '../agenda-time';
 import { api } from '../api';
 import { formatFileSize } from '../formatFileSize';
 import { insertMentionTrigger, mentionAt, mentionsAfterEdit } from '../mentions';
 import { chatColors } from '../theme';
-import type { Mention, Message, User } from '../types';
+import type { AgendaAssistantResponse, Mention, Message, User } from '../types';
 
 const MAX_MESSAGE_LENGTH = 4000;
 
@@ -21,6 +22,7 @@ const commands = [
   { name: '/resume', description: 'Résumer les derniers échanges' },
   { name: '/solve', description: 'Proposer des pistes pour un problème' },
   { name: '/lien', description: 'Importer un lien audio' },
+  { name: '/agenda', description: 'Planifier un appel ou interroger l’agenda' },
   { name: '/aide', description: 'Afficher les commandes disponibles' },
 ];
 
@@ -34,11 +36,12 @@ const toolStyle = {
 
 function commandIn(text: string) {
   const [firstWord] = text.trimStart().split(/\s+/, 1);
-  return commands.find((command) => command.name === firstWord);
+  return commands.find((command) => command.name === firstWord.toLowerCase());
 }
 
 interface Props {
   onPublished: (message: Message) => void;
+  onAgenda: (result?: AgendaAssistantResponse) => void;
   members: User[];
   ownId: number;
 }
@@ -48,7 +51,7 @@ const mentionList = 'chat-mention-options';
 const optionId = (option: MentionOption) => 'chat-mention-option-' + (option.userId ?? 'room');
 const searchKey = (text: string) => text.normalize('NFD').replace(/\p{M}/gu, '').toLocaleLowerCase('fr');
 
-export default function ChatComposer({ onPublished, members, ownId }: Props) {
+export default function ChatComposer({ onPublished, onAgenda, members, ownId }: Props) {
   const [draft, setDraft] = useState('');
   const [mentions, setMentions] = useState<Mention[]>([]);
   const [caret, setCaret] = useState<number | null>(null);
@@ -65,7 +68,8 @@ export default function ChatComposer({ onPublished, members, ownId }: Props) {
   const content = draft.trim();
   const tooLong = content.length > MAX_MESSAGE_LENGTH;
   const canSubmit = Boolean(content || file) && !tooLong && !sending;
-  const command = file ? undefined : commandIn(draft);
+  const command = commandIn(draft);
+  const agendaCommand = command?.name === '/agenda';
   const options = useMemo(() => {
     const people = members.filter((member) => member.mentionable !== false && !member.isBot);
     const counts = new Map<string, number>();
@@ -131,16 +135,25 @@ export default function ChatComposer({ onPublished, members, ownId }: Props) {
 
   const submit = async () => {
     if (!canSubmit || submitPending.current) return;
+    if (agendaCommand && file) {
+      setError('Retire la pièce jointe pour utiliser /agenda.');
+      return;
+    }
     submitPending.current = true;
     setSending(true);
     setError(null);
     try {
-      const start = draft.length - draft.trimStart().length;
-      const hints = mentions.filter((mention) => mention.start >= start && mention.end <= start + content.length)
-        .map((mention) => ({ ...mention, start: mention.start - start, end: mention.end - start }));
-      const result = file ? await api.uploadFile(file, content, true, undefined, hints) : await api.send(content, hints);
-      if (!result.message) throw new Error('Le serveur n’a pas confirmé la publication.');
-      onPublished(result.message);
+      if (agendaCommand) {
+        const prompt = content.slice('/agenda'.length).trim();
+        onAgenda(prompt ? await api.agenda.assistant(prompt, agendaTimeZone()) : undefined);
+      } else {
+        const start = draft.length - draft.trimStart().length;
+        const hints = mentions.filter((mention) => mention.start >= start && mention.end <= start + content.length)
+          .map((mention) => ({ ...mention, start: mention.start - start, end: mention.end - start }));
+        const result = file ? await api.uploadFile(file, content, true, undefined, hints) : await api.send(content, hints);
+        if (!result.message) throw new Error('Le serveur n’a pas confirmé la publication.');
+        onPublished(result.message);
+      }
       setFile(null);
       setDraft('');
       setMentions([]);
@@ -148,7 +161,8 @@ export default function ChatComposer({ onPublished, members, ownId }: Props) {
       setHighlight(-1);
     } catch (failure) {
       const detail = failure instanceof Error && !(failure instanceof TypeError) ? failure.message : '';
-      const message = file ? 'Impossible d’envoyer la pièce jointe.' : 'Impossible d’envoyer le message.';
+      const message = agendaCommand ? 'Impossible d’interroger l’agenda.'
+        : file ? 'Impossible d’envoyer la pièce jointe.' : 'Impossible d’envoyer le message.';
       setError(detail ? message + ' ' + detail : message);
     } finally {
       submitPending.current = false;

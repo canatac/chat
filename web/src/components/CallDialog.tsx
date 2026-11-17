@@ -20,13 +20,14 @@ import {
   DialogContent,
   DialogTitle,
   IconButton,
+  Link,
   TextField,
   Tooltip,
   Typography,
 } from '@mui/material';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api';
-import type { CallInfo, User } from '../types';
+import type { CallInfo, Meeting, MeetingArtifact, User } from '../types';
 import { CallSession, loadIceServers } from '../webrtc';
 import type { ChatSocket } from '../ws';
 
@@ -36,6 +37,9 @@ interface Props {
   user: User;
   socket: ChatSocket | null;
   call: CallInfo | null;
+  requestedMeeting?: Meeting;
+  agendaRevision: number;
+  onRead: (file: MeetingArtifact) => void;
   onCallChange: (call: CallInfo | null) => void;
 }
 
@@ -70,7 +74,7 @@ function normalizeMediaError(err: unknown): Error {
   return err instanceof Error ? err : new Error(msg);
 }
 
-export default function CallDialog({ open, onClose, user, socket, call, onCallChange }: Props) {
+export default function CallDialog({ open, onClose, user, socket, call, requestedMeeting, agendaRevision, onRead, onCallChange }: Props) {
   const [title, setTitle] = useState('');
   const [joined, setJoined] = useState(false);
   const [muted, setMuted] = useState(false);
@@ -84,12 +88,28 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [recStatus, setRecStatus] = useState<RecStatus>('idle');
+  const [meetingDetails, setMeetingDetails] = useState<Meeting>();
   const sessionRef = useRef<CallSession | null>(null);
   const knownPeersRef = useRef<Set<number>>(new Set());
   const audioElsRef = useRef<Map<number, HTMLAudioElement>>(new Map());
   const localRecordingIdRef = useRef<string | null>(null);
 
   const rec = call?.recording ?? null;
+  const meetingId = requestedMeeting?.id ?? call?.meetingId;
+  const meeting = meetingDetails?.id === meetingId ? meetingDetails : requestedMeeting;
+  const report = meeting?.artifacts.find(({ kind }) => kind === 'report');
+  const differentCall = !!(requestedMeeting && call && requestedMeeting.id !== call.meetingId);
+  const visibleCall = differentCall ? null : call;
+  const canUse = !meetingId || meeting?.canEnter;
+
+  useEffect(() => {
+    if (!open || !meetingId) return;
+    const request = new AbortController();
+    void api.agenda.get(meetingId, request.signal).then(({ meeting }) => {
+      if (!request.signal.aborted) setMeetingDetails(meeting);
+    }).catch(() => {});
+    return () => request.abort();
+  }, [open, meetingId, agendaRevision]);
 
   const enterSession = useCallback(
     async (callInfo: CallInfo, stream: MediaStream) => {
@@ -130,24 +150,25 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
 
   const startOrJoin = useCallback(
     async (isStart: boolean) => {
-      if (!socket) return;
+      if (!socket || differentCall || !canUse) return;
       setBusy(true);
       setError(null);
+      let stream: MediaStream | undefined;
       try {
-        const micPromise = navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-        const icePromise = loadIceServers();
-        const stream = await micPromise;
-        await icePromise;
-        const result = isStart ? await api.calls.start(title.trim()) : await api.calls.join();
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        await loadIceServers();
+        const result = isStart ? await api.calls.start(meeting?.title ?? title.trim(), meetingId ?? undefined)
+          : await api.calls.join(call?.id, meetingId ?? undefined);
         onCallChange(result.call);
         await enterSession(result.call, stream);
       } catch (err) {
+        stream?.getTracks().forEach((track) => track.stop());
         setError(normalizeMediaError(err).message);
       } finally {
         setBusy(false);
       }
     },
-    [socket, title, enterSession, onCallChange],
+    [socket, differentCall, canUse, meeting, meetingId, title, call?.id, enterSession, onCallChange],
   );
 
   useEffect(() => {
@@ -157,7 +178,7 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
         void sessionRef.current.handleSignal(event.from, event.data);
       }
     };
-    socket.onMessage(handler);
+    return socket.onMessage(handler);
   }, [socket]);
 
   useEffect(() => {
@@ -338,14 +359,23 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
 
   return (
     <Dialog open={open} onClose={onClose} fullWidth maxWidth="md" keepMounted>
-      <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+      <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1, overflowWrap: 'anywhere' }}>
         <PhoneIcon color="primary" />
-        {call ? `Appel en cours${call.title ? ` — ${call.title}` : ''}` : "Appel d'équipe"}
+        {visibleCall ? `Appel en cours${visibleCall.title ? ` — ${visibleCall.title}` : ''}` : meeting?.title ?? "Appel d'équipe"}
       </DialogTitle>
       <DialogContent dividers>
         {error && <Alert severity="error" sx={{ mb: 1 }}>{error}</Alert>}
         {note && <Alert severity="success" sx={{ mb: 1 }}>{note}</Alert>}
-        {audioBlocked && joined && (
+        {meeting && (
+          <Box sx={{ mb: 2 }}>
+            <Typography variant="body2">Durée prévue · {meeting.durationMinutes} min</Typography>
+            {meeting.agenda && <Typography sx={{ mt: 0.5, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{meeting.agenda}</Typography>}
+            {report && <Link component="button" type="button" sx={{ mt: 0.75 }} onClick={() => onRead(report)}>Lire le compte rendu</Link>}
+          </Box>
+        )}
+        {differentCall && <Alert severity="info">Un autre appel est déjà en cours dans ce salon.</Alert>}
+        {!differentCall && meeting && !meeting.canEnter && <Alert severity="info">Cet appel est réservé aux participants invités.</Alert>}
+        {!differentCall && audioBlocked && joined && (
           <Alert
             severity="warning"
             sx={{ mb: 1 }}
@@ -358,29 +388,29 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
             Lecture audio bloquée par le navigateur (autoplay).
           </Alert>
         )}
-        {!call && (
-          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-            <TextField
+        {!call && canUse && (
+          <Box sx={{ display: 'flex', flexDirection: { xs: 'column', sm: 'row' }, gap: 1, alignItems: { xs: 'stretch', sm: 'center' } }}>
+            {!meeting && <TextField
               size="small"
               fullWidth
               label="Titre de l'appel (optionnel)"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-            />
+            />}
             <Button variant="contained" startIcon={<PhoneIcon />} onClick={() => void startOrJoin(true)} disabled={busy}>
               Démarrer l'appel
             </Button>
           </Box>
         )}
-        {call && (
+        {visibleCall && (
           <>
             <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mb: 2, alignItems: 'center' }}>
-              {call.participants.map((p) => (
+              {visibleCall.participants.map((p) => (
                 <Chip
                   key={p.id}
                   avatar={<Avatar>{p.name.slice(0, 1).toUpperCase()}</Avatar>}
                   label={p.name}
-                  color={p.id === call.startedBy.id ? 'primary' : 'default'}
+                  color={p.id === visibleCall.startedBy.id ? 'primary' : 'default'}
                   size="small"
                 />
               ))}
@@ -390,14 +420,14 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
                   <Chip key={`st-${peerId}`} size="small" color="warning" label={`pair ${peerId}: ${st}`} />
                 ))}
             </Box>
-            {!joined && (
+            {!joined && canUse && (
               <Button variant="contained" startIcon={<PhoneIcon />} onClick={() => void startOrJoin(false)} disabled={busy}>
                 Rejoindre l'appel
               </Button>
             )}
             {joined && (
               <>
-                <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 1, mb: 2 }}>
+                <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(220px, 100%), 1fr))', gap: 1, mb: 2 }}>
                   {camera && videoStream && (
                     <Box>
                       <Typography variant="caption">Votre caméra</Typography>
@@ -486,13 +516,13 @@ export default function CallDialog({ open, onClose, user, socket, call, onCallCh
           </>
         )}
       </DialogContent>
-      <DialogActions>
-        {call && joined && (
+      <DialogActions sx={{ flexWrap: 'wrap' }}>
+        {visibleCall && joined && (
           <Button color="warning" onClick={() => void leave()}>
             Quitter l'appel
           </Button>
         )}
-        {call && (
+        {visibleCall && canUse && (
           <Button color="error" startIcon={<CallEndIcon />} onClick={() => void endCall()}>
             Terminer l'appel
           </Button>

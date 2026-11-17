@@ -4,15 +4,17 @@ import { Alert, Box, Button, CircularProgress, Snackbar, Typography } from '@mui
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { api, selectedRoom } from './api';
 import AdminDialog from './components/AdminDialog';
+import AgendaDrawer from './components/AgendaDrawer';
 import CallDialog from './components/CallDialog';
 import ChatComposer from './components/ChatComposer';
 import ChatHeader, { type ConnectionStatus } from './components/ChatHeader';
 import DocDrawer from './components/DocDrawer';
+import MeetingDocumentDialog from './components/MeetingDocumentDialog';
 import MessageRow from './components/MessageRow';
 import NotificationsDrawer from './components/NotificationsDrawer';
 import { mentionLabel } from './systemNotifications';
 import { chatColors } from './theme';
-import type { CallInfo, MentionNotification, Message, Room, User } from './types';
+import type { AgendaAssistantResponse, CallInfo, Meeting, MeetingArtifact, MentionNotification, Message, Room, User } from './types';
 import useMentionNotifications from './useMentionNotifications';
 import { ChatSocket } from './ws';
 
@@ -82,12 +84,26 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
   const [statsOpen, setStatsOpen] = useState(false);
   const [callOpen, setCallOpen] = useState(false);
   const [call, setCall] = useState<CallInfo | null>(null);
+  const [callMeeting, setCallMeeting] = useState<Meeting>();
+  const [agendaOpen, setAgendaOpen] = useState(false);
+  const [agendaResult, setAgendaResult] = useState<AgendaAssistantResponse>();
+  const [agendaRevision, setAgendaRevision] = useState(0);
+  const [pendingInvitations, setPendingInvitations] = useState(0);
+  const [document, setDocument] = useState<MeetingArtifact>();
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [openingNotification, setOpeningNotification] = useState<number | null>(null);
   const [notificationError, setNotificationError] = useState<string | null>(null);
   const [highlighted, setHighlighted] = useState<{ id: number } | null>(null);
   const [historical, setHistorical] = useState(false);
   const feed = useMentionNotifications(socket, connection === 'online', room, user.id);
+
+  useEffect(() => {
+    const request = new AbortController();
+    void api.agenda.invitations(request.signal).then(({ pending }) => {
+      if (!request.signal.aborted) setPendingInvitations(pending);
+    }).catch(() => {});
+    return () => request.abort();
+  }, [agendaRevision]);
   const { dismissToast, read } = feed;
 
   const usersById = useMemo(() => new Map(users.map((member) => [member.id, member])), [users]);
@@ -158,7 +174,10 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
         void loadRecent(request.signal, true);
         refreshUsers();
       }
-      if (online) connectedBefore = true;
+      if (online) {
+        connectedBefore = true;
+        setAgendaRevision((value) => value + 1);
+      }
     });
     const unsubscribe = activeSocket.onMessage((event) => {
       if (event.type === 'message' && event.message) {
@@ -179,6 +198,9 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
       } else if (event.type === 'call') {
         receivedCall = true;
         setCall(event.call ?? null);
+        setAgendaRevision((value) => value + 1);
+      } else if (event.type === 'agendaChanged' || event.type === 'docsChanged') {
+        setAgendaRevision((value) => value + 1);
       }
     });
 
@@ -364,9 +386,12 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
         onlineIds={onlineIds}
         connection={connection}
         hasCall={Boolean(call)}
+        pendingInvitations={pendingInvitations}
+        agendaOpen={agendaOpen}
         unreadNotifications={feed.page.unread}
         notificationsOpen={notificationsOpen}
-        onCall={() => setCallOpen(true)}
+        onCall={() => { setCallMeeting(undefined); setCallOpen(true); }}
+        onAgenda={() => setAgendaOpen(true)}
         onDocuments={() => setDocOpen(true)}
         onNotifications={() => { setNotificationError(null); setNotificationsOpen(true); dismissToast(); void feed.load(); }}
         onAdmin={onAdmin}
@@ -471,7 +496,10 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
           </Box>
         )}
       </Box>
-      <ChatComposer onPublished={publish} members={users} ownId={user.id} />
+      <ChatComposer onPublished={publish} members={users} ownId={user.id} onAgenda={(result) => {
+        setAgendaResult(result);
+        setAgendaOpen(true);
+      }} />
 
       <NotificationsDrawer open={notificationsOpen} onClose={() => setNotificationsOpen(false)} feed={feed}
         opening={openingNotification} openError={notificationError} onOpenMessage={(item) => void openNotification(item)} />
@@ -486,6 +514,9 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
       )}
 
       <DocDrawer open={docOpen} onClose={() => setDocOpen(false)} socket={socket} />
+      <AgendaDrawer open={agendaOpen} onClose={() => setAgendaOpen(false)} users={users} ownId={user.id}
+        onCall={(meeting) => { setCallMeeting(meeting); setCallOpen(true); }} onRead={setDocument}
+        pending={pendingInvitations} revision={agendaRevision} assistantResult={agendaResult} />
       {(user.role === 'admin' || user.role === 'superadmin') && <AdminDialog open={statsOpen} onClose={() => setStatsOpen(false)} />}
       <CallDialog
         open={callOpen}
@@ -493,8 +524,12 @@ export default function Chat({ token, user, room, onAdmin, onLogout }: Props) {
         user={user}
         socket={socket}
         call={call}
+        requestedMeeting={callMeeting}
+        agendaRevision={agendaRevision}
+        onRead={setDocument}
         onCallChange={setCall}
       />
+      {document && <MeetingDocumentDialog key={document.id} file={document} onClose={() => setDocument(undefined)} />}
     </Box>
   );
 }
