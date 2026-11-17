@@ -154,11 +154,50 @@ export interface CallRecording {
 export interface CallInfo {
   id: number;
   title: string;
+  meetingId: number | null;
   startedBy: CallParticipant;
   participants: CallParticipant[];
   active: boolean;
   recording: CallRecording | null;
 }
+
+export type MeetingResponse = 'pending' | 'accepted' | 'tentative' | 'declined';
+
+export interface MeetingArtifact {
+  id: number;
+  name: string;
+  mime: string;
+  size: number;
+  kind: 'recording' | 'transcript' | 'report' | 'summary';
+}
+
+export interface MeetingInput {
+  title: string;
+  agenda: string;
+  startsAt: number;
+  durationMinutes: number;
+  timeZone: string;
+  participantIds: number[];
+}
+
+export interface Meeting extends Omit<MeetingInput, 'participantIds'> {
+  id: number;
+  organizerId: number;
+  participants: { id: number; name: string; response: MeetingResponse }[];
+  artifacts: MeetingArtifact[];
+  status: 'scheduled' | 'live' | 'held' | 'past' | 'cancelled';
+  canEdit: boolean;
+  canEnter: boolean;
+}
+
+export interface MeetingDraft extends Pick<MeetingInput, 'title' | 'agenda' | 'durationMinutes' | 'participantIds'> {
+  localStart: string | null;
+}
+
+export type AgendaAssistantResponse =
+  | { kind: 'draft'; draft: MeetingDraft; unresolved: string[] }
+  | { kind: 'results'; meetings: Meeting[]; total: number; answer: string }
+  | { kind: 'clarify'; answer: string };
 
 export interface AdminStats {
   calls?: { total: number; active: number };

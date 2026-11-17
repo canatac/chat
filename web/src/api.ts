@@ -1,4 +1,5 @@
 import type { AdminStats, CallInfo, DocumentIds, FileEvent, FileFilters, FileItem, FileSort, Folder, Mention, MentionNotification, Message, MessageFile, MoveConflict, MoveDecision, NotificationPage, Room, RoomInvitation, RoomMember, RoomSession, User } from './types';
+import type { AgendaAssistantResponse, Meeting, MeetingInput, MeetingResponse } from './types';
 
 interface FileListRequest {
   query: string;
@@ -184,19 +185,41 @@ export const api = {
     }
     return (await res.json()) as { file: FileItem; message: Message | null };
   },
-  downloadFile: async (id: number): Promise<Blob> => {
+  downloadFile: async (id: number, signal?: AbortSignal): Promise<Blob> => {
     const res = await fetch(`/api/files/${id}/download`, {
       headers: sessionHeaders(),
+      signal,
     });
     if (!res.ok) throw new Error('Téléchargement impossible');
     return res.blob();
   },
   adminStats: () => req<AdminStats>('/api/admin/stats'),
+  agenda: {
+    list: (from: number, until: number, signal?: AbortSignal) =>
+      req<{ meetings: Meeting[] }>(`/api/agenda?from=${from}&until=${until}`, { signal }),
+    get: (id: number, signal?: AbortSignal) => req<{ meeting: Meeting }>(`/api/agenda/${id}`, { signal }),
+    create: (input: MeetingInput) => req<{ meeting: Meeting }>('/api/agenda', { method: 'POST', body: JSON.stringify(input) }),
+    edit: (id: number, input: MeetingInput) =>
+      req<{ meeting: Meeting }>(`/api/agenda/${id}`, { method: 'PATCH', body: JSON.stringify(input) }),
+    cancel: (id: number) => req<{ meeting: Meeting }>(`/api/agenda/${id}`, { method: 'DELETE' }),
+    respond: (id: number, response: Exclude<MeetingResponse, 'pending'>) =>
+      req<{ meeting: Meeting }>(`/api/agenda/${id}/response`, { method: 'PATCH', body: JSON.stringify({ response }) }),
+    invitations: (signal?: AbortSignal) => req<{ pending: number }>('/api/agenda/invitations', { signal }),
+    pending: (signal?: AbortSignal) => req<{ meetings: Meeting[] }>('/api/agenda/invitations?details=1', { signal }),
+    assistant: (prompt: string, timeZone: string) =>
+      req<AgendaAssistantResponse>('/api/agenda/assistant', { method: 'POST', body: JSON.stringify({ prompt, timeZone }) }),
+    calendar: async (id: number) => {
+      const response = await fetch(`/api/agenda/${id}/ics`, { headers: sessionHeaders() });
+      if (!response.ok) throw new Error('Export du calendrier impossible.');
+      return response.blob();
+    },
+  },
   calls: {
     active: () => req<{ call: CallInfo | null }>('/api/calls/active'),
-    start: (title: string) =>
-      req<{ call: CallInfo }>('/api/calls/start', { method: 'POST', body: JSON.stringify({ title }) }),
-    join: () => req<{ call: CallInfo }>('/api/calls/join', { method: 'POST' }),
+    start: (title: string, meetingId?: number) =>
+      req<{ call: CallInfo }>('/api/calls/start', { method: 'POST', body: JSON.stringify({ title, meetingId }) }),
+    join: (callId?: number, meetingId?: number) =>
+      req<{ call: CallInfo }>('/api/calls/join', { method: 'POST', body: JSON.stringify({ callId, meetingId }) }),
     leave: () => req<{ call: CallInfo | null }>('/api/calls/leave', { method: 'POST' }),
     end: () => req<{ ok: boolean }>('/api/calls/end', { method: 'POST' }),
     recordingStart: (callId: number) =>
@@ -263,10 +286,14 @@ export const api = {
 
 
 export async function saveFile(file: Pick<MessageFile, 'id' | 'name'>): Promise<void> {
-  const url = URL.createObjectURL(await api.downloadFile(file.id));
+  saveBlob(await api.downloadFile(file.id), file.name);
+}
+
+export function saveBlob(blob: Blob, name: string): void {
+  const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
-  link.download = file.name;
+  link.download = name;
   document.body.append(link);
   link.click();
   link.remove();

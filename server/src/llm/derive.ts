@@ -37,7 +37,12 @@ export async function deriveDocument(deps: DeriveDeps, file: FileRow, kind: Deri
   if (!text.trim()) throw new HttpError(400, "Pas de texte exploitable dans ce fichier (transcription ou document texte requis)");
   if (text.trim().length < 100) throw new HttpError(422, "Transcription trop courte ou vide (< 100 caractères) — l'enregistrement était probablement muet/inaudible. Vérifie le fichier audio puis regénère.");
   if (!llmConfigured(deps.config)) throw new HttpError(503, 'LLM non configuré : définir LLM_MODEL dans le .env pour générer un résumé / compte-rendu');
-  const messages: ChatMessage[] = [{ role: 'user', content: derivePrompt(kind, text.slice(0, 60000)) }];
+  const meetingId = file.call_id === null ? null : deps.db.getCallById(file.call_id)?.meeting_id;
+  const meeting = meetingId ? deps.db.agenda.get(meetingId) : undefined;
+  const context = meeting ? '\n\nContexte de la réunion planifiée (à distinguer de ce qui est attesté par la transcription) : ' + JSON.stringify({
+    objet: meeting.title, débutPrévu: new Date(meeting.starts_at).toISOString(), fuseau: meeting.time_zone, ordreDuJour: meeting.agenda,
+  }) : '';
+  const messages: ChatMessage[] = [{ role: 'user', content: derivePrompt(kind, text.slice(0, 60000)) + context }];
   const { text: out, usage } = await askLLM(deps.config, messages, { timeoutMs: 120000, temperature: 0.2 });
   deps.db.insertUsage({
     userId: deps.userId,
@@ -55,7 +60,7 @@ export async function deriveDocument(deps: DeriveDeps, file: FileRow, kind: Deri
   const outName = `${base} — ${kind === 'resume' ? 'résumé' : 'compte-rendu'}.md`;
   const fname = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${outName.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-80)}`;
   fs.writeFileSync(path.join(deps.uploadsDir, fname), out);
-  const row = deps.db.insertFile(deps.userId, null, outName, 'text/markdown', Buffer.byteLength(out), fname, file.call_id);
+  const row = deps.db.insertFile(deps.userId, null, outName, 'text/markdown', Buffer.byteLength(out), fname, file.call_id, null, kind === 'cr' ? 'report' : 'summary');
   chunkText(out, deps.config.RAG_CHUNK_SIZE).forEach((c, i) => deps.db.insertChunk(row.id, i, c));
   return row;
 }

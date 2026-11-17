@@ -61,7 +61,18 @@ choix pour faire des comptes-rendus de réunion ou proposer des solutions aux pr
    **Compte-rendu** → génèrent un fichier `.md` déposé à son tour (coût tracé dans le dashboard admin).
 4. Relire : bouton **télécharger** sur n'importe quel fichier de l'espace documentaire.
 
-**Commandes LLM dans la chat** : `/resume [n]`, `/solve <problème>`, `/ask <question>`, `/lien <url> [titre]`, `/aide`.
+**Planifier un appel dans l’agenda**
+
+1. Ouvre **Agenda** puis **Planifier**. Indique le début, la durée prévue, l’ordre du jour et les membres à inviter. L’organisateur figure automatiquement parmi les participants.
+2. Les invités retrouvent les demandes en attente dans **Invitations** et peuvent accepter, refuser ou répondre « Peut-être ». Un changement de date, d’heure ou de durée leur demande de confirmer à nouveau.
+3. **Suggérer des créneaux** tient compte des invitations du salon et des réponses. **Exporter en .ics** permet d’ajouter la réunion à un calendrier externe.
+4. Ouvre l’appel depuis sa fiche pour y rattacher l’enregistrement, la transcription et le compte rendu. À partir d’une transcription, **Générer le compte rendu** utilise le LLM configuré. **Lire le compte rendu** ouvre le document dans la fiche.
+
+L’assistant de l’agenda utilise le `LLM_MODEL` du salon. Dans le chat, `/agenda` ouvre le panneau et `/agenda <demande>` y affiche la réponse en privé.
+
+- `/agenda Planifie une revue avec Camille demain à 14 h pendant 45 minutes. Ordre du jour : démo et décisions.` ouvre un brouillon à valider.
+- `/agenda Combien de réunions ai-je eues avec Camille ce mois-ci ?` compte les réunions réellement tenues avec cette personne.
+- `/agenda Ai-je un compte rendu pour la réunion du 16 novembre 2026 ?` indique les comptes rendus disponibles et permet d’ouvrir les réunions correspondantes.
 
 ## Fonctionnalités
 
@@ -84,7 +95,7 @@ choix pour faire des comptes-rendus de réunion ou proposer des solutions aux pr
   l'espace documentaire — indexée par le RAG ; boutons **Résumé** et **Compte-rendu** (LLM) sur chaque
   transcription
 - **VPN WireGuard** intégré pour donner au PC et au téléphone une IP fixe (filtrage par IP possible)
-- **Commandes LLM** dans la chatroom : le résultat est posté par le bot « Assistant »
+- **Commandes LLM** dans la chatroom et assistant privé de l’agenda
 
 | Commande | Effet |
 | --- | --- |
@@ -92,6 +103,7 @@ choix pour faire des comptes-rendus de réunion ou proposer des solutions aux pr
 | `/solve <problème>` | 2 à 4 pistes de solution concrètes pour un problème soulevé dans la chatroom |
 | `/ask <question>` | Réponse à une question, en s'appuyant sur la chatroom **et les documents déposés (RAG)** |
 | `/lien <url> [titre]` | Télécharge le média, le transcrit (STT), génère un CR, archive une copie webm (ffmpeg) |
+| `/agenda [demande]` | Ouvre l’agenda, prépare un brouillon ou affiche une recherche dans le salon |
 | `/aide` | Liste des commandes |
 
 ## Stack
