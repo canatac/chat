@@ -13,6 +13,7 @@ export const COMMAND_HELP = [
   '• /solve <problème> — pistes de solution pour un problème soulevé dans la chatroom',
   '• /ask <question> — question à l\u2019assistant (contexte de la chatroom + documents déposés)',
   '• /lien <url> [titre] — télécharge un média (ex. émission radio .m4a), le transcrit (STT), génère un CR et archive une copie webm',
+  '• /agenda [demande] — planifier un appel ou rechercher des réunions dans le panneau Agenda',
   '• /aide — afficher cette aide',
   'Les commandes /ask et /solve fouillent aussi les documents déposés dans l\u2019espace documentaire (RAG).',
   'Coller seul un lien média (.m4a, .mp3, .webm…) déclenche aussi /lien automatiquement.',

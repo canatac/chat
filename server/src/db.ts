@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
+import { AgendaStore, type MeetingArtifactKind } from './agenda-store.js';
 import type { Mention, MentionKind } from './mentions.js';
 
 export interface UserRow {
@@ -94,6 +95,7 @@ export interface CallRow {
   started_by: number;
   started_at: number;
   ended_at: number | null;
+  meeting_id: number | null;
 }
 
 export interface FileListRow extends FileRow {
@@ -141,6 +143,7 @@ export interface UsageRow {
 
 export class DB {
   private db: DatabaseSync;
+  readonly agenda: AgendaStore;
 
   constructor(dataDir: string, newBotId: number | null = null) {
     fs.mkdirSync(dataDir, { recursive: true });
@@ -274,6 +277,7 @@ export class DB {
     if (!messageColumns.some((column) => column.name === 'mentions')) {
       this.db.exec("ALTER TABLE messages ADD COLUMN mentions TEXT NOT NULL DEFAULT '[]'");
     }
+    this.agenda = new AgendaStore(this.db);
   }
 
   createUser(name: string, passHash: string): UserRow {
@@ -384,10 +388,11 @@ export class DB {
     relPath: string,
     callId: number | null = null,
     folderId: number | null = null,
+    meetingArtifact: MeetingArtifactKind | null = null,
   ): FileRow {
     const info = this.db
-      .prepare('INSERT INTO files (user_id, message_id, name, mime, size, path, call_id, folder_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(userId, messageId, name, mime, size, relPath, callId, folderId, Date.now());
+      .prepare('INSERT INTO files (user_id, message_id, name, mime, size, path, call_id, folder_id, created_at, meeting_artifact) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(userId, messageId, name, mime, size, relPath, callId, folderId, Date.now(), meetingArtifact);
     return this.getFileById(Number(info.lastInsertRowid)) as FileRow;
   }
 
@@ -485,11 +490,14 @@ export class DB {
       .all(messageId) as unknown as FileRow[];
   }
 
-  startCall(userId: number, title: string): CallRow {
-    const info = this.db
-      .prepare('INSERT INTO calls (title, started_by, started_at, ended_at) VALUES (?, ?, ?, NULL)')
-      .run(title, userId, Date.now());
-    return this.db.prepare('SELECT * FROM calls WHERE id = ?').get(Number(info.lastInsertRowid)) as unknown as CallRow;
+  startCall(userId: number, title: string, meetingId: number | null = null): CallRow {
+    return this.transaction(() => {
+      const info = this.db.prepare('INSERT INTO calls (title, started_by, started_at, meeting_id) VALUES (?, ?, ?, ?)')
+        .run(title, userId, Date.now(), meetingId);
+      const id = Number(info.lastInsertRowid);
+      if (meetingId !== null) this.agenda.attend(id, userId);
+      return this.getCallById(id)!;
+    });
   }
 
   endCall(id: number): void {

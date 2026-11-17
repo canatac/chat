@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import multer from 'multer';
 import { WebSocket, WebSocketServer } from 'ws';
 import { z } from 'zod';
+import { canEnterMeeting, mountAgenda } from './agenda.js';
 import { hashPassword } from './auth.js';
 import type { Config } from './config.js';
 import { DB, type CallRow, type FileEventListRow, type FileListRow, type FileRow, type FolderRow, type MentionNotificationRow, type MessageRow, type UserRow } from './db.js';
@@ -120,6 +121,7 @@ export interface CallRecording {
 export interface CallInfo {
   id: number;
   title: string;
+  meetingId: number | null;
   startedBy: PublicUser;
   participants: PublicUser[];
   active: boolean;
@@ -138,6 +140,7 @@ export interface ServerContext {
 function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: number, directory: RoomDirectory) {
   const uploadsDir = path.join(dataDir, 'uploads');
   fs.mkdirSync(uploadsDir, { recursive: true });
+  db.agenda.endInterruptedCalls();
 
   const app = express.Router();
   const clients = new Set<WebSocket>();
@@ -155,6 +158,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
     return {
       id: activeCall.row.id,
       title: activeCall.row.title,
+      meetingId: activeCall.row.meeting_id,
       startedBy: toPublicUser(startedBy),
       participants: [...activeCall.participants].map((id) => toPublicUser(db.getUserById(id) as UserRow)),
       active: true,
@@ -315,6 +319,8 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
         Buffer.byteLength(text),
         tFname,
         fileRow.call_id,
+        null,
+        'transcript',
       );
       chunkText(text, config.RAG_CHUNK_SIZE).forEach((c, i) => db.insertChunk(transcriptRow.id, i, c));
       db.insertUsage({
@@ -330,6 +336,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
         error: null,
       });
       logDocEvent(userId, { fileId: transcriptRow.id, folderId: fileRow.folder_id ?? null, action: 'file_transcribed', detail: `« ${displayName} » transcrit (${text.length} caractères)` });
+      docsChanged();
       return transcriptRow;
     } catch (err) {
       db.insertUsage({
@@ -383,6 +390,9 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
     });
   });
 
+  mountAgenda(app, { db, config, directory, roomId, activeMeeting: () => activeCall?.row.meeting_id ?? null,
+    changed: () => broadcast({ type: 'agendaChanged' }) });
+
   app.get('/api/calls/active', (req, res) => {
     res.json({ call: serializeCall() });
   });
@@ -401,7 +411,9 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
     res.json({ iceServers });
   });
 
-  const callTitleSchema = z.object({ title: z.string().trim().max(120).optional() });
+  const callTitleSchema = z.object({ title: z.string().trim().max(120).optional(), meetingId: positiveId.optional() });
+  const callJoinSchema = z.object({ callId: positiveId.optional(), meetingId: positiveId.optional() });
+  const canUseCall = (row: CallRow, req: express.Request) => row.meeting_id === null || canEnterMeeting(db, row.meeting_id, req.user?.id ?? -1, req.user?.role);
 
   app.post('/api/calls/start', (req, res) => {
     if (activeCall) {
@@ -409,9 +421,17 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       return;
     }
     const parsed = callTitleSchema.safeParse(req.body ?? {});
-    const title = parsed.success ? parsed.data.title ?? '' : '';
-    const row = db.startCall(req.user?.id ?? -1, title);
-    activeCall = { row, participants: new Set([req.user?.id ?? -1]), recording: null };
+    if (!parsed.success) { res.status(400).json({ error: 'Appel invalide.' }); return; }
+    const { meetingId, title } = parsed.data;
+    const meeting = meetingId === undefined ? undefined : db.agenda.get(meetingId);
+    if (meetingId !== undefined && !meeting) { res.status(404).json({ error: 'Réunion introuvable' }); return; }
+    if (meeting?.cancelled_at != null) { res.status(409).json({ error: 'Cette réunion a été annulée.' }); return; }
+    const userId = req.user?.id ?? -1;
+    if (meeting && !canEnterMeeting(db, meeting.id, userId, req.user?.role)) {
+      res.status(403).json({ error: 'Cet appel est réservé aux participants invités.' }); return;
+    }
+    const row = db.startCall(userId, meeting?.title ?? title ?? '', meeting?.id ?? null);
+    activeCall = { row, participants: new Set([userId]), recording: null };
     broadcastCall();
     res.status(201).json({ call: serializeCall() });
   });
@@ -421,7 +441,16 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       res.status(404).json({ error: 'Aucun appel en cours' });
       return;
     }
-    activeCall.participants.add(req.user?.id ?? -1);
+    const parsed = callJoinSchema.safeParse(req.body ?? {});
+    if (!parsed.success) { res.status(400).json({ error: 'Appel invalide.' }); return; }
+    const { callId, meetingId } = parsed.data;
+    if ((callId !== undefined && activeCall.row.id !== callId) || (meetingId !== undefined && activeCall.row.meeting_id !== meetingId)) {
+      res.status(409).json({ error: 'L’appel actif a changé.' }); return;
+    }
+    if (!canUseCall(activeCall.row, req)) { res.status(403).json({ error: 'Cet appel est réservé aux participants invités.' }); return; }
+    const userId = req.user?.id ?? -1;
+    if (activeCall.row.meeting_id !== null) db.agenda.attend(activeCall.row.id, userId);
+    activeCall.participants.add(userId);
     broadcastCall();
     res.json({ call: serializeCall() });
   });
@@ -445,6 +474,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       res.status(404).json({ error: 'Aucun appel en cours' });
       return;
     }
+    if (!canUseCall(activeCall.row, req)) { res.status(403).json({ error: 'Cet appel est réservé aux participants invités.' }); return; }
     db.endCall(activeCall.row.id);
     activeCall = null;
     broadcastCall();
@@ -1073,6 +1103,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       res.status(404).json({ error: 'Aucun appel en cours' });
       return;
     }
+    if (!canUseCall(activeCall.row, req)) { res.status(403).json({ error: 'Cet appel est réservé aux participants invités.' }); return; }
     if (activeCall.recording) {
       res.status(409).json({ error: 'Enregistrement déjà en cours', call: serializeCall() });
       return;
@@ -1088,6 +1119,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       res.status(404).json({ error: 'Aucun appel en cours' });
       return;
     }
+    if (!canUseCall(activeCall.row, req)) { res.status(403).json({ error: 'Cet appel est réservé aux participants invités.' }); return; }
     const body = z.object({ recordingId: z.string().optional() }).safeParse(req.body ?? {});
     if (body.success && body.data.recordingId && activeCall.recording && body.data.recordingId !== activeCall.recording.id) {
       res.status(409).json({ error: 'recordingId ne correspond pas à la prise en cours', call: serializeCall() });
@@ -1101,7 +1133,13 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
   app.post('/api/calls/:id/recording', recordUpload.single('file'), (req, res) => {
     const call = db.getCallById(Number(req.params.id));
     if (!call) {
+      discardUploadedFile(req.file);
       res.status(404).json({ error: 'Appel introuvable' });
+      return;
+    }
+    if (!canUseCall(call, req)) {
+      discardUploadedFile(req.file);
+      res.status(403).json({ error: 'Cet appel est réservé aux participants invités.' });
       return;
     }
     if (!req.file) {
@@ -1111,15 +1149,18 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
     const recordingId = typeof req.body.recordingId === 'string' && req.body.recordingId ? req.body.recordingId : null;
     if (recordingId) {
       const existing = db.getRecording(recordingId);
-      if (!existing) {
+      if (!existing || existing.call_id !== call.id) {
+        discardUploadedFile(req.file);
         res.status(400).json({ error: 'recordingId inconnu' });
         return;
       }
       if (existing.user_id !== (req.user?.id ?? -1)) {
+        discardUploadedFile(req.file);
         res.status(403).json({ error: "Seul l'auteur de la prise peut déposer son fichier" });
         return;
       }
       if (existing.file_id) {
+        discardUploadedFile(req.file);
         const file = db.getFileById(existing.file_id);
         const messageRow = file?.message_id ? db.getMessageById(file.message_id) : undefined;
         res.status(200).json({
@@ -1143,6 +1184,8 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       uploaded.size,
       uploaded.filename,
       call.id,
+      null,
+      'recording',
     );
     if (recordingId) db.setRecordingFile(recordingId, fileRow.id);
     logDocEvent(req.user?.id ?? -1, { fileId: fileRow.id, folderId: fileRow.folder_id ?? null, action: 'file_created', detail: `enregistrement d'appel « ${displayName} » déposé` });
@@ -1278,7 +1321,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
         ws.send(JSON.stringify({ type: 'history', messages: rows.reverse().map((r) => serializeMessage(db, r)) }));
       } else if (msg.data.type === 'signal' && typeof msg.data.to === 'number') {
         if (
-          msg.data.callId !== undefined &&
+          (msg.data.callId !== undefined || activeCall?.row.meeting_id != null) &&
           (!activeCall ||
             activeCall.row.id !== msg.data.callId ||
             !activeCall.participants.has(user.id) ||
