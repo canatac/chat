@@ -508,6 +508,12 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
     const row = db.startCall(userId, meeting?.title ?? title ?? '', meeting?.id ?? null);
     activeCall = { row, participants: new Set([userId]), recording: null };
     broadcastCall();
+    for (const accountId of online.keys()) {
+      if (accountId === userId) continue;
+      const account = directory.getAccount(accountId);
+      if (!account || (meeting && !canEnterMeeting(db, meeting.id, accountId, directory.role(account)))) continue;
+      notifyUser(accountId, { type: 'callStarted', call: serializeCall() });
+    }
     res.status(201).json({ call: serializeCall() });
   });
 

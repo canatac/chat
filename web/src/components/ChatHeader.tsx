@@ -6,6 +6,8 @@ import ForumOutlinedIcon from '@mui/icons-material/ForumOutlined';
 import LogoutOutlinedIcon from '@mui/icons-material/LogoutOutlined';
 import NotificationsNoneRoundedIcon from '@mui/icons-material/NotificationsNoneRounded';
 import PhoneIcon from '@mui/icons-material/Phone';
+import VolumeOffOutlinedIcon from '@mui/icons-material/VolumeOffOutlined';
+import VolumeUpOutlinedIcon from '@mui/icons-material/VolumeUpOutlined';
 import { Avatar, Badge, Box, Button, ButtonBase, Divider, ListItemIcon, Menu, MenuItem, Tooltip, Typography } from '@mui/material';
 import { useState } from 'react';
 import { chatColors } from '../theme';
@@ -25,6 +27,9 @@ interface Props {
   agendaOpen: boolean;
   unreadNotifications: number;
   notificationsOpen: boolean;
+  ringtoneActive: boolean;
+  onRingtoneToggle: () => void;
+  onRingtoneTest: () => void;
   onCall: () => void;
   onAgenda: () => void;
   onDocuments: () => void;
@@ -62,6 +67,7 @@ const actionStyle = {
 export default function ChatHeader({
   roomName, user, users, onlineIds, connection, hasCall, onCall, onDocuments, onAdmin, onStats, onLogout,
   pendingInvitations, agendaOpen, onAgenda, unreadNotifications, notificationsOpen, onNotifications,
+  ringtoneActive, onRingtoneToggle, onRingtoneTest,
 }: Props) {
   const [accountAnchor, setAccountAnchor] = useState<HTMLElement | null>(null);
   const callLabel = hasCall ? 'Appel en cours' : "Appel d'équipe";
@@ -180,6 +186,14 @@ export default function ChatHeader({
         >
           <Typography noWrap sx={{ px: 2, py: 1, fontWeight: 700, color: chatColors.ink }}>{user.name}</Typography>
           <Divider sx={{ mb: 0.5 }} />
+          <MenuItem onClick={() => { closeAccount(); onRingtoneToggle(); }} sx={{ whiteSpace: 'normal', minHeight: 44 }}>
+            <ListItemIcon>{ringtoneActive ? <VolumeOffOutlinedIcon fontSize="small" /> : <VolumeUpOutlinedIcon fontSize="small" />}</ListItemIcon>
+            {ringtoneActive ? 'Couper la sonnerie des appels' : 'Activer la sonnerie des appels'}
+          </MenuItem>
+          <MenuItem onClick={() => { closeAccount(); onRingtoneTest(); }} sx={{ minHeight: 44 }}>
+            <ListItemIcon><VolumeUpOutlinedIcon fontSize="small" /></ListItemIcon>
+            Tester la sonnerie
+          </MenuItem>
           {(user.role === 'admin' || user.role === 'superadmin') && [
             <MenuItem key="admin" onClick={() => { closeAccount(); onAdmin(); }}>
               <ListItemIcon><AdminPanelSettingsOutlinedIcon fontSize="small" /></ListItemIcon>
