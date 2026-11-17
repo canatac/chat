@@ -1,11 +1,13 @@
 import AttachFileOutlinedIcon from '@mui/icons-material/AttachFileOutlined';
+import DoneAllRoundedIcon from '@mui/icons-material/DoneAllRounded';
+import DoneRoundedIcon from '@mui/icons-material/DoneRounded';
 import DownloadOutlinedIcon from '@mui/icons-material/DownloadOutlined';
 import SmartToyOutlinedIcon from '@mui/icons-material/SmartToyOutlined';
 import { Avatar, Box, ButtonBase, CircularProgress, Link, Tooltip, Typography } from '@mui/material';
 import { Fragment, useState, type ReactNode } from 'react';
 import { saveFile } from '../api';
 import { chatColors } from '../theme';
-import type { Mention, Message, MessageFile, User } from '../types';
+import type { Mention, Message, MessageFile, MessageReceipt, User } from '../types';
 
 interface Props {
   message: Message;
@@ -13,6 +15,7 @@ interface Props {
   own: boolean;
   groupStart: boolean;
   highlighted: boolean;
+  receipt?: MessageReceipt;
 }
 
 const hours = new Intl.DateTimeFormat('fr-FR', { hour: '2-digit', minute: '2-digit' });
@@ -122,7 +125,22 @@ function FileDownload({ file }: { file: MessageFile }) {
   );
 }
 
-export default function MessageRow({ message, sender, own, groupStart, highlighted }: Props) {
+function ReceiptStatus({ receipt }: { receipt?: MessageReceipt }) {
+  const received = receipt?.received ?? 0;
+  const read = receipt?.read ?? 0;
+  let label = 'Envoyé';
+  if (received > read) label = `Reçu par ${received}`;
+  if (read) label = received > read ? `${label} · Lu par ${read}` : `Lu par ${read}`;
+  const Icon = received ? DoneAllRoundedIcon : DoneRoundedIcon;
+  return (
+    <Typography variant="caption" component="span" sx={{ display: 'flex', alignItems: 'center', gap: 0.45, px: 0.35, color: read ? chatColors.accent : chatColors.muted }}>
+      <Icon sx={{ fontSize: 15, flexShrink: 0 }} aria-hidden="true" />
+      {label}
+    </Typography>
+  );
+}
+
+export default function MessageRow({ message, sender, own, groupStart, highlighted, receipt }: Props) {
   const time = hours.format(new Date(message.createdAt));
   const isBot = message.user.isBot;
   const author = own ? 'Vous' : isBot ? 'Assistant' : sender.name;
@@ -178,6 +196,7 @@ export default function MessageRow({ message, sender, own, groupStart, highlight
         )}
         <Box
           data-message-id={message.id}
+          data-receivable={own ? undefined : ''}
           tabIndex={highlighted ? -1 : undefined}
           title={groupStart ? undefined : time}
           sx={{
@@ -197,6 +216,7 @@ export default function MessageRow({ message, sender, own, groupStart, highlight
             </Box>
           )}
         </Box>
+        {own && <ReceiptStatus receipt={receipt} />}
       </Box>
     </Box>
   );

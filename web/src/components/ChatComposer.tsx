@@ -7,13 +7,14 @@ import SendRoundedIcon from '@mui/icons-material/SendRounded';
 import {
   Alert, Avatar, Box, Button, CircularProgress, IconButton, ListItemButton, ListItemText, Menu, MenuItem, Paper, TextField, Tooltip, Typography,
 } from '@mui/material';
-import { useEffect, useMemo, useRef, useState, type FocusEvent, type SyntheticEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FocusEvent, type SyntheticEvent } from 'react';
 import { agendaTimeZone } from '../agenda-time';
 import { api } from '../api';
 import { formatFileSize } from '../formatFileSize';
 import { insertMentionTrigger, mentionAt, mentionsAfterEdit } from '../mentions';
 import { chatColors } from '../theme';
 import type { AgendaAssistantResponse, Mention, Message, User } from '../types';
+import ConversationIndicators from './ConversationIndicators';
 
 const MAX_MESSAGE_LENGTH = 4000;
 
@@ -42,6 +43,9 @@ function commandIn(text: string) {
 interface Props {
   onPublished: (message: Message) => void;
   onAgenda: (result?: AgendaAssistantResponse) => void;
+  onTyping: (active: boolean) => void;
+  typing: string[];
+  assistantResponding: boolean;
   members: User[];
   ownId: number;
 }
@@ -51,7 +55,7 @@ const mentionList = 'chat-mention-options';
 const optionId = (option: MentionOption) => 'chat-mention-option-' + (option.userId ?? 'room');
 const searchKey = (text: string) => text.normalize('NFD').replace(/\p{M}/gu, '').toLocaleLowerCase('fr');
 
-export default function ChatComposer({ onPublished, onAgenda, members, ownId }: Props) {
+export default function ChatComposer({ onPublished, onAgenda, onTyping, typing, assistantResponding, members, ownId }: Props) {
   const [draft, setDraft] = useState('');
   const [mentions, setMentions] = useState<Mention[]>([]);
   const [caret, setCaret] = useState<number | null>(null);
@@ -64,12 +68,14 @@ export default function ChatComposer({ onPublished, onAgenda, members, ownId }: 
   const fileInput = useRef<HTMLInputElement>(null);
   const textInput = useRef<HTMLTextAreaElement>(null);
   const submitPending = useRef(false);
+  const typingSentAt = useRef(0);
 
   const content = draft.trim();
   const tooLong = content.length > MAX_MESSAGE_LENGTH;
   const canSubmit = Boolean(content || file) && !tooLong && !sending;
   const command = commandIn(draft);
   const agendaCommand = command?.name === '/agenda';
+  const agendaPrompt = agendaCommand ? content.slice('/agenda'.length).trim() : '';
   const options = useMemo(() => {
     const people = members.filter((member) => member.mentionable !== false && !member.isBot);
     const counts = new Map<string, number>();
@@ -89,7 +95,34 @@ export default function ChatComposer({ onPublished, onAgenda, members, ownId }: 
     if (highlightedId) document.getElementById(highlightedId)?.scrollIntoView({ block: 'nearest' });
   }, [highlightedId]);
 
+  const stopTyping = useCallback(() => {
+    if (typingSentAt.current === 0) return;
+    typingSentAt.current = 0;
+    onTyping(false);
+  }, [onTyping]);
+
+  useEffect(() => {
+    const onVisibility = () => { if (document.hidden) stopTyping(); };
+    window.addEventListener('blur', stopTyping);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('blur', stopTyping);
+      document.removeEventListener('visibilitychange', onVisibility);
+      stopTyping();
+    };
+  }, [stopTyping]);
+
+  function reportTyping(next: string) {
+    if (!next.trim()) {
+      stopTyping();
+    } else if (Date.now() - typingSentAt.current >= 1500) {
+      typingSentAt.current = Date.now();
+      onTyping(true);
+    }
+  }
+
   function changeDraft(next: string, position: number | null) {
+    reportTyping(next);
     setMentions(mentionsAfterEdit(draft, next, mentions));
     setDraft(next);
     setCaret(position);
@@ -116,6 +149,7 @@ export default function ChatComposer({ onPublished, onAgenda, members, ownId }: 
     const suffix = draft.slice(end + extra);
     const separator = !suffix || /^[\p{L}\p{M}\p{N}_@]/u.test(suffix) ? ' ' : '';
     const next = draft.slice(0, start) + label + separator + suffix;
+    reportTyping(next);
     const nextCaret = start + label.length + (suffix.startsWith(' ') ? 1 : separator.length);
     setMentions([...mentionsAfterEdit(draft, next, mentions).filter((item) => item.end <= start || item.start >= start + label.length),
       { start, end: start + label.length, userId: option.userId }]);
@@ -140,12 +174,12 @@ export default function ChatComposer({ onPublished, onAgenda, members, ownId }: 
       return;
     }
     submitPending.current = true;
+    stopTyping();
     setSending(true);
     setError(null);
     try {
       if (agendaCommand) {
-        const prompt = content.slice('/agenda'.length).trim();
-        onAgenda(prompt ? await api.agenda.assistant(prompt, agendaTimeZone()) : undefined);
+        onAgenda(agendaPrompt ? await api.agenda.assistant(agendaPrompt, agendaTimeZone()) : undefined);
       } else {
         const start = draft.length - draft.trimStart().length;
         const hints = mentions.filter((mention) => mention.start >= start && mention.end <= start + content.length)
@@ -191,6 +225,7 @@ export default function ChatComposer({ onPublished, onAgenda, members, ownId }: 
       }}
     >
       <Box sx={{ maxWidth: 980, px: { xs: 1.5, sm: 3 }, mx: 'auto' }}>
+        <ConversationIndicators typing={typing} assistantResponding={assistantResponding} agendaPending={sending && Boolean(agendaPrompt)} />
         {error && <Alert severity="error" onClose={() => setError(null)} sx={{ mb: 0.9 }}>{error}</Alert>}
         <Paper
           component="form"
@@ -199,7 +234,10 @@ export default function ChatComposer({ onPublished, onAgenda, members, ownId }: 
           aria-busy={sending}
           onSubmit={(event) => { event.preventDefault(); void submit(); }}
           onBlur={(event) => {
-            if (!event.currentTarget.contains(event.relatedTarget)) setCaret(null);
+            if (!event.currentTarget.contains(event.relatedTarget)) {
+              setCaret(null);
+              stopTyping();
+            }
           }}
           sx={{
             position: 'relative',

@@ -153,6 +153,79 @@ test('sur mobile, garde la position de lecture et rend les accès aux appels, do
   });
 });
 
+test('sur mobile, synchronise le titre, la réception, la lecture et la saisie entre deux comptes et deux onglets', async ({ browser, page }) => {
+  await withChat(page, 0, async (base, colleague, db) => {
+    const receiver = await browser.newContext({ viewport: { width: 320, height: 740 }, isMobile: true, hasTouch: true });
+    await receiver.addInitScript((token) => localStorage.setItem('chat.token', token), colleague.token);
+    try {
+      const editor = page.getByRole('textbox', { name: 'Écrire un message' });
+      await editor.fill('Premier message à lire');
+      await editor.press('Enter');
+      const sent = page.getByRole('article').filter({ hasText: 'Premier message à lire' });
+      await expect(sent.getByText('Envoyé', { exact: true })).toBeVisible();
+
+      const background = await receiver.newPage();
+      await background.addInitScript(() => {
+        // Les moteurs en mode headless peuvent laisser tous les onglets visibles.
+        Object.defineProperty(document, 'hidden', { get: () => true });
+      });
+      await background.goto(base);
+      await expect(background).toHaveTitle("(1) Chat d'équipe");
+      await expect(background.locator('link[rel="icon"]')).toHaveAttribute('href', /\/chatroom-unread.svg$/);
+      await expect(sent.getByText('Reçu par 1', { exact: true })).toBeVisible();
+
+      await editor.fill('Deuxième message à lire');
+      await editor.press('Enter');
+      await expect(background).toHaveTitle("(2) Chat d'équipe");
+      for (let index = 1; index <= 55; index++) db.insertMessage(colleague.user.id, 'Notes suivantes ' + index);
+      await background.reload();
+      await expect(background).toHaveTitle("(2) Chat d'équipe");
+
+      const foreground = await receiver.newPage();
+      await foreground.goto(base);
+      await foreground.bringToFront();
+      const first = foreground.getByText('Premier message à lire', { exact: true });
+      await expect(first).toHaveCount(0);
+      await foreground.getByRole('button', { name: '2 nouveaux messages', exact: true }).tap();
+      await expect(first).toBeInViewport();
+      await expect(background).toHaveTitle("Chat d'équipe");
+      await expect(background.locator('link[rel="icon"]')).toHaveAttribute('href', '/chatroom.svg');
+      await expect(sent.getByText('Lu par 1', { exact: true })).toBeVisible();
+
+      const reply = foreground.getByRole('textbox', { name: 'Écrire un message' });
+      await reply.fill('Un brouillon');
+      await expect(page.getByRole('status', { name: 'Activité de la conversation' })).toHaveText('Noémie écrit');
+      await reply.fill('');
+      await expect(page.getByRole('status', { name: 'Activité de la conversation' })).toBeEmpty();
+      expect(await foreground.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
+    } finally {
+      await receiver.close();
+    }
+  });
+});
+
+test('affiche l’activité pendant la réponse de l’assistant de l’agenda', async ({ page }) => {
+  await withChat(page, 0, async () => {
+    let release = () => {};
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    await page.route('**/api/agenda/assistant', async (route) => {
+      await pending;
+      await route.fulfill({ status: 503, json: { error: 'Indisponibilité simulée' } });
+    });
+    const editor = page.getByRole('textbox', { name: 'Écrire un message' });
+    await editor.fill('/agenda Combien d’appels prévus ?');
+    await editor.press('Enter');
+    const status = page.getByRole('status', { name: 'Activité de la conversation' });
+    try {
+      await expect(status).toHaveText('L’assistant consulte l’agenda');
+    } finally {
+      release();
+    }
+    await expect(status).toBeEmpty();
+    await expect(page.getByRole('alert')).toContainText('Impossible d’interroger l’agenda.');
+  });
+});
+
 test('au toucher, suggère les alias puis retrouve un ancien message depuis une notification persistante', async ({ browser }) => {
   const context = await browser.newContext({ viewport: { width: 320, height: 780 }, isMobile: true, hasTouch: true });
   const page = await context.newPage();

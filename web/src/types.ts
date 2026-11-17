@@ -51,6 +51,22 @@ export interface Message {
   mentions?: Mention[];
 }
 
+export interface MessageReceipt {
+  messageId: number;
+  received: number;
+  read: number;
+}
+
+export interface UnreadMessages {
+  count: number;
+  firstId: number | null;
+}
+
+export interface ConversationActivity {
+  typing: Pick<User, 'id' | 'name'>[];
+  assistantResponding: boolean;
+}
+
 export interface Mention {
   start: number;
   end: number;

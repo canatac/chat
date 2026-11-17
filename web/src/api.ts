@@ -1,5 +1,6 @@
 import type { AdminStats, CallInfo, DocumentIds, FileEvent, FileFilters, FileItem, FileSort, Folder, Mention, MentionNotification, Message, MessageFile, MoveConflict, MoveDecision, NotificationPage, Room, RoomInvitation, RoomMember, RoomSession, User } from './types';
 import type { AgendaAssistantResponse, Meeting, MeetingInput, MeetingResponse } from './types';
+import type { MessageReceipt, UnreadMessages } from './types';
 
 interface FileListRequest {
   query: string;
@@ -147,6 +148,10 @@ export const api = {
     req<{ messages: Message[] }>(`/api/messages?limit=${limit}${before !== undefined ? `&before=${before}` : ''}`, { signal }),
   messageWindow: (id: number, signal: AbortSignal) =>
     req<{ messages: Message[]; hasMore: boolean; hasNewer: boolean }>('/api/messages/around/' + id, { signal }),
+  messageActivity: (signal: AbortSignal, ids: number[] = []) =>
+    req<{ unread: UnreadMessages; receipts: MessageReceipt[] }>('/api/messages/activity' + (ids.length ? '?ids=' + ids.join(',') : ''), { signal }),
+  acknowledgeMessages: (receipts: { id: number; read: boolean }[], signal: AbortSignal) =>
+    req<void>('/api/messages/activity', { method: 'PATCH', body: JSON.stringify({ receipts }), signal }),
   send: (content: string, mentions: Mention[] = []) =>
     req<{ message: Message }>('/api/messages', { method: 'POST', body: JSON.stringify(mentions.length ? { content, mentions } : { content }) }),
   notifications: (before?: number, signal?: AbortSignal) =>

@@ -5,6 +5,7 @@ import { createServer as createHttpServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { test, type TestContext } from 'node:test';
 import jwt from 'jsonwebtoken';
 import WebSocket from 'ws';
@@ -24,7 +25,7 @@ type Session = {
   rooms: { id: number; name: string; archivedAt: number | null }[];
 };
 
-async function start(t: TestContext, seed?: (dir: string) => void) {
+async function start(t: TestContext, seed?: (dir: string) => void, env: Record<string, string> = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'chat-rooms-'));
   seed?.(dir);
   const config = loadConfig({
@@ -34,6 +35,7 @@ async function start(t: TestContext, seed?: (dir: string) => void) {
     SUPERADMIN_NAMES: 'Racine',
     SUPERADMIN_PASSWORD: password,
     LINK_FETCH_ALLOW_PRIVATE: '1',
+    ...env,
   });
   const ctx = createServer(config, dir);
   t.after(async () => {
@@ -80,14 +82,17 @@ type SocketEvent = {
   message?: { content: string };
   messages?: { content: string }[];
   notification?: { id: number; kind: string; messageId: number };
+  receipts?: { messageId: number; received: number; read: number }[];
+  typing?: { id: number }[];
+  assistantResponding?: boolean;
 };
 
-function waitForMessage(ws: WebSocket, match: (event: SocketEvent) => boolean): Promise<SocketEvent> {
+function waitForMessage(ws: WebSocket, match: (event: SocketEvent) => boolean, timeout = 5000): Promise<SocketEvent> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       ws.off('message', onMessage);
       reject(new Error('Événement WebSocket non reçu'));
-    }, 5000);
+    }, timeout);
     function onMessage(raw: WebSocket.RawData) {
       const event = JSON.parse(raw.toString()) as SocketEvent;
       if (!match(event)) return;
@@ -107,6 +112,125 @@ test('les mentions suivent l’alias complet, même en cas d’homonymes choisis
   const prose = '🗂️ (@Le\u0301o) @Léonic @roommate abc@room `@room` https://example.test/@room et @room.';
   const matches = resolveMentions(prose, members, []);
   assert.deepEqual(matches.map(({ start, end, userId }) => [prose.slice(start, end), userId]), [['@Le\u0301o', 2], ['@room', null]]);
+});
+
+test('accuse la réception et la lecture par membre, sans effacer les non-lus sautés dans l’historique', async (t) => {
+  const { base } = await start(t, (dir) => {
+    const legacy = new DB(dir);
+    const camille = legacy.createUser('Camille', hashPassword(password));
+    legacy.createUser('Noémie', hashPassword(password));
+    legacy.insertMessage(camille.id, 'Message antérieur à la mise à jour');
+    legacy.close();
+    const sqlite = new DatabaseSync(path.join(dir, 'chat.db'));
+    sqlite.exec('DROP TABLE message_receipt_baseline; DROP TABLE message_receipts;');
+    sqlite.close();
+  });
+  const author = await login(base, 'Camille');
+  const reader = await login(base, 'Noémie');
+  const stranger = await register(base, 'autre-activite@example.test', 'Autre salon');
+  const sent = connect(base, author.token, author.roomId);
+  const otherTab = connect(base, reader.token, reader.roomId);
+  t.after(() => { sent.close(); otherTab.close(); });
+  await Promise.all([once(sent, 'open'), once(otherTab, 'open')]);
+  const post = async (content: string) => {
+    const res = await api(base, '/messages', { token: author.token, method: 'POST', body: { content } });
+    assert.equal(res.status, 201);
+    const { message } = await res.json() as { message: { id: number } };
+    return message.id;
+  };
+  const status = async (account: Session, ids: number[] = []) => {
+    const res = await api(base, '/messages/activity' + (ids.length ? '?ids=' + ids.join(',') : ''), { token: account.token });
+    assert.equal(res.status, 200);
+    return res.json() as Promise<{ unread: { count: number; firstId: number | null }; receipts: SocketEvent['receipts'] }>;
+  };
+  const acknowledge = async (account: Session, receipts: { id: number; read: boolean }[]) => {
+    const res = await api(base, '/messages/activity', { token: account.token, method: 'PATCH', body: { receipts } });
+    assert.equal(res.status, 204);
+  };
+
+  const first = await post('Premier message');
+  const second = await post('Deuxième message');
+  assert.deepEqual((await status(reader)).unread, { count: 2, firstId: first });
+  assert.deepEqual((await status(author)).unread, { count: 0, firstId: null });
+  assert.deepEqual((await status(stranger)).unread, { count: 0, firstId: null });
+  assert.equal((await api(base, '/messages/activity', { token: stranger.token, room: author.roomId })).status, 403);
+
+  const delivered = waitForMessage(sent, (event) => event.type === 'messageReceipts');
+  await acknowledge(reader, [{ id: second, read: false }]);
+  assert.deepEqual((await delivered).receipts, [{ messageId: second, authorId: author.user.id, received: 1, read: 0 }]);
+  assert.equal((await status(reader)).unread.count, 2);
+  assert.deepEqual((await status(reader, [second])).receipts, []);
+
+  const readUpdate = waitForMessage(otherTab, (event) => event.type === 'unreadMessagesChanged');
+  await acknowledge(reader, [{ id: second, read: true }, { id: second, read: false }]);
+  await readUpdate;
+  await acknowledge(author, [{ id: second, read: true }]);
+  await acknowledge(reader, [{ id: second + 10_000, read: true }]);
+  assert.deepEqual((await status(author, [first, second])).receipts, [{ messageId: second, authorId: author.user.id, received: 1, read: 1 }]);
+  assert.deepEqual((await status(reader)).unread, { count: 1, firstId: first });
+  await acknowledge(reader, [{ id: first, read: true }]);
+  assert.deepEqual((await status(reader)).unread, { count: 0, firstId: null });
+});
+
+test('la saisie expire par connexion et l’assistant reste actif jusqu’à sa dernière réponse', async (t) => {
+  const provider = createHttpServer((req) => req.resume());
+  await new Promise<void>((resolve) => provider.listen(0, '127.0.0.1', resolve));
+  t.after(() => { provider.closeAllConnections(); return new Promise<void>((resolve) => provider.close(() => resolve())); });
+  const { base } = await start(t, undefined, {
+    LLM_MODEL: 'test-activite', LLM_BASE_URL: `http://127.0.0.1:${(provider.address() as AddressInfo).port}/v1`,
+  });
+  const account = await register(base, 'activite@example.test', 'Salon Activité');
+  const outside = await register(base, 'ailleurs@example.test', 'Salon Ailleurs');
+  const first = connect(base, account.token, account.roomId);
+  const second = connect(base, account.token, account.roomId);
+  const observer = connect(base, account.token, account.roomId);
+  const isolated = connect(base, outside.token, outside.roomId);
+  t.after(() => [first, second, observer, isolated].forEach((ws) => ws.close()));
+  const externalActivity: SocketEvent[] = [];
+  isolated.on('message', (raw) => externalActivity.push(JSON.parse(raw.toString()) as SocketEvent));
+  await Promise.all([first, second, observer, isolated].map((ws) => once(ws, 'open')));
+  const activity = (match: (event: SocketEvent) => boolean) => waitForMessage(observer, (event) => event.type === 'conversationActivity' && match(event));
+  const typing = activity((event) => event.typing?.length === 1);
+  first.send(JSON.stringify({ type: 'typing', active: true, content: 'Mon brouillon privé' }));
+  const shown = await typing;
+  assert.deepEqual(shown.typing?.map(({ id }) => id), [account.user.id]);
+  assert.equal(JSON.stringify(shown).includes('Mon brouillon privé'), false);
+  const duplicate = activity((event) => event.typing?.length === 1);
+  second.send(JSON.stringify({ type: 'typing', active: true }));
+  assert.equal((await duplicate).typing?.length, 1);
+  const stillTyping = activity((event) => event.typing?.length === 1);
+  first.close();
+  await stillTyping;
+  const idle = activity((event) => event.typing?.length === 0);
+  second.send(JSON.stringify({ type: 'typing', active: false }));
+  await idle;
+
+  const post = (content: string) => api(base, '/messages', { token: account.token, method: 'POST', body: { content } });
+  const busy = activity((event) => event.assistantResponding === true);
+  const firstRequest = once(provider, 'request');
+  assert.equal((await post('/ask Première question')).status, 201);
+  const [, firstResponse] = await firstRequest;
+  await busy;
+  const secondRequest = once(provider, 'request');
+  assert.equal((await post('/resume')).status, 201);
+  const [, secondResponse] = await secondRequest;
+
+  const failed = waitForMessage(observer, (event) => event.message?.content.includes("Erreur lors de l'appel au LLM") === true);
+  firstResponse.writeHead(503).end('Indisponibilité simulée');
+  await failed;
+  const newTab = connect(base, account.token, account.roomId);
+  t.after(() => newTab.close());
+  const activitySnapshot = await waitForMessage(newTab, (event) => event.type === 'conversationActivity');
+  assert.equal(activitySnapshot.assistantResponding, true);
+  const finished = activity((event) => event.assistantResponding === false);
+  secondResponse.setHeader('Content-Type', 'application/json');
+  secondResponse.end(JSON.stringify({ choices: [{ message: { content: 'Réponse simulée' } }] }));
+  await finished;
+  const startedAgain = activity((event) => event.typing?.length === 1);
+  second.send(JSON.stringify({ type: 'typing', active: true }));
+  await startedAgain;
+  await waitForMessage(observer, (event) => event.type === 'conversationActivity' && event.typing?.length === 0, 7500);
+  assert.equal(externalActivity.some((event) => event.assistantResponding || event.typing?.length), false);
 });
 
 test('notifie les bons membres, y compris hors ligne, et isole la lecture par salon et par destinataire', async (t) => {
