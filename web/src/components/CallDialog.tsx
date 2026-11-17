@@ -1,5 +1,6 @@
 import CallEndIcon from '@mui/icons-material/CallEnd';
 import FiberManualRecordIcon from '@mui/icons-material/FiberManualRecord';
+import GroupOutlinedIcon from '@mui/icons-material/GroupOutlined';
 import MicIcon from '@mui/icons-material/Mic';
 import MicOffIcon from '@mui/icons-material/MicOff';
 import PhoneIcon from '@mui/icons-material/Phone';
@@ -30,11 +31,13 @@ import { api } from '../api';
 import type { CallInfo, Meeting, MeetingArtifact, User } from '../types';
 import { CallSession, loadIceServers } from '../webrtc';
 import type { ChatSocket } from '../ws';
+import MeetingParticipantsDialog from './MeetingParticipantsDialog';
 
 interface Props {
   open: boolean;
   onClose: () => void;
   user: User;
+  users: User[];
   socket: ChatSocket | null;
   call: CallInfo | null;
   requestedMeeting?: Meeting;
@@ -74,7 +77,7 @@ function normalizeMediaError(err: unknown): Error {
   return err instanceof Error ? err : new Error(msg);
 }
 
-export default function CallDialog({ open, onClose, user, socket, call, requestedMeeting, agendaRevision, onRead, onCallChange }: Props) {
+export default function CallDialog({ open, onClose, user, users, socket, call, requestedMeeting, agendaRevision, onRead, onCallChange }: Props) {
   const [title, setTitle] = useState('');
   const [joined, setJoined] = useState(false);
   const [muted, setMuted] = useState(false);
@@ -89,10 +92,11 @@ export default function CallDialog({ open, onClose, user, socket, call, requeste
   const [note, setNote] = useState<string | null>(null);
   const [recStatus, setRecStatus] = useState<RecStatus>('idle');
   const [meetingDetails, setMeetingDetails] = useState<Meeting>();
+  const [managingParticipants, setManagingParticipants] = useState(false);
   const sessionRef = useRef<CallSession | null>(null);
-  const knownPeersRef = useRef<Set<number>>(new Set());
   const audioElsRef = useRef<Map<number, HTMLAudioElement>>(new Map());
   const localRecordingIdRef = useRef<string | null>(null);
+  const removalVersion = useRef(0);
 
   const rec = call?.recording ?? null;
   const meetingId = requestedMeeting?.id ?? call?.meetingId;
@@ -112,7 +116,7 @@ export default function CallDialog({ open, onClose, user, socket, call, requeste
   }, [open, meetingId, agendaRevision]);
 
   const enterSession = useCallback(
-    async (callInfo: CallInfo, stream: MediaStream) => {
+    (callInfo: CallInfo, stream: MediaStream) => {
       if (!socket) return;
       const session = new CallSession(socket, user.id, callInfo.id, {
         onAudioTrack: (peerId, _track, stream) =>
@@ -136,14 +140,8 @@ export default function CallDialog({ open, onClose, user, socket, call, requeste
       });
       session.attachLocalStream(stream);
       sessionRef.current = session;
-      knownPeersRef.current = new Set();
-      for (const p of callInfo.participants) {
-        if (p.id !== user.id) {
-          knownPeersRef.current.add(p.id);
-          await session.connectTo(p.id);
-        }
-      }
       setJoined(true);
+      session.syncPeers(callInfo.participants);
     },
     [socket, user.id],
   );
@@ -153,14 +151,19 @@ export default function CallDialog({ open, onClose, user, socket, call, requeste
       if (!socket || differentCall || !canUse) return;
       setBusy(true);
       setError(null);
+      const version = removalVersion.current;
       let stream: MediaStream | undefined;
       try {
         stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
         await loadIceServers();
         const result = isStart ? await api.calls.start(meeting?.title ?? title.trim(), meetingId ?? undefined)
           : await api.calls.join(call?.id, meetingId ?? undefined);
+        if (version !== removalVersion.current) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
         onCallChange(result.call);
-        await enterSession(result.call, stream);
+        enterSession(result.call, stream);
       } catch (err) {
         stream?.getTracks().forEach((track) => track.stop());
         setError(normalizeMediaError(err).message);
@@ -171,58 +174,21 @@ export default function CallDialog({ open, onClose, user, socket, call, requeste
     [socket, differentCall, canUse, meeting, meetingId, title, call?.id, enterSession, onCallChange],
   );
 
-  useEffect(() => {
-    if (!socket) return;
-    const handler = (event: { type: string; from?: number; data?: unknown; call?: CallInfo | null }) => {
-      if (event.type === 'signal' && typeof event.from === 'number' && sessionRef.current) {
-        void sessionRef.current.handleSignal(event.from, event.data);
-      }
-    };
-    return socket.onMessage(handler);
-  }, [socket]);
-
-  useEffect(() => {
-    if (!call || !sessionRef.current || !joined) return;
-    const session = sessionRef.current;
-    session.setCallId(call.id);
-    for (const p of call.participants) {
-      if (p.id !== user.id && !knownPeersRef.current.has(p.id)) {
-        knownPeersRef.current.add(p.id);
-        void session.connectTo(p.id);
-      }
-    }
-  }, [call, joined, user.id]);
-
-  useEffect(() => {
-    const recNow = call?.recording ?? null;
-    const session = sessionRef.current;
-    if (!session || !joined) return;
-    if (recNow) {
-      if (recNow.startedBy.id === user.id && !session.isRecording()) {
-        try {
-          session.startRecording(() => {});
-          localRecordingIdRef.current = recNow.id;
-          setRecStatus('recording');
-        } catch (err) {
-          setError(err instanceof Error ? err.message : "Erreur d'enregistrement");
-        }
-      }
-      return;
-    }
-
+  const finalizeRecording = useCallback((session: CallSession) => {
     const recordingId = localRecordingIdRef.current;
-    if (!call || !recordingId || !session.isRecording()) return;
+    if (!recordingId || !session.isRecording()) return false;
     localRecordingIdRef.current = null;
+    const callId = session.callId;
     const ext = session.recordingExtension();
+    setRecStatus('uploading');
     session.stopRecordingWith((blob) => {
       if (blob.size === 0) {
         setError('Enregistrement vide (0 s) — aucun échantillon audio capturé.');
         setRecStatus('error');
         return;
       }
-      setRecStatus('uploading');
       void api
-        .uploadRecording(call.id, blob, `appel-${call.id}-${Date.now()}.${ext}`, recordingId)
+        .uploadRecording(callId, blob, `appel-${callId}-${Date.now()}.${ext}`, recordingId)
         .then((r) => {
           setRecStatus('done');
           setNote(
@@ -238,7 +204,69 @@ export default function CallDialog({ open, onClose, user, socket, call, requeste
           setError(e instanceof Error ? e.message : "Erreur d'envoi — le fichier reste dispo pour un nouvel essai");
         });
     });
-  }, [call, joined, user.id]);
+    return true;
+  }, []);
+
+  const closeSession = useCallback(() => {
+    const session = sessionRef.current;
+    if (!session) return;
+    sessionRef.current = null;
+    const sending = finalizeRecording(session);
+    session.leave();
+    audioElsRef.current.clear();
+    setJoined(false);
+    setMuted(false);
+    setPeerAudios([]);
+    setPeerVideos([]);
+    setPeerStates({});
+    setSharing(false);
+    setCamera(false);
+    setAudioBlocked(false);
+    if (!sending) setRecStatus((status) => status === 'uploading' ? status : 'idle');
+  }, [finalizeRecording]);
+
+  useEffect(() => {
+    return socket?.onMessage((event) => {
+      const session = sessionRef.current;
+      if (event.type === 'callParticipantRemoved') {
+        removalVersion.current++;
+        if (session?.callId === event.callId || !session) {
+          closeSession();
+          setError('Tu as été retiré de l’appel.');
+        }
+      } else if (session && event.type === 'signal' && typeof event.from === 'number'
+        && (event.callId == null || event.callId === session.callId)) {
+        void session.handleSignal(event.from, event.data);
+      }
+    });
+  }, [socket, closeSession]);
+
+  useEffect(() => {
+    const session = sessionRef.current;
+    if (!session || !joined) return;
+    if (!call || session.callId !== call.id || !call.participants.some(({ id }) => id === user.id)) {
+      closeSession();
+      return;
+    }
+    session.syncPeers(call.participants);
+  }, [call, joined, user.id, closeSession]);
+
+  useEffect(() => {
+    const session = sessionRef.current;
+    if (!session || !joined || call?.id !== session.callId) return;
+    const recNow = call.recording;
+    if (!recNow) {
+      finalizeRecording(session);
+    } else if (recNow.startedBy.id === user.id && !session.isRecording()) {
+      try {
+        session.startRecording(() => {});
+        localRecordingIdRef.current = recNow.id;
+        setRecStatus('recording');
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Erreur d'enregistrement");
+      }
+    }
+  }, [call, joined, user.id, finalizeRecording]);
 
   useEffect(() => {
     return () => {
@@ -258,16 +286,10 @@ export default function CallDialog({ open, onClose, user, socket, call, requeste
   }, []);
 
   const leave = async () => {
-    sessionRef.current?.leave();
-    sessionRef.current = null;
-    setJoined(false);
-    setPeerAudios([]);
-    setPeerVideos([]);
-    setPeerStates({});
-    setSharing(false);
-    setRecStatus('idle');
+    const id = sessionRef.current?.callId ?? call?.id;
+    closeSession();
     try {
-      const r = await api.calls.leave();
+      const r = await api.calls.leave(id);
       onCallChange(r.call);
     } catch {
       // ignore
@@ -275,15 +297,9 @@ export default function CallDialog({ open, onClose, user, socket, call, requeste
   };
 
   const endCall = async () => {
-    sessionRef.current?.leave();
-    sessionRef.current = null;
-    setJoined(false);
-    setPeerAudios([]);
-    setPeerVideos([]);
-    setPeerStates({});
-    setRecStatus('idle');
+    closeSession();
     try {
-      await api.calls.end();
+      await api.calls.end(visibleCall?.id);
       onCallChange(null);
     } catch {
       // ignore
@@ -298,14 +314,15 @@ export default function CallDialog({ open, onClose, user, socket, call, requeste
 
   const toggleCamera = async () => {
     setError(null);
+    const session = sessionRef.current;
+    if (!session) return;
     try {
       if (camera) {
-        await sessionRef.current?.stopCamera();
-        setCamera(false);
+        await session.stopCamera();
       } else {
-        await sessionRef.current?.startCamera();
-        setCamera(true);
+        await session.startCamera();
       }
+      if (sessionRef.current === session) setCamera(!camera);
     } catch (err) {
       setError(normalizeMediaError(err).message);
     }
@@ -313,14 +330,15 @@ export default function CallDialog({ open, onClose, user, socket, call, requeste
 
   const toggleScreen = async () => {
     setError(null);
+    const session = sessionRef.current;
+    if (!session) return;
     try {
       if (sharing) {
-        await sessionRef.current?.stopScreenShare();
-        setSharing(false);
+        await session.stopScreenShare();
       } else {
-        await sessionRef.current?.startScreenShare();
-        setSharing(true);
+        await session.startScreenShare();
       }
+      if (sessionRef.current === session) setSharing(!sharing);
     } catch (err) {
       setError(normalizeMediaError(err).message);
     }
@@ -358,7 +376,9 @@ export default function CallDialog({ open, onClose, user, socket, call, requeste
   };
 
   return (
-    <Dialog open={open} onClose={onClose} fullWidth maxWidth="md" keepMounted>
+    <>
+    <Dialog open={open} onClose={onClose} fullWidth maxWidth="md" keepMounted
+      slotProps={{ paper: { sx: { m: { xs: 1, sm: 3 }, width: { xs: 'calc(100% - 16px)', sm: '100%' } } } }}>
       <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1, overflowWrap: 'anywhere' }}>
         <PhoneIcon color="primary" />
         {visibleCall ? `Appel en cours${visibleCall.title ? ` — ${visibleCall.title}` : ''}` : meeting?.title ?? "Appel d'équipe"}
@@ -371,6 +391,10 @@ export default function CallDialog({ open, onClose, user, socket, call, requeste
             <Typography variant="body2">Durée prévue · {meeting.durationMinutes} min</Typography>
             {meeting.agenda && <Typography sx={{ mt: 0.5, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{meeting.agenda}</Typography>}
             {report && <Link component="button" type="button" sx={{ mt: 0.75 }} onClick={() => onRead(report)}>Lire le compte rendu</Link>}
+            {meeting.canManageParticipants && (
+              <Box sx={{ mt: 0.75 }}><Button startIcon={<GroupOutlinedIcon />} sx={{ minHeight: 44 }}
+                onClick={() => setManagingParticipants(true)}>Gérer les participants</Button></Box>
+            )}
           </Box>
         )}
         {differentCall && <Alert severity="info">Un autre appel est déjà en cours dans ce salon.</Alert>}
@@ -530,5 +554,11 @@ export default function CallDialog({ open, onClose, user, socket, call, requeste
         <Button onClick={onClose}>Fermer</Button>
       </DialogActions>
     </Dialog>
+    {open && managingParticipants && meeting && (
+      <MeetingParticipantsDialog key={meeting.id} meeting={meeting} users={users}
+        canInviteContacts={user.role === 'admin' || user.role === 'superadmin'}
+        onChanged={setMeetingDetails} onClose={() => setManagingParticipants(false)} />
+    )}
+    </>
   );
 }

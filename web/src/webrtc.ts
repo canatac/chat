@@ -42,7 +42,8 @@ export class CallSession {
   private screenStream: MediaStream | null = null;
   private readonly ws: ChatSocket;
   private readonly userId: number;
-  private callId = 0;
+  readonly callId: number;
+  private closed = false;
   private readonly handlers: CallSessionHandlers;
   private unlockCtx: AudioContext | null = null;
   private recorder: MediaRecorder | null = null;
@@ -58,10 +59,6 @@ export class CallSession {
     this.userId = userId;
     this.callId = callId;
     this.handlers = handlers;
-  }
-
-  setCallId(callId: number): void {
-    this.callId = callId;
   }
 
   private unlockAudio(): void {
@@ -143,8 +140,12 @@ export class CallSession {
     pc.onicecandidate = (ev) => {
       if (ev.candidate) this.sendSignal(peerId, { candidate: ev.candidate.toJSON() });
     };
-    pc.ontrack = (ev) => this.onTrack(peerId, ev);
-    pc.onconnectionstatechange = () => this.onConnState(peerId);
+    pc.ontrack = (event) => {
+      if (this.peers.get(peerId) === peer) this.onTrack(peerId, event);
+    };
+    pc.onconnectionstatechange = () => {
+      if (this.peers.get(peerId) === peer) this.onConnState(peerId);
+    };
     return peer;
   }
 
@@ -213,6 +214,7 @@ export class CallSession {
   private removePeer(peerId: number): void {
     const peer = this.peers.get(peerId);
     if (!peer) return;
+    this.peers.delete(peerId);
     if (peer.disconnectTimer) clearTimeout(peer.disconnectTimer);
     for (const t of peer.audioStream.getTracks()) this.detachFromMix(t);
     try {
@@ -220,12 +222,19 @@ export class CallSession {
     } catch {
       // ignore
     }
-    this.peers.delete(peerId);
     this.handlers.onPeerRemoved(peerId);
   }
 
+  syncPeers(participants: { id: number }[]): void {
+    const present = new Set(participants.map(({ id }) => id));
+    for (const id of this.peers.keys()) {
+      if (!present.has(id)) this.removePeer(id);
+    }
+    for (const id of present) void this.connectTo(id);
+  }
+
   async connectTo(peerId: number): Promise<void> {
-    if (peerId === this.userId || this.peers.has(peerId)) return;
+    if (this.closed || peerId === this.userId || this.peers.has(peerId)) return;
     this.createPeer(peerId);
     await this.renegotiate(peerId);
   }
@@ -245,7 +254,7 @@ export class CallSession {
   }
 
   async handleSignal(from: number, data: unknown): Promise<void> {
-    if (from === this.userId) return;
+    if (this.closed || from === this.userId) return;
     const peer = this.peers.get(from) ?? this.createPeer(from);
     const pc = peer.pc;
     const d = data as { sdp?: RTCSessionDescriptionInit; candidate?: RTCIceCandidateInit };
@@ -290,8 +299,13 @@ export class CallSession {
   }
 
   async startCamera(): Promise<MediaStream> {
-    this.videoStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-    const track = this.videoStream.getVideoTracks()[0];
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    if (this.closed) {
+      stream.getTracks().forEach((track) => track.stop());
+      return stream;
+    }
+    this.videoStream = stream;
+    const track = stream.getVideoTracks()[0];
     for (const peerId of [...this.peers.keys()]) {
       const peer = this.peers.get(peerId);
       if (peer && this.videoStream) {
@@ -299,7 +313,7 @@ export class CallSession {
         await this.renegotiate(peerId);
       }
     }
-    return this.videoStream;
+    return stream;
   }
 
   async stopCamera(): Promise<void> {
@@ -321,8 +335,13 @@ export class CallSession {
     if (!('getDisplayMedia' in navigator.mediaDevices)) {
       throw new Error("Partage d'écran non supporté par ce navigateur (ex. Safari iOS). Utilise un PC ou un téléphone Android.");
     }
-    this.screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
-    const track = this.screenStream.getVideoTracks()[0];
+    const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+    if (this.closed) {
+      stream.getTracks().forEach((track) => track.stop());
+      return stream;
+    }
+    this.screenStream = stream;
+    const track = stream.getVideoTracks()[0];
     if (track) {
       track.onended = () => {
         void this.stopScreenShare();
@@ -335,7 +354,7 @@ export class CallSession {
         await this.renegotiate(peerId);
       }
     }
-    return this.screenStream;
+    return stream;
   }
 
   async stopScreenShare(): Promise<void> {
@@ -450,6 +469,7 @@ export class CallSession {
   }
 
   leave(): void {
+    this.closed = true;
     this.stopRecording();
     for (const t of this.localStream?.getTracks() ?? []) t.stop();
     for (const t of this.screenStream?.getTracks() ?? []) t.stop();
@@ -458,5 +478,7 @@ export class CallSession {
     this.localStream = null;
     this.videoStream = null;
     this.screenStream = null;
+    void this.unlockCtx?.close();
+    this.unlockCtx = null;
   }
 }

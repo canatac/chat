@@ -3,6 +3,7 @@ import DescriptionOutlinedIcon from '@mui/icons-material/DescriptionOutlined';
 import DownloadOutlinedIcon from '@mui/icons-material/DownloadOutlined';
 import EditOutlinedIcon from '@mui/icons-material/EditOutlined';
 import PhoneOutlinedIcon from '@mui/icons-material/PhoneOutlined';
+import GroupOutlinedIcon from '@mui/icons-material/GroupOutlined';
 import {
   Alert, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Divider, Link, Stack, Typography,
 } from '@mui/material';
@@ -10,15 +11,13 @@ import { useState } from 'react';
 import { agendaTimeZone, fullDate, timeOfDay } from '../agenda-time';
 import { api, saveBlob, saveFile } from '../api';
 import { chatColors } from '../theme';
-import type { Meeting, MeetingArtifact, MeetingResponse } from '../types';
+import type { Meeting, MeetingArtifact, User } from '../types';
+import MeetingParticipantsDialog, { rsvpLabel } from './MeetingParticipantsDialog';
 
 export const meetingStatus: Record<Meeting['status'], string> = {
   scheduled: 'Planifiée', live: 'En cours', held: 'Terminée', past: 'Créneau passé', cancelled: 'Annulée',
 };
 
-const rsvpLabel: Record<MeetingResponse, string> = {
-  pending: 'En attente', accepted: 'Accepté', tentative: 'Peut-être', declined: 'Refusé',
-};
 const responses = [
   { value: 'accepted', label: 'Accepter' },
   { value: 'tentative', label: 'Peut-être' },
@@ -31,16 +30,19 @@ const artifactLabel: Record<MeetingArtifact['kind'], string> = {
 interface Props {
   meeting: Meeting;
   ownId: number;
+  users: User[];
+  canInviteContacts: boolean;
   onEdit: () => void;
   onCall: () => void;
   onRead: (file: MeetingArtifact) => void;
   onChanged: (meeting?: Meeting) => void;
 }
 
-export default function AgendaMeeting({ meeting, ownId, onEdit, onCall, onRead, onChanged }: Props) {
+export default function AgendaMeeting({ meeting, ownId, users, canInviteContacts, onEdit, onCall, onRead, onChanged }: Props) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [cancel, setCancel] = useState(false);
+  const [editParticipants, setEditParticipants] = useState(false);
   const response = meeting.participants.find(({ id }) => id === ownId)?.response;
   const canRespond = response && meeting.organizerId !== ownId && ['scheduled', 'live'].includes(meeting.status);
   const openCall = meeting.canEnter;
@@ -111,13 +113,26 @@ export default function AgendaMeeting({ meeting, ownId, onEdit, onCall, onRead, 
         <Typography sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{meeting.agenda || 'Aucun point ajouté.'}</Typography>
       </Box>
       <Box>
-        <Typography component="h4" sx={{ fontWeight: 700, mb: 0.75 }}>Participants</Typography>
+        <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1} useFlexGap flexWrap="wrap" sx={{ mb: 0.75 }}>
+          <Typography component="h4" sx={{ fontWeight: 700 }}>Participants</Typography>
+          {meeting.canManageParticipants && (
+            <Button startIcon={<GroupOutlinedIcon />} onClick={() => setEditParticipants(true)} sx={{ minHeight: 44 }}>
+              Gérer les participants
+            </Button>
+          )}
+        </Stack>
         <Stack component="ul" spacing={0.75} sx={{ listStyle: 'none', p: 0, m: 0 }}>
           {meeting.participants.map((person) => (
             <Box component="li" key={person.id} sx={{ display: 'flex', gap: 1, alignItems: 'center', justifyContent: 'space-between' }}>
               <Typography sx={{ minWidth: 0, overflowWrap: 'anywhere' }}>{person.name}{person.id === ownId ? ' (moi)' : ''}</Typography>
               <Chip size="small" label={person.id === meeting.organizerId ? 'Organisateur' : rsvpLabel[person.response]}
                 color={person.id !== meeting.organizerId && person.response === 'accepted' ? 'success' : 'default'} />
+            </Box>
+          ))}
+          {meeting.pendingContacts.map((contact) => (
+            <Box component="li" key={`contact-${contact.id}`} sx={{ display: 'flex', gap: 1, alignItems: 'center', justifyContent: 'space-between' }}>
+              <Typography sx={{ minWidth: 0, overflowWrap: 'anywhere' }}>{contact.email ?? 'Nouveau contact'}</Typography>
+              <Chip size="small" label={contact.expiresAt > Date.now() ? 'Invitation au salon' : 'Lien expiré'} />
             </Box>
           ))}
         </Stack>
@@ -151,6 +166,10 @@ export default function AgendaMeeting({ meeting, ownId, onEdit, onCall, onRead, 
       </Box>
       {meeting.canEdit && (
         <Box><Button color="error" disabled={busy} onClick={() => setCancel(true)}>Annuler la réunion</Button></Box>
+      )}
+      {editParticipants && (
+        <MeetingParticipantsDialog meeting={meeting} users={users} canInviteContacts={canInviteContacts}
+          onChanged={onChanged} onClose={() => setEditParticipants(false)} />
       )}
       <Dialog open={cancel} onClose={() => setCancel(false)} aria-labelledby="agenda-cancel-title" fullWidth maxWidth="xs">
         <DialogTitle id="agenda-cancel-title">Annuler la réunion</DialogTitle>

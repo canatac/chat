@@ -1,22 +1,23 @@
 import AddIcon from '@mui/icons-material/Add';
 import CloseIcon from '@mui/icons-material/Close';
-import ContentCopyOutlinedIcon from '@mui/icons-material/ContentCopyOutlined';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import GroupsOutlinedIcon from '@mui/icons-material/GroupsOutlined';
 import {
   Alert, Avatar, Box, Button, Chip, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle,
-  Divider, IconButton, MenuItem, Stack, TextField, Typography, useMediaQuery, useTheme,
+  Divider, IconButton, MenuItem, Stack, TextField, Typography, createFilterOptions, useMediaQuery, useTheme,
 } from '@mui/material';
 import { useEffect, useState, type FormEvent } from 'react';
-import { api, openRoom } from '../api';
+import { api, invitationUrl, openRoom } from '../api';
 import { chatColors } from '../theme';
 import type { Role, Room, RoomInvitation, RoomMember, User } from '../types';
+import InvitationLink from './InvitationLink';
 
 const roles: Record<Role, string> = { superadmin: 'Superadmin', admin: 'Admin', member: 'Membre' };
 const dateFormat = new Intl.DateTimeFormat('fr-FR', { dateStyle: 'medium' });
 const wrapText = { overflowWrap: 'anywhere' };
 const row = { p: 1.4, border: '1px solid ' + chatColors.border, borderRadius: 2 };
 const sentenceButton = { textTransform: 'none' };
+const filterContacts = createFilterOptions<RoomMember>({ stringify: ({ name, email }) => `${name} ${email ?? ''}` });
 
 function messageFor(error: unknown): string {
   return error instanceof Error ? error.message : 'Une erreur est survenue';
@@ -126,6 +127,7 @@ export default function RoomAdminDialog({ user, rooms, currentRoomId, onClose, o
   const [selected, setSelected] = useState<number | null>(currentRoomId ?? rooms[0]?.id ?? null);
   const room = rooms.find((item) => item.id === selected);
   const [members, setMembers] = useState<RoomMember[]>([]);
+  const [contactQuery, setContactQuery] = useState('');
   const [invitations, setInvitations] = useState<RoomInvitation[]>([]);
   const [loading, setLoading] = useState(true);
   const [refresh, setRefresh] = useState(0);
@@ -136,10 +138,10 @@ export default function RoomAdminDialog({ user, rooms, currentRoomId, onClose, o
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [role, setRole] = useState<RoomInvitation['role']>('member');
-  const [shareLink, setShareLink] = useState<{ id: number; href: string } | null>(null);
-  const [copyStatus, setCopyStatus] = useState('');
+  const [shareLink, setShareLink] = useState<{ id: number; expiresAt: number; href: string } | null>(null);
   const [editing, setEditing] = useState<RoomMember | null>(null);
   const [confirm, setConfirm] = useState<{ title: string; detail: string; action: () => Promise<void> } | null>(null);
+  const visibleMembers = filterContacts(members, { inputValue: contactQuery, getOptionLabel: (member) => member.name });
 
   useEffect(() => {
     if (selected === null) {
@@ -161,7 +163,8 @@ export default function RoomAdminDialog({ user, rooms, currentRoomId, onClose, o
         if (directory) onRoomsLoaded(directory.rooms);
         setMembers(membersResult.members);
         setInvitations(invitesResult.invitations);
-        setShareLink((previous) => invitesResult.invitations.some((item) => item.id === previous?.id) ? previous : null);
+        setShareLink((previous) => invitesResult.invitations.some((item) =>
+          item.id === previous?.id && item.expiresAt === previous.expiresAt) ? previous : null);
       })
       .catch((err) => {
         if (!controller.signal.aborted) setError(messageFor(err));
@@ -175,7 +178,7 @@ export default function RoomAdminDialog({ user, rooms, currentRoomId, onClose, o
   function selectRoom(roomId: number) {
     setSelected(roomId);
     setShareLink(null);
-    setCopyStatus('');
+    setContactQuery('');
     setEmail('');
     setRole('member');
     setNameForm(null);
@@ -209,28 +212,19 @@ export default function RoomAdminDialog({ user, rooms, currentRoomId, onClose, o
     });
   }
 
-  function invite(event: FormEvent) {
-    event.preventDefault();
+  function issueInvitation(address: string, inviteRole: RoomInvitation['role']) {
     if (!room) return;
     void perform(async () => {
-      const result = await api.rooms.invite(room.id, email.trim(), role);
-      const link = new URL(location.pathname, location.origin);
-      link.hash = 'invitation=' + result.token;
-      setShareLink({ id: result.invitation.id, href: link.href });
-      setCopyStatus('');
+      const result = await api.rooms.invite(room.id, address, inviteRole);
+      setShareLink({ id: result.invitation.id, expiresAt: result.invitation.expiresAt, href: invitationUrl(result.token) });
       setInvitations((previous) => [result.invitation, ...previous.filter((item) => item.email !== result.invitation.email)]);
       setEmail('');
     });
   }
 
-  async function copyLink() {
-    if (!shareLink) return;
-    try {
-      await navigator.clipboard.writeText(shareLink.href);
-      setCopyStatus('Lien copié');
-    } catch {
-      setCopyStatus('Sélectionnez le lien pour le copier.');
-    }
+  function invite(event: FormEvent) {
+    event.preventDefault();
+    issueInvitation(email.trim(), role);
   }
 
   function canEdit(member: RoomMember): boolean {
@@ -341,38 +335,33 @@ export default function RoomAdminDialog({ user, rooms, currentRoomId, onClose, o
                       )}
                       <Button variant="contained" type="submit" disabled={busy} sx={{ ...sentenceButton, bgcolor: chatColors.accent }}>Créer le lien</Button>
                     </Stack>
-                    {shareLink && (
-                      <Stack gap={0.75}>
-                        <Typography variant="body2" sx={{ color: chatColors.muted }}>Transmettez ce lien à l’invité. Il est utilisable une fois et expire au bout de 7 jours.</Typography>
-                        <Stack direction={{ xs: 'column', sm: 'row' }} gap={1}>
-                          <TextField fullWidth label="Lien d’invitation" size="small" value={shareLink.href} onFocus={(event) => event.target.select()} slotProps={{ input: { readOnly: true } }} />
-                          <Button startIcon={<ContentCopyOutlinedIcon />} onClick={() => void copyLink()} sx={sentenceButton}>Copier</Button>
-                        </Stack>
-                        {copyStatus && <Typography role="status" variant="caption">{copyStatus}</Typography>}
-                      </Stack>
-                    )}
+                    {shareLink && <InvitationLink key={shareLink.href} href={shareLink.href} />}
                     {invitations.length > 0 && (
                       <>
                         <Divider />
                         <Typography variant="body2" sx={{ fontWeight: 700 }}>Invitations en attente</Typography>
                         {invitations.map((item) => (
-                          <Stack key={item.id} direction="row" alignItems="center" justifyContent="space-between" gap={1}>
+                          <Stack key={item.id} direction={{ xs: 'column', sm: 'row' }} alignItems={{ sm: 'center' }} justifyContent="space-between" gap={0.5}>
                             <Box sx={{ minWidth: 0 }}>
                               <Typography variant="body2" sx={wrapText}>{item.email}</Typography>
                               <Typography variant="caption" sx={{ color: chatColors.muted }}>Expire le {dateFormat.format(item.expiresAt)} · {roles[item.role]}</Typography>
                             </Box>
-                            <Button
-                              aria-label={'Révoquer l’invitation pour ' + item.email}
-                              disabled={busy}
-                              onClick={() => void perform(async () => {
-                                await api.rooms.revoke(room.id, item.id);
-                                setInvitations((previous) => previous.filter((invite) => invite.id !== item.id));
-                                if (shareLink?.id === item.id) setShareLink(null);
-                              })}
-                              sx={sentenceButton}
-                            >
-                              Révoquer
-                            </Button>
+                            <Stack direction="row" useFlexGap flexWrap="wrap" gap={0.5} sx={{ flexShrink: 0 }}>
+                              {(item.role === 'member' || isSuperadmin) && (
+                                <Button aria-label={'Renouveler le lien pour ' + item.email} disabled={busy}
+                                  onClick={() => issueInvitation(item.email, item.role)} sx={{ ...sentenceButton, minHeight: 44 }}>
+                                  Renouveler le lien
+                                </Button>
+                              )}
+                              <Button aria-label={'Révoquer l’invitation pour ' + item.email}
+                                disabled={busy} onClick={() => void perform(async () => {
+                                  await api.rooms.revoke(room.id, item.id);
+                                  setInvitations((previous) => previous.filter((invite) => invite.id !== item.id));
+                                  if (shareLink?.id === item.id) setShareLink(null);
+                                })} sx={{ ...sentenceButton, minHeight: 44 }}>
+                                Révoquer
+                              </Button>
+                            </Stack>
                           </Stack>
                         ))}
                       </>
@@ -381,13 +370,15 @@ export default function RoomAdminDialog({ user, rooms, currentRoomId, onClose, o
                 )}
                 <Stack gap={1} sx={{ ...row, bgcolor: chatColors.surface }}>
                   <Stack direction="row" justifyContent="space-between" alignItems="center">
-                    <Typography component="h3" variant="subtitle1" sx={{ fontWeight: 750 }}>Membres du salon</Typography>
+                    <Typography component="h3" variant="subtitle1" sx={{ fontWeight: 750 }}>Contacts du salon</Typography>
                     <IconButton aria-label="Actualiser les membres" onClick={() => setRefresh((count) => count + 1)} disabled={busy}>
                       <RefreshIcon fontSize="small" />
                     </IconButton>
                   </Stack>
-                  {members.length === 0 && !error && <Typography variant="body2" sx={{ color: chatColors.muted }}>Aucun membre dans ce salon.</Typography>}
-                  {members.map((member) => (
+                  <TextField label="Rechercher par alias ou e-mail" value={contactQuery}
+                    onChange={(event) => setContactQuery(event.target.value)} size="small" fullWidth />
+                  {visibleMembers.length === 0 && !error && <Typography variant="body2" sx={{ color: chatColors.muted }}>Aucun contact trouvé.</Typography>}
+                  {visibleMembers.map((member) => (
                     <Stack key={member.id} direction={{ xs: 'column', sm: 'row' }} gap={1.2} alignItems={{ sm: 'center' }} sx={row}>
                       <Stack direction="row" alignItems="center" gap={1.15} sx={{ minWidth: 0, flex: 1 }}>
                         <Avatar src={member.avatar ?? undefined} sx={{ bgcolor: chatColors.accentSoft, color: chatColors.accent }}>
@@ -400,13 +391,13 @@ export default function RoomAdminDialog({ user, rooms, currentRoomId, onClose, o
                         <Chip size="small" variant="outlined" label={roles[member.role]} />
                       </Stack>
                       {canEdit(member) && (
-                        <Stack direction="row" gap={0.5}>
+                        <Stack direction="row" useFlexGap flexWrap="wrap" gap={0.5}>
                           <Button
                             size="small"
                             aria-label={'Modifier ' + member.name}
                             disabled={busy}
                             onClick={() => { setActionError(null); setEditing(member); }}
-                            sx={sentenceButton}
+                            sx={{ ...sentenceButton, minHeight: 44 }}
                           >
                             Modifier
                           </Button>
@@ -427,7 +418,7 @@ export default function RoomAdminDialog({ user, rooms, currentRoomId, onClose, o
                                   },
                                 });
                               }}
-                              sx={sentenceButton}
+                              sx={{ ...sentenceButton, minHeight: 44 }}
                             >
                               Retirer
                             </Button>

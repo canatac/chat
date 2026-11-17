@@ -23,6 +23,7 @@ interface Props {
   onRead: (file: MeetingArtifact) => void;
   users: User[];
   ownId: number;
+  canInviteContacts: boolean;
   pending: number;
   revision: number;
   assistantResult: AgendaAssistantResponse | undefined;
@@ -69,7 +70,7 @@ function MeetingList({ meetings, ownId, onSelect }: { meetings: Meeting[]; ownId
   );
 }
 
-export default function AgendaDrawer({ open, onClose, onCall, onRead, users, ownId, pending, revision, assistantResult }: Props) {
+export default function AgendaDrawer({ open, onClose, onCall, onRead, users, ownId, canInviteContacts, pending, revision, assistantResult }: Props) {
   const [view, setView] = useState<AgendaView>('agenda');
   const [week, setWeek] = useState(startOfWeek);
   const [onlyMine, setOnlyMine] = useState(false);
@@ -206,7 +207,8 @@ export default function AgendaDrawer({ open, onClose, onCall, onRead, users, own
               <Button startIcon={<ArrowBackRoundedIcon />} size="small" sx={{ mb: 1 }} onClick={() => { setDetail(undefined); setError(''); }}>
                 Retour
               </Button>
-              <AgendaMeeting key={detail.id} meeting={detail} ownId={ownId} onEdit={() => setEditor({ meeting: detail })}
+              <AgendaMeeting key={detail.id} meeting={detail} ownId={ownId} users={users} canInviteContacts={canInviteContacts}
+                onEdit={() => setEditor({ meeting: detail })}
                 onCall={() => onCall(detail)} onRead={onRead} onChanged={(changed) => {
                   if (changed) setDetail((current) => current?.id === changed.id ? changed : current);
                   setRefresh((value) => value + 1);

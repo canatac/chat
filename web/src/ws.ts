@@ -1,4 +1,4 @@
-import type { CallInfo, MentionNotification, Message, User } from './types';
+import type { CallInfo, Meeting, MentionNotification, Message, User } from './types';
 
 export interface WsEvent {
   type: string;
@@ -8,6 +8,7 @@ export interface WsEvent {
   user?: User;
   online?: number[];
   call?: CallInfo | null;
+  meeting?: Pick<Meeting, 'id' | 'title'>;
   from?: number;
   data?: unknown;
   callId?: number | null;

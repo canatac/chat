@@ -141,7 +141,8 @@ export default function ChatHeader({
               </Badge>
             </Button>
           </Tooltip>
-          <PresenceMenu users={users} onlineIds={onlineIds} />
+          <PresenceMenu users={users} onlineIds={onlineIds}
+            onManage={user.role === 'admin' || user.role === 'superadmin' ? onAdmin : undefined} />
           <Box sx={{ height: 24, borderLeft: '1px solid ' + chatColors.border, mx: { xs: 0.3, sm: 0.75 } }} />
           <Tooltip title="Compte">
             <ButtonBase

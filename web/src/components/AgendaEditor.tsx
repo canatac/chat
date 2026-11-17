@@ -24,12 +24,13 @@ const durationIsValid = (duration: number) => Number.isInteger(duration) && dura
 export default function AgendaEditor({ meeting, draft, unresolved, suggestedStart, users, ownId, onClose, onSaved }: Props) {
   const initialStart = meeting ? localDateTime(meeting.startsAt) : localDateTime(suggestedStart);
   const organizerId = meeting?.organizerId ?? ownId;
+  const initialParticipants = (meeting?.participants.map(({ id }) => id) ?? draft?.participantIds ?? [])
+    .filter((id) => id !== organizerId);
   const [title, setTitle] = useState(meeting?.title ?? draft?.title ?? '');
   const [agenda, setAgenda] = useState(meeting?.agenda ?? draft?.agenda ?? '');
   const [start, setStart] = useState(draft ? draft.localStart ?? '' : initialStart);
   const [duration, setDuration] = useState(String(meeting?.durationMinutes ?? draft?.durationMinutes ?? 30));
-  const [participantIds, setParticipantIds] = useState((meeting?.participants.map(({ id }) => id) ?? draft?.participantIds ?? [])
-    .filter((id) => id !== organizerId));
+  const [participantIds, setParticipantIds] = useState(initialParticipants);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [checking, setChecking] = useState(false);
@@ -56,8 +57,11 @@ export default function AgendaEditor({ meeting, draft, unresolved, suggestedStar
     }
     setBusy(true);
     try {
-      const input = { title, agenda, startsAt, durationMinutes, timeZone: sameStart ? meeting.timeZone : zone, participantIds };
-      const result = meeting ? await api.agenda.edit(meeting.id, input) : await api.agenda.create(input);
+      const input = { title, agenda, startsAt, durationMinutes, timeZone: sameStart ? meeting.timeZone : zone };
+      const participantsChanged = participantIds.length !== initialParticipants.length || participantIds.some((id) => !initialParticipants.includes(id));
+      const result = meeting
+        ? await api.agenda.edit(meeting.id, { ...input, ...(participantsChanged ? { participantIds, expectedParticipantIds: initialParticipants } : {}) })
+        : await api.agenda.create({ ...input, participantIds });
       onSaved(result.meeting);
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : 'Impossible d’enregistrer la réunion.');
