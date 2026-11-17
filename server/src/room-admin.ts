@@ -5,7 +5,7 @@ import type { Config } from './config.js';
 import type { Account, InvitationRow, RoomDirectory, RoomRow } from './rooms.js';
 
 const aliasSchema = z.string().trim().min(2).max(40);
-const emailSchema = z.string().trim().max(254).email().toLowerCase();
+export const emailSchema = z.string().trim().max(254).email().toLowerCase();
 const roomNameSchema = z.string().trim().min(2).max(80);
 const newPassword = z.string().min(8).refine((password) => Buffer.byteLength(password) <= 72);
 const tokenSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
@@ -39,7 +39,8 @@ function publicInvitation(invitation: InvitationRow) {
 }
 
 interface RoomChanges {
-  memberChanged: (roomId: number, account: Account) => void;
+  memberChanged: (roomId: number, account: Account, invitationId?: number) => void;
+  invitationsChanged: (roomId: number) => void;
   memberRemoved: (roomId: number, accountId: number) => void;
   roomArchived: (roomId: number) => void;
 }
@@ -183,7 +184,8 @@ export function mountRoomAdmin(app: Express, config: Config, directory: RoomDire
       return;
     }
     const { token, alias, password } = parsed.data;
-    if (!directory.invitationFor(token)) {
+    const match = directory.invitationFor(token);
+    if (!match) {
       res.status(410).json({ error: 'Ce lien d’invitation est invalide, expiré ou déjà utilisé' });
       return;
     }
@@ -192,7 +194,7 @@ export function mountRoomAdmin(app: Express, config: Config, directory: RoomDire
       res.status(409).json({ error: 'Cette invitation n’est plus disponible pour cette adresse' });
       return;
     }
-    changes.memberChanged(account.room_id, account);
+    changes.memberChanged(account.room_id, account, match.invitation.id);
     res.status(201).json(authenticated(account));
   });
 
@@ -290,6 +292,7 @@ export function mountRoomAdmin(app: Express, config: Config, directory: RoomDire
       res.status(409).json({ error: 'Invitation indisponible pour cette adresse' });
       return;
     }
+    changes.invitationsChanged(room.id);
     res.status(201).json({ invitation: publicInvitation(result.invitation), token: result.token });
   });
 
@@ -299,6 +302,7 @@ export function mountRoomAdmin(app: Express, config: Config, directory: RoomDire
       res.status(404).json({ error: 'Invitation introuvable' });
       return;
     }
+    changes.invitationsChanged(room.id);
     res.status(204).end();
   });
 

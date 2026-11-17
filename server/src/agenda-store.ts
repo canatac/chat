@@ -55,8 +55,9 @@ interface ArtifactRow {
 
 const meetingSelect = `SELECT e.*, (SELECT MAX(c.id) FROM calls c WHERE c.meeting_id = e.id) AS latest_call_id FROM agenda_events e`;
 const withoutEndedCall = 'NOT EXISTS (SELECT 1 FROM calls c WHERE c.meeting_id = e.id AND c.ended_at IS NOT NULL)';
-const pendingInvite = `e.cancelled_at IS NULL AND e.starts_at + e.duration_minutes * 60000 > ? AND ${withoutEndedCall}
-  AND EXISTS (SELECT 1 FROM agenda_attendees a WHERE a.event_id = e.id AND a.user_id = ? AND a.response = 'pending')`;
+const withOpenCall = 'EXISTS (SELECT 1 FROM calls c WHERE c.meeting_id = e.id AND c.ended_at IS NULL)';
+const pendingInvite = `e.cancelled_at IS NULL AND ((e.starts_at + e.duration_minutes * 60000 > ? AND ${withoutEndedCall}) OR ${withOpenCall})
+  AND EXISTS (SELECT 1 FROM agenda_attendees a WHERE a.event_id = e.id AND a.user_id = ? AND a.response = 'pending' AND a.removed_at IS NULL)`;
 
 export class AgendaStore {
   constructor(private readonly db: DatabaseSync) {
@@ -79,15 +80,24 @@ export class AgendaStore {
         event_id INTEGER NOT NULL REFERENCES agenda_events(id),
         user_id INTEGER NOT NULL REFERENCES users(id),
         response TEXT NOT NULL CHECK (response IN ('pending', 'accepted', 'tentative', 'declined')),
+        removed_at INTEGER,
         PRIMARY KEY (event_id, user_id)
       );
       CREATE INDEX IF NOT EXISTS idx_agenda_attendee_user ON agenda_attendees(user_id, event_id);
+      CREATE TABLE IF NOT EXISTS agenda_contact_invites (
+        event_id INTEGER NOT NULL REFERENCES agenda_events(id),
+        invitation_id INTEGER NOT NULL,
+        PRIMARY KEY (event_id, invitation_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_agenda_contact_invite ON agenda_contact_invites(invitation_id);
       CREATE TABLE IF NOT EXISTS call_attendance (
         call_id INTEGER NOT NULL REFERENCES calls(id),
         user_id INTEGER NOT NULL REFERENCES users(id),
         PRIMARY KEY (call_id, user_id)
       );
     `);
+    const attendeeColumns = db.prepare('PRAGMA table_info(agenda_attendees)').all();
+    if (!attendeeColumns.some(({ name }) => name === 'removed_at')) db.exec('ALTER TABLE agenda_attendees ADD COLUMN removed_at INTEGER');
     const callColumns = db.prepare('PRAGMA table_info(calls)').all();
     if (!callColumns.some(({ name }) => name === 'meeting_id')) db.exec('ALTER TABLE calls ADD COLUMN meeting_id INTEGER REFERENCES agenda_events(id)');
     const fileColumns = db.prepare('PRAGMA table_info(files)').all();
@@ -123,7 +133,7 @@ export class AgendaStore {
       clauses.push(`EXISTS (SELECT 1 FROM calls c WHERE ${call.join(' AND ')})`);
     } else {
       for (const id of members) {
-        clauses.push('EXISTS (SELECT 1 FROM agenda_attendees a WHERE a.event_id = e.id AND a.user_id = ?)');
+        clauses.push('EXISTS (SELECT 1 FROM agenda_attendees a WHERE a.event_id = e.id AND a.user_id = ? AND a.removed_at IS NULL)');
         parameters.push(id);
       }
     }
@@ -152,11 +162,11 @@ export class AgendaStore {
 
   private setAttendees(id: number, organizer: number, participants: number[], clearResponses: boolean): void {
     const members = [...new Set([organizer, ...participants])];
-    this.db.prepare('DELETE FROM agenda_attendees WHERE event_id = ? AND user_id NOT IN (SELECT value FROM json_each(?))')
-      .run(id, JSON.stringify(members));
-    if (clearResponses) this.db.prepare("UPDATE agenda_attendees SET response = 'pending' WHERE event_id = ? AND user_id != ?").run(id, organizer);
-    const add = this.db.prepare('INSERT OR IGNORE INTO agenda_attendees (event_id, user_id, response) VALUES (?, ?, ?)');
-    for (const member of members) add.run(id, member, member === organizer ? 'accepted' : 'pending');
+    this.db.prepare(`UPDATE agenda_attendees SET removed_at = ? WHERE event_id = ? AND removed_at IS NULL
+      AND user_id NOT IN (SELECT value FROM json_each(?))`).run(Date.now(), id, JSON.stringify(members));
+    if (clearResponses) this.db.prepare(`UPDATE agenda_attendees SET response = 'pending'
+      WHERE event_id = ? AND user_id != ? AND removed_at IS NULL`).run(id, organizer);
+    for (const member of members) this.addAttendee(id, member, member === organizer ? 'accepted' : 'pending');
   }
 
   cancel(id: number): void {
@@ -166,16 +176,70 @@ export class AgendaStore {
 
   attendees(id: number): AttendeeRow[] {
     return this.db.prepare(`SELECT u.id, COALESCE(u.display_name, u.name) AS name, a.response
-      FROM agenda_attendees a JOIN users u ON u.id = a.user_id WHERE a.event_id = ? ORDER BY name COLLATE NOCASE, u.id`)
+      FROM agenda_attendees a JOIN users u ON u.id = a.user_id
+      WHERE a.event_id = ? AND a.removed_at IS NULL ORDER BY name COLLATE NOCASE, u.id`)
       .all(id) as unknown as AttendeeRow[];
   }
 
   invited(id: number, user: number): boolean {
-    return !!this.db.prepare('SELECT 1 FROM agenda_attendees WHERE event_id = ? AND user_id = ?').get(id, user);
+    return !!this.db.prepare('SELECT 1 FROM agenda_attendees WHERE event_id = ? AND user_id = ? AND removed_at IS NULL').get(id, user);
+  }
+
+  excluded(id: number, user: number): boolean {
+    return !!this.db.prepare('SELECT 1 FROM agenda_attendees WHERE event_id = ? AND user_id = ? AND removed_at IS NOT NULL').get(id, user);
+  }
+
+  addAttendee(id: number, user: number, response: Rsvp = 'pending'): boolean {
+    return Boolean(this.db.prepare(`INSERT INTO agenda_attendees (event_id, user_id, response) VALUES (?, ?, ?)
+      ON CONFLICT(event_id, user_id) DO UPDATE SET response = excluded.response, removed_at = NULL
+      WHERE agenda_attendees.removed_at IS NOT NULL`).run(id, user, response).changes);
+  }
+
+  removeAttendee(id: number, user: number): void {
+    this.db.prepare(`INSERT INTO agenda_attendees (event_id, user_id, response, removed_at) VALUES (?, ?, 'pending', ?)
+      ON CONFLICT(event_id, user_id) DO UPDATE SET removed_at = excluded.removed_at`).run(id, user, Date.now());
+  }
+
+  removeContact(user: number): void {
+    this.db.prepare(`UPDATE agenda_attendees SET removed_at = ? WHERE user_id = ? AND removed_at IS NULL
+      AND event_id IN (SELECT e.id FROM agenda_events e WHERE e.organizer_id != ? AND e.cancelled_at IS NULL
+        AND (${withoutEndedCall} OR ${withOpenCall}))`).run(Date.now(), user, user);
   }
 
   respond(id: number, user: number, response: Exclude<Rsvp, 'pending'>): boolean {
-    return this.db.prepare('UPDATE agenda_attendees SET response = ? WHERE event_id = ? AND user_id = ?').run(response, id, user).changes > 0;
+    return this.db.prepare('UPDATE agenda_attendees SET response = ? WHERE event_id = ? AND user_id = ? AND removed_at IS NULL')
+      .run(response, id, user).changes > 0;
+  }
+
+  pendingContactIds(eventId: number): number[] {
+    return (this.db.prepare('SELECT invitation_id FROM agenda_contact_invites WHERE event_id = ? ORDER BY invitation_id')
+      .all(eventId) as { invitation_id: number }[]).map(({ invitation_id }) => invitation_id);
+  }
+
+  linkedInvitationIds(): number[] {
+    return (this.db.prepare('SELECT DISTINCT invitation_id FROM agenda_contact_invites').all() as { invitation_id: number }[])
+      .map(({ invitation_id }) => invitation_id);
+  }
+
+  linkContact(eventId: number, invitationId: number): void {
+    this.db.prepare('INSERT OR IGNORE INTO agenda_contact_invites (event_id, invitation_id) VALUES (?, ?)').run(eventId, invitationId);
+  }
+
+  unlinkContact(eventId: number, invitationId: number): void {
+    this.db.prepare('DELETE FROM agenda_contact_invites WHERE event_id = ? AND invitation_id = ?').run(eventId, invitationId);
+  }
+
+  discardContactInvitation(invitationId: number): void {
+    this.db.prepare('DELETE FROM agenda_contact_invites WHERE invitation_id = ?').run(invitationId);
+  }
+
+  acceptContact(invitationId: number, userId: number, activeMeetingId: number | null): MeetingRow[] {
+    const meetings = this.db.prepare(meetingSelect + ` WHERE e.cancelled_at IS NULL AND (e.id = ? OR ${withoutEndedCall})
+      AND e.id IN (SELECT event_id FROM agenda_contact_invites WHERE invitation_id = ?)`)
+      .all(activeMeetingId, invitationId) as unknown as MeetingRow[];
+    const added = meetings.filter(({ id }) => this.addAttendee(id, userId));
+    this.discardContactInvitation(invitationId);
+    return added;
   }
 
   pendingInvitations(user: number): number {
