@@ -18,6 +18,7 @@ import { chatColors } from './theme';
 import type { AgendaAssistantResponse, CallInfo, ConversationActivity, Meeting, MeetingArtifact, MentionNotification, Message, Room, User } from './types';
 import useMentionNotifications from './useMentionNotifications';
 import useMessageActivity from './useMessageActivity';
+import useCallRingtone from './useCallRingtone';
 import { ChatSocket } from './ws';
 
 const PAGE_SIZE = 50;
@@ -104,6 +105,7 @@ export default function Chat({ token, user, room, adminOpen, onAdmin, onLogout }
   const [openingUnread, setOpeningUnread] = useState(false);
   const [unreadError, setUnreadError] = useState(false);
   const feed = useMentionNotifications(socket, connection === 'online', room, user.id);
+  const ringtone = useCallRingtone(socket, user.id, room.id);
 
   useEffect(() => {
     const request = new AbortController();
@@ -454,6 +456,9 @@ export default function Chat({ token, user, room, adminOpen, onAdmin, onLogout }
         agendaOpen={agendaOpen}
         unreadNotifications={feed.page.unread}
         notificationsOpen={notificationsOpen}
+        ringtoneActive={ringtone.enabled && ringtone.ready}
+        onRingtoneToggle={ringtone.toggle}
+        onRingtoneTest={() => void ringtone.enableAndTest()}
         onCall={() => { setCallMeeting(undefined); setCallOpen(true); }}
         onAgenda={() => setAgendaOpen(true)}
         onDocuments={() => setDocOpen(true)}
@@ -584,6 +589,12 @@ export default function Chat({ token, user, room, adminOpen, onAdmin, onLogout }
 
       <Snackbar open={unreadError} autoHideDuration={5500} onClose={() => setUnreadError(false)}>
         <Alert severity="error" onClose={() => setUnreadError(false)}>Impossible d’afficher le premier message non lu.</Alert>
+      </Snackbar>
+      <Snackbar open={Boolean(ringtone.error)} onClose={ringtone.dismissError}>
+        <Alert severity="info" onClose={ringtone.dismissError}
+          action={<Button color="inherit" size="small" onClick={() => void ringtone.enableAndTest()}>Activer le son</Button>}>
+          {ringtone.error}
+        </Alert>
       </Snackbar>
 
       <NotificationsDrawer open={notificationsOpen} onClose={() => setNotificationsOpen(false)} feed={feed}

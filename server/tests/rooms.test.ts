@@ -79,6 +79,7 @@ function connect(base: string, token: string, room: number) {
 
 type SocketEvent = {
   type: string;
+  call?: { id: number } | null;
   message?: { content: string };
   messages?: { content: string }[];
   notification?: { id: number; kind: string; messageId: number };
@@ -112,6 +113,58 @@ test('les mentions suivent l’alias complet, même en cas d’homonymes choisis
   const prose = '🗂️ (@Le\u0301o) @Léonic @roommate abc@room `@room` https://example.test/@room et @room.';
   const matches = resolveMentions(prose, members, []);
   assert.deepEqual(matches.map(({ start, end, userId }) => [prose.slice(start, end), userId]), [['@Le\u0301o', 2], ['@room', null]]);
+});
+
+test('annonce un nouvel appel aux destinataires du salon, puis aux invités pour un appel planifié', async (t) => {
+  const { base } = await start(t, (dir) => {
+    const legacy = new DB(dir);
+    for (const name of ['Historique', 'Noémie', 'Léo']) legacy.createUser(name, hashPassword(password));
+    legacy.close();
+  });
+  const author = await login(base, 'Historique');
+  const guest = await login(base, 'Noémie');
+  const observer = await login(base, 'Léo');
+  const outside = await register(base, 'son-autre-salon@example.test', 'Autre salon');
+  const sessions = [author, guest, observer, outside];
+  const sockets = sessions.map((session) => connect(base, session.token, session.roomId));
+  const events = sockets.map(() => [] as SocketEvent[]);
+  sockets.forEach((ws, index) => ws.on('message', (raw) => events[index].push(JSON.parse(raw.toString()) as SocketEvent)));
+  t.after(() => sockets.forEach((ws) => ws.close()));
+  await Promise.all(sockets.map((ws) => once(ws, 'open')));
+  const call = (action: string, body: unknown = {}) => api(base, '/calls/' + action, { token: author.token, method: 'POST', body });
+  const barrier = async () => {
+    const listeners = sockets.map((ws, index) => waitForMessage(ws, (event) => event.message?.content === 'Repère ' + index));
+    await Promise.all(sessions.map((session, index) =>
+      api(base, '/messages', { token: session.token, method: 'POST', body: { content: 'Repère ' + index } })));
+    await Promise.all(listeners);
+  };
+  assert.equal((await call('start')).status, 201);
+  await barrier();
+  const starts = () => events.map((items) => items.filter((event) => event.type === 'callStarted').length);
+  assert.deepEqual(starts(), [0, 1, 1, 0]);
+  assert.equal((await api(base, '/calls/join', { token: guest.token, method: 'POST', body: {} })).status, 200);
+  await barrier();
+  assert.deepEqual(starts(), [0, 1, 1, 0]);
+  assert.equal((await call('end')).status, 200);
+
+  const response = await api(base, '/agenda', { token: author.token, method: 'POST', body: {
+    title: 'Appel des invités', startsAt: Date.now() + 60_000, durationMinutes: 30,
+    timeZone: 'Europe/Paris', participantIds: [guest.user.id],
+  } });
+  assert.equal(response.status, 201);
+  const { meeting } = await response.json() as { meeting: { id: number } };
+  assert.equal((await call('start', { meetingId: meeting.id })).status, 201);
+  await barrier();
+  assert.deepEqual(starts(), [0, 2, 1, 0]);
+  const lateConnection = connect(base, guest.token, guest.roomId);
+  t.after(() => lateConnection.close());
+  const received: SocketEvent[] = [];
+  lateConnection.on('message', (raw) => received.push(JSON.parse(raw.toString()) as SocketEvent));
+  await once(lateConnection, 'open');
+  const loaded = waitForMessage(lateConnection, (event) => event.type === 'history');
+  lateConnection.send(JSON.stringify({ type: 'history' }));
+  await loaded;
+  assert.equal(received.some((event) => event.type === 'callStarted'), false);
 });
 
 test('accuse la réception et la lecture par membre, sans effacer les non-lus sautés dans l’historique', async (t) => {

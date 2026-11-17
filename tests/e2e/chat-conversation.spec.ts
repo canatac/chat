@@ -226,6 +226,104 @@ test('affiche l’activité pendant la réponse de l’assistant de l’agenda',
   });
 });
 
+async function observeRingtone(page: Page) {
+  await page.addInitScript(() => {
+    const scope = window as typeof window & { callTones: number[] };
+    scope.callTones = [];
+    const create = AudioContext.prototype.createOscillator;
+    AudioContext.prototype.createOscillator = function () {
+      const oscillator = create.call(this);
+      const start = oscillator.start.bind(oscillator);
+      oscillator.start = (when?: number) => {
+        scope.callTones.push(oscillator.frequency.value);
+        start(when);
+      };
+      return oscillator;
+    };
+  });
+}
+
+function tones(page: Page) {
+  return page.evaluate(() => (window as typeof window & { callTones: number[] }).callTones);
+}
+
+test('à 320 px, active la sonnerie depuis un appel reçu avant le premier clic', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 740 });
+  await observeRingtone(page);
+  await withChat(page, 0, async (base, colleague) => {
+    const call = await page.request.post(base + '/api/calls/start', {
+      headers: { Authorization: 'Bearer ' + colleague.token }, data: { title: 'Appel de Noémie' },
+    });
+    expect(call.status()).toBe(201);
+    await expect(page.getByRole('alert')).toContainText('Active le son pour entendre la sonnerie.');
+    expect(await tones(page)).toEqual([]);
+    await page.getByRole('button', { name: 'Activer le son', exact: true }).click();
+    await expect.poll(() => tones(page)).toEqual([659, 880, 659, 880]);
+    await expect(page.getByText('Nouvel appel. Active le son pour entendre la sonnerie.')).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
+  });
+});
+
+test('joue une seule sonnerie entre deux onglets et synchronise le réglage de silence', async ({ page, context }) => {
+  await observeRingtone(page);
+  await withChat(page, 0, async (base, colleague) => {
+    const own = await login(page, base, 'Camille');
+    const account = (target: Page) => target.getByRole('button', { name: 'Compte de Camille' });
+    const testRingtone = async (target: Page) => {
+      await target.evaluate(() => { (window as typeof window & { callTones: number[] }).callTones = []; });
+      await account(target).click();
+      await target.getByRole('menuitem', { name: 'Tester la sonnerie', exact: true }).click();
+      await expect.poll(() => tones(target)).toEqual([659, 880, 659, 880]);
+      await target.evaluate(() => { (window as typeof window & { callTones: number[] }).callTones = []; });
+    };
+    await testRingtone(page);
+    const other = await context.newPage();
+    await observeRingtone(other);
+    await other.goto(base);
+    await expect(other.getByRole('status').getByText('Connecté', { exact: true })).toBeVisible();
+    await testRingtone(other);
+    const totalTones = async () => (await tones(page)).length + (await tones(other)).length;
+    const call = async (action: 'start' | 'join' | 'end', token = colleague.token) => {
+      const response = await page.request.post(base + '/api/calls/' + action, {
+        headers: { Authorization: 'Bearer ' + token }, data: {},
+      });
+      expect(response.ok()).toBe(true);
+    };
+    try {
+      await call('start');
+      await expect.poll(totalTones).toBe(4);
+      await call('join', own.token);
+      await expect(page.getByRole('button', { name: 'Appel en cours', exact: true })).toBeVisible();
+      expect(await totalTones()).toBe(4);
+
+      await other.reload();
+      await expect(other.getByRole('status').getByText('Connecté', { exact: true })).toBeVisible();
+      expect(await tones(other)).toEqual([]);
+      await account(page).click();
+      await page.getByRole('menuitem', { name: 'Couper la sonnerie des appels', exact: true }).click();
+      await account(other).click();
+      await expect(other.getByRole('menuitem', { name: 'Activer la sonnerie des appels', exact: true })).toBeVisible();
+      await other.keyboard.press('Escape');
+      const before = await totalTones();
+      await call('end');
+      await expect(page.getByRole('button', { name: "Appel d'équipe", exact: true })).toBeVisible();
+      await call('start');
+      await expect(page.getByRole('button', { name: 'Appel en cours', exact: true })).toBeVisible();
+      expect(await totalTones()).toBe(before);
+      await expect(page.getByText('Nouvel appel. Active le son pour entendre la sonnerie.')).toHaveCount(0);
+
+      await call('end');
+      await testRingtone(page);
+      await call('start', own.token);
+      await expect(page.getByRole('button', { name: 'Appel en cours', exact: true })).toBeVisible();
+      expect(await tones(page)).toEqual([]);
+      expect(await tones(other)).toEqual([]);
+    } finally {
+      await other.close();
+    }
+  });
+});
+
 test('au toucher, suggère les alias puis retrouve un ancien message depuis une notification persistante', async ({ browser }) => {
   const context = await browser.newContext({ viewport: { width: 320, height: 780 }, isMobile: true, hasTouch: true });
   const page = await context.newPage();
