@@ -19,6 +19,7 @@ import { chunkText, extractText } from './llm/rag.js';
 import { pricesFor } from './llm/pricing.js';
 import { isAudioMime, sttConfigured, transcribeFile } from './llm/stt.js';
 import { mentionHints, mentionRecipients, positiveId, resolveMentions, type Mention } from './mentions.js';
+import type { MessageReceipt } from './message-receipts.js';
 import { mountRoomAdmin, parseRoomId, publicAccount } from './room-admin.js';
 import { LEGACY_ROOM_ID, RoomDirectory, type Account } from './rooms.js';
 
@@ -147,6 +148,38 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
   const clients = new Set<WebSocket>();
 
   const online = new Map<number, Set<WebSocket>>();
+  const typing = new Map<WebSocket, { user: PublicUser; timer: NodeJS.Timeout }>();
+  let assistantRequests = 0;
+
+  function conversationActivity() {
+    const people = new Map([...typing.values()].map(({ user }) => [user.id, user]));
+    return { type: 'conversationActivity', typing: [...people.values()], assistantResponding: assistantRequests > 0 };
+  }
+
+  function setTyping(ws: WebSocket, user: PublicUser, active: boolean): void {
+    const current = typing.get(ws);
+    if (current) clearTimeout(current.timer);
+    if (active) {
+      const timer = setTimeout(() => setTyping(ws, user, false), 5500);
+      timer.unref();
+      typing.set(ws, { user, timer });
+    } else {
+      typing.delete(ws);
+    }
+    if (Boolean(current) !== active) broadcast(conversationActivity());
+  }
+
+  function stopTyping(ws: WebSocket): void {
+    const current = typing.get(ws);
+    if (current) setTyping(ws, current.user, false);
+  }
+
+  function assistantActivity(active: boolean): void {
+    const wasResponding = assistantRequests > 0;
+    assistantRequests += active ? 1 : -1;
+    if (wasResponding !== (assistantRequests > 0)) broadcast(conversationActivity());
+  }
+
   function onlineUserIds(): number[] {
     return [...online.keys()];
   }
@@ -296,10 +329,8 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
           config,
           uploadsDir,
           userId,
-          postBot: (text) => {
-            const botRow = db.insertMessage(db.getBot().id, text);
-            broadcast({ type: 'message', message: serializeMessage(db, botRow) });
-          },
+          postBot: postBotMessage,
+          onResponseActivity: assistantActivity,
         },
         { id: msg.id, content: msg.content },
       );
@@ -535,6 +566,43 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
     }
     const rows = db.listMessages(parsed.data.limit, parsed.data.before);
     res.json({ messages: rows.reverse().map((r) => serializeMessage(db, r)) });
+  });
+
+  const receiptQuery = z.object({
+    ids: z.string().max(1699).regex(/^\d+(,\d+)*$/)
+      .transform((value) => value.split(',').map(Number)).pipe(z.array(positiveId).max(100)).optional(),
+  });
+
+  app.get('/api/messages/activity', (req, res) => {
+    const parsed = receiptQuery.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Identifiants de messages invalides' });
+      return;
+    }
+    const userId = req.user!.id;
+    res.json({ unread: db.receipts.unread(userId), receipts: db.receipts.summaries(parsed.data.ids ?? [], userId) });
+  });
+
+  const receiptInput = z.object({ receipts: z.array(z.object({ id: positiveId, read: z.boolean() }).strict()).min(1).max(100) }).strict();
+
+  app.patch('/api/messages/activity', (req, res) => {
+    const parsed = receiptInput.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Accusés de réception invalides' });
+      return;
+    }
+    const userId = req.user!.id;
+    const { changedIds, readChanged } = db.transaction(() => db.receipts.acknowledge(userId, parsed.data.receipts));
+    const receiptsByAuthor = new Map<number, MessageReceipt[]>();
+    for (const receipt of db.receipts.summaries(changedIds)) {
+      if (!online.has(receipt.authorId)) continue;
+      const receipts = receiptsByAuthor.get(receipt.authorId) ?? [];
+      receipts.push(receipt);
+      receiptsByAuthor.set(receipt.authorId, receipts);
+    }
+    for (const [authorId, receipts] of receiptsByAuthor) notifyUser(authorId, { type: 'messageReceipts', receipts });
+    if (readChanged) notifyUser(userId, { type: 'unreadMessagesChanged' });
+    res.status(204).end();
   });
 
   app.get('/api/messages/around/:id', (req, res) => {
@@ -1328,7 +1396,9 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       online.set(user.id, sockets);
     }
     sockets.add(ws);
-    ws.send(JSON.stringify({ type: 'hello', user: toPublicUser(user) }));
+    const person = toPublicUser(user);
+    ws.send(JSON.stringify({ type: 'hello', user: person }));
+    ws.send(JSON.stringify(conversationActivity()));
     broadcastPresence();
 
     const inboundSchema = z.object({
@@ -1339,6 +1409,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       to: z.number().optional(),
       data: z.unknown().optional(),
       callId: z.number().optional(),
+      active: z.boolean().optional(),
     });
 
     ws.on('message', (data) => {
@@ -1357,7 +1428,10 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       if (msg.data.type === 'message' && typeof msg.data.content === 'string') {
         const content = msg.data.content.trim();
         if (!content || content.length > 4000) return;
+        stopTyping(ws);
         postMessage(user.id, content);
+      } else if (msg.data.type === 'typing' && msg.data.active !== undefined) {
+        setTyping(ws, person, msg.data.active);
       } else if (msg.data.type === 'history') {
         const limit = Math.min(Math.max(Math.trunc(msg.data.limit ?? 50), 1), 200);
         const rows = db.listMessages(limit, typeof msg.data.before === 'number' ? msg.data.before : undefined);
@@ -1383,6 +1457,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
     });
     const onClose = () => {
       clients.delete(ws);
+      stopTyping(ws);
       const set = online.get(user.id);
       if (set) {
         set.delete(ws);
@@ -1402,6 +1477,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
 
   function disconnect(ws: WebSocket, reason: string): void {
     clients.delete(ws);
+    stopTyping(ws);
     if (ws.readyState === WebSocket.OPEN) {
       ws.close(4003, reason);
     }

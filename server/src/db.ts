@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import { AgendaStore, type MeetingArtifactKind } from './agenda-store.js';
+import { MessageReceipts } from './message-receipts.js';
 import type { Mention, MentionKind } from './mentions.js';
 
 export interface UserRow {
@@ -144,6 +145,7 @@ export interface UsageRow {
 export class DB {
   private db: DatabaseSync;
   readonly agenda: AgendaStore;
+  readonly receipts: MessageReceipts;
 
   constructor(dataDir: string, newBotId: number | null = null) {
     fs.mkdirSync(dataDir, { recursive: true });
@@ -278,6 +280,7 @@ export class DB {
       this.db.exec("ALTER TABLE messages ADD COLUMN mentions TEXT NOT NULL DEFAULT '[]'");
     }
     this.agenda = new AgendaStore(this.db);
+    this.receipts = new MessageReceipts(this.db);
   }
 
   createUser(name: string, passHash: string): UserRow {
