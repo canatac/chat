@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { hashPassword } from './auth.js';
 import type { Config } from './config.js';
 import { DB, type CallRow, type FileEventListRow, type FileListRow, type FileRow, type FolderRow, type MentionNotificationRow, type MessageRow, type UserRow } from './db.js';
+import { MoveConflicts, moveDecision, planDocumentMove } from './document-moves.js';
 import { deriveDocument, HttpError, type DeriveKind } from './llm/derive.js';
 import { handleCommand } from './llm/run.js';
 import { chunkText, extractText } from './llm/rag.js';
@@ -756,7 +757,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
   const documentId = z.number().int().positive().safe();
   const selectionFields = { fileIds: z.array(documentId), folderIds: z.array(documentId) };
   const documentBatchSchema = z.discriminatedUnion('action', [
-    z.object({ ...selectionFields, action: z.literal('move'), destination: documentId.nullable() }),
+    z.object({ ...selectionFields, action: z.literal('move'), destination: documentId.nullable(), decisions: z.array(moveDecision).default([]) }),
     z.object({ ...selectionFields, action: z.literal('delete') }),
   ]).refine(({ fileIds, folderIds }) => fileIds.length > 0 || folderIds.length > 0);
 
@@ -780,7 +781,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
           for (const file of db.listFilesInFolders([...treeIds])) combined.set(file.id, file);
           const deleted = [...combined.values()];
           deleteDocumentRows(userId, deleted, folders);
-          return { files: deleted.length, folders: folders.length, deleted };
+          return { files: deleted.length, folders: folders.length, deleted, skipped: 0 };
         }
 
         const { destination } = operation;
@@ -795,26 +796,45 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
 
         const roots = folders.filter(({ parent_id }) => parent_id !== destination && (parent_id === null || !treeIds.has(parent_id)));
         const looseFiles = files.filter(({ folder_id }) => folder_id !== destination && (folder_id === null || !treeIds.has(folder_id)));
-        const folderConflict = db.findMoveConflict('folder', roots.map(({ id }) => id), destination);
-        if (folderConflict) throw new HttpError(409, `Le dossier « ${folderConflict} » est en double à la destination.`);
-        const fileConflict = db.findMoveConflict('file', looseFiles.map(({ id }) => id), destination);
-        if (fileConflict) throw new HttpError(409, `Le fichier « ${fileConflict} » est en double à la destination.`);
+        const plan = planDocumentMove(db, [
+          ...roots.map((folder) => ({ ...folder, kind: 'folder' as const })),
+          ...looseFiles.map((file) => ({ ...file, kind: 'file' as const })),
+        ], destination, { file: new Set(fileIds), folder: new Set(folderIds) }, operation.decisions);
+        const replacedFolders = db.listFolderTree(plan.replaced.folder);
+        const deleted = [...db.getFilesByIds(plan.replaced.file), ...db.listFilesInFolders(replacedFolders.map(({ id }) => id))];
+        deleteDocumentRows(userId, deleted, replacedFolders);
 
         const detail = target ? `déplacé vers le dossier « ${target.name} »` : 'déplacé vers la racine';
-        for (const folder of roots) {
-          db.updateFolder(folder.id, { parentId: destination });
-          logDocEvent(userId, { folderId: folder.id, action: 'folder_moved', detail });
+        let movedFiles = 0;
+        let movedFolders = 0;
+        for (const { kind, id, name, sourceName } of plan.moves) {
+          const renamed = name !== sourceName;
+          const renameDetail = `« ${sourceName} » renommé en « ${name} »`;
+          if (kind === 'folder') {
+            db.updateFolder(id, { parentId: destination, name: renamed ? name : undefined });
+            if (renamed) logDocEvent(userId, { folderId: id, action: 'folder_renamed', detail: renameDetail });
+            logDocEvent(userId, { folderId: id, action: 'folder_moved', detail });
+            movedFolders++;
+          } else {
+            if (renamed) {
+              db.renameFile(id, name);
+              logDocEvent(userId, { fileId: id, folderId: destination, action: 'file_renamed', detail: renameDetail });
+            }
+            db.moveFile(id, destination);
+            logDocEvent(userId, { fileId: id, folderId: destination, action: 'file_moved', detail });
+            movedFiles++;
+          }
         }
-        for (const file of looseFiles) {
-          db.moveFile(file.id, destination);
-          logDocEvent(userId, { fileId: file.id, folderId: destination, action: 'file_moved', detail });
-        }
-        return { files: looseFiles.length, folders: roots.length, deleted: [] };
+        return { files: movedFiles, folders: movedFolders, deleted, skipped: plan.skipped };
       });
       removeDeletedBytes(result.deleted);
       if (result.files || result.folders) docsChanged();
-      res.json({ files: result.files, folders: result.folders });
+      res.json({ files: result.files, folders: result.folders, ...(result.skipped ? { skipped: result.skipped } : {}) });
     } catch (error) {
+      if (error instanceof MoveConflicts) {
+        res.status(409).json({ error: error.message, conflicts: error.conflicts });
+        return;
+      }
       res.status(error instanceof HttpError ? error.statusCode : 500)
         .json({ error: error instanceof HttpError ? error.message : 'Impossible de traiter la sélection.' });
     }

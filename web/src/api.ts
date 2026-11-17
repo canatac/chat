@@ -1,4 +1,4 @@
-import type { AdminStats, CallInfo, DocumentIds, FileEvent, FileFilters, FileItem, FileSort, Folder, Mention, MentionNotification, Message, MessageFile, NotificationPage, Room, RoomInvitation, RoomMember, RoomSession, User } from './types';
+import type { AdminStats, CallInfo, DocumentIds, FileEvent, FileFilters, FileItem, FileSort, Folder, Mention, MentionNotification, Message, MessageFile, MoveConflict, MoveDecision, NotificationPage, Room, RoomInvitation, RoomMember, RoomSession, User } from './types';
 
 interface FileListRequest {
   query: string;
@@ -51,7 +51,7 @@ function sessionHeaders(): Record<string, string> {
 }
 
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(message: string, readonly status: number, readonly conflicts?: MoveConflict[]) {
     super(message);
   }
 }
@@ -77,13 +77,15 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     let message = res.statusText;
+    let conflicts: MoveConflict[] | undefined;
     try {
-      const body = (await res.json()) as { error?: string };
+      const body = (await res.json()) as { error?: string; conflicts?: MoveConflict[] };
       if (body.error) message = body.error;
+      if (res.status === 409 && Array.isArray(body.conflicts)) conflicts = body.conflicts;
     } catch {
       // garder statusText
     }
-    throw new ApiError(message, res.status);
+    throw new ApiError(message, res.status, conflicts);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
@@ -156,8 +158,8 @@ export const api = {
     params.set('select', 'all');
     return req<DocumentIds>('/api/files?' + params, { signal });
   },
-  documentBatch: (operation: DocumentIds & ({ action: 'move'; destination: number | null } | { action: 'delete' })) =>
-    req<{ files: number; folders: number }>('/api/documents/batch', { method: 'POST', body: JSON.stringify(operation) }),
+  documentBatch: (operation: DocumentIds & ({ action: 'move'; destination: number | null; decisions?: MoveDecision[] } | { action: 'delete' })) =>
+    req<{ files: number; folders: number; skipped?: number }>('/api/documents/batch', { method: 'POST', body: JSON.stringify(operation) }),
   uploadFile: async (file: File, message: string, post: boolean, folderId?: number | null, mentions: Mention[] = []) => {
     const fd = new FormData();
     fd.append('file', file);

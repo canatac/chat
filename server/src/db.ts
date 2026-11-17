@@ -680,18 +680,11 @@ export class DB {
     return ordered;
   }
 
-  findMoveConflict(kind: 'file' | 'folder', ids: number[], destination: number | null): string | undefined {
-    if (!ids.length) return undefined;
+  listMoveNames(kind: 'file' | 'folder', destination: number | null): Pick<FileRow, 'id' | 'name' | 'created_at' | 'updated_at'>[] {
     const table = kind === 'file' ? 'files' : 'folders';
     const parent = kind === 'file' ? 'folder_id' : 'parent_id';
-    const conflict = this.db.prepare(`
-      SELECT MIN(name) AS name FROM ${table}
-      WHERE ${parent} IS ? OR id IN (SELECT value FROM json_each(?))
-      GROUP BY lower(name)
-      HAVING COUNT(*) > 1 AND SUM(${parent} IS NOT ?) > 0
-      LIMIT 1
-    `).get(destination, JSON.stringify(ids), destination) as { name: string } | undefined;
-    return conflict?.name;
+    return this.db.prepare(`SELECT id, name, created_at, updated_at FROM ${table} WHERE ${parent} IS ? ORDER BY id`)
+      .all(destination) as Pick<FileRow, 'id' | 'name' | 'created_at' | 'updated_at'>[];
   }
 
   folderCounts(folderId: number): { folders: number; files: number } {

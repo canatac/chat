@@ -409,3 +409,98 @@ test('sélection complète et mutations groupées sans déplacement partiel ni s
   assert.equal(await fileLocation(keep.id), source.id);
   assert.deepEqual(await (await batch({ action: 'delete' })).json(), { files: 0, folders: 0 });
 });
+
+test('résout les doublons d’un même déplacement avec remplacement, renommage et omission', async () => {
+  const origin = await mkFolder('Lot avec doublons');
+  const destination = await mkFolder('Destination avec doublons');
+  const incoming = await mkFolder('Annexes', origin.id);
+  const oldFolder = await mkFolder('Annexes', destination.id);
+  const keptChild = await upload('Courante.txt', 'version entrante', incoming.id);
+  const oldChild = await upload('Ancienne.txt', 'version de destination', oldFolder.id);
+  const replace = await upload('À remplacer.txt', 'nouveau fichier', origin.id);
+  const rename = await upload('À renommer.txt', 'pièce à renommer', origin.id);
+  const skip = await upload('À ignorer.txt', 'fichier conservé à la source', origin.id);
+  const free = await upload('Sans doublon.txt', 'déplacé normalement', origin.id);
+  const oldFile = await upload('À remplacer.txt', 'ancien fichier', destination.id);
+  const retained = await upload('À renommer.txt', 'fichier de destination conservé', destination.id);
+  await upload('Nom occupé.txt', 'autre fichier de destination', destination.id);
+  await upload('À ignorer.txt', 'doublon conservé à destination', destination.id);
+
+  const batch = (decisions: object[] = []) => j('/api/documents/batch', { method: 'POST', body: JSON.stringify({
+    action: 'move', destination: destination.id, folderIds: [incoming.id], fileIds: [replace.id, rename.id, skip.id, free.id], decisions,
+  }) });
+  type Conflict = { kind: 'file' | 'folder'; id: number; name: string; replaceToken: string };
+  const conflictsIn = async (response: Response) => {
+    assert.equal(response.status, 409);
+    return (await response.json() as { conflicts: Conflict[] }).conflicts;
+  };
+  const initial = await conflictsIn(await batch());
+  assert.equal(initial.length, 4);
+  const replaceWith = (kind: Conflict['kind'], id: number) => {
+    const match = initial.find((item) => item.kind === kind && item.id === id);
+    assert.ok(match?.replaceToken);
+    return { kind, id, action: 'replace', token: match.replaceToken };
+  };
+  const approved = [replaceWith('file', replace.id), replaceWith('folder', incoming.id), { kind: 'file', id: skip.id, action: 'skip' }];
+  const renamed = { kind: 'file', id: rename.id, action: 'rename', name: 'Nom occupé.txt' };
+  const remaining = await conflictsIn(await batch([...approved, renamed]));
+  assert.deepEqual(remaining.map(({ id, name }) => [id, name]), [[rename.id, renamed.name]]);
+  const readFile = async (id: number) => await (await j('/api/files/' + id + '/download')).text();
+  assert.equal(await readFile(oldFile.id), 'ancien fichier');
+
+  const accepted = [...approved, { ...renamed, name: 'Nouveau nom.txt' }];
+  const database = new DatabaseSync(path.join(path.dirname(uploadsDir), 'chat.db'));
+  try {
+    database.exec(`CREATE TRIGGER test_move_failure BEFORE UPDATE OF folder_id ON files WHEN OLD.id = ${free.id} BEGIN SELECT RAISE(ABORT, 'échec attendu'); END;`);
+    assert.equal((await batch(accepted)).status, 500);
+  } finally {
+    database.exec('DROP TRIGGER IF EXISTS test_move_failure');
+    database.close();
+  }
+  assert.equal(await readFile(oldFile.id), 'ancien fichier');
+  assert.equal(await readFile(oldChild.id), 'version de destination');
+
+  const moved = await batch(accepted);
+  assert.equal(moved.status, 200);
+  assert.deepEqual(await moved.json(), { files: 3, folders: 1, skipped: 1 });
+  const detail = async (id: number) => (await (await j('/api/files/' + id)).json() as { file: FileBody }).file;
+  assert.equal(await readFile(replace.id), 'nouveau fichier');
+  assert.equal((await detail(replace.id)).folderId, destination.id);
+  assert.equal((await detail(rename.id)).name, 'Nouveau nom.txt');
+  assert.equal((await detail(rename.id)).folderId, destination.id);
+  assert.equal((await detail(free.id)).folderId, destination.id);
+  assert.equal((await detail(skip.id)).folderId, origin.id);
+  assert.equal((await detail(retained.id)).folderId, destination.id);
+  assert.equal((await detail(keptChild.id)).folderId, incoming.id);
+  assert.equal((await j('/api/files/' + oldFile.id)).status, 404);
+  assert.equal((await j('/api/files/' + oldChild.id)).status, 404);
+});
+
+test('demande une nouvelle décision si le contenu du dossier à remplacer a changé', async () => {
+  const origin = await mkFolder('Départ contrôlé');
+  const destination = await mkFolder('Arrivée contrôlée');
+  const incoming = await mkFolder('Versions', origin.id);
+  const existing = await mkFolder('Versions', destination.id);
+  const free = await upload('Document libre.txt', 'à déplacer', origin.id);
+  const batch = (decisions: object[] = [], fileIds = [free.id]) => j('/api/documents/batch', { method: 'POST', body: JSON.stringify({
+    action: 'move', destination: destination.id, folderIds: [incoming.id], fileIds, decisions,
+  }) });
+  const preview = await batch();
+  assert.equal(preview.status, 409);
+  const first = (await preview.json() as { conflicts: { replaceToken: string }[] }).conflicts[0];
+  const added = await upload('Nouveau à destination.txt', 'ajout concurrent', existing.id);
+  const outdated = await batch([{ kind: 'folder', id: incoming.id, action: 'replace', token: first.replaceToken }]);
+  assert.equal(outdated.status, 409);
+  const next = (await outdated.json() as { conflicts: { replaceToken: string; changed: boolean }[] }).conflicts[0];
+  assert.equal(next.changed, true);
+  assert.notEqual(next.replaceToken, first.replaceToken);
+  const protectedSelection = await batch([], [free.id, added.id]);
+  assert.equal(protectedSelection.status, 409);
+  const collision = (await protectedSelection.json() as { conflicts: { reason: string; replaceToken: string | null }[] }).conflicts[0];
+  assert.equal(collision.reason, 'selection');
+  assert.equal(collision.replaceToken, null);
+  const skipped = await batch([{ kind: 'folder', id: incoming.id, action: 'skip' }]);
+  assert.equal(skipped.status, 200);
+  assert.deepEqual(await skipped.json(), { files: 1, folders: 0, skipped: 1 });
+  assert.equal(await (await j('/api/files/' + added.id + '/download')).text(), 'ajout concurrent');
+});
