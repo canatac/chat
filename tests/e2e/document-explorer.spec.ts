@@ -550,3 +550,89 @@ test('renomme, déplace et supprime un dossier depuis les emplacements tactiles'
     await context.close();
   }
 });
+
+async function uploadExamples(drawer: Locator, names: string[]) {
+  await drawer.locator('input[aria-label="Fichiers à déposer"]').setInputFiles(names.map((name) => ({ name, mimeType: 'text/plain', buffer: Buffer.from(name) })));
+  await expect(drawer.getByRole('button', { name: 'Détails de ' + names[names.length - 1], exact: true })).toBeVisible();
+}
+
+test('à 320 px, enchaîne remplacement, renommage et omission pour le même lot', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 320, height: 820 }, hasTouch: true, isMobile: true });
+  const page = await context.newPage();
+  try {
+    await withExplorer(page, async () => {
+      const drawer = page.getByRole('dialog', { name: 'Espace documentaire' });
+      const path = drawer.getByRole('navigation', { name: 'Chemin du dossier' });
+      const openFolder = (name: string) => drawer.getByRole('button', { name: 'Ouvrir le dossier ' + name, exact: true }).tap();
+      await openFolder('Archives audio');
+      await uploadExamples(drawer, ['Alpha.txt', 'Bravo.txt', 'Charlie.txt', 'Occupé.txt']);
+      await path.getByRole('button', { name: 'Racine' }).tap();
+      await openFolder('Comptes rendus');
+      await uploadExamples(drawer, ['Alpha.txt', 'Bravo.txt', 'Charlie.txt', 'Libre.txt']);
+      await drawer.getByRole('button', { name: 'Sélectionner', exact: true }).tap();
+      const actions = drawer.getByRole('group', { name: 'Actions de sélection' });
+      await actions.getByRole('button', { name: 'Tout sélectionner' }).tap();
+      await expect(actions.getByRole('status')).toHaveText('4 éléments sélectionnés');
+      await actions.getByRole('button', { name: 'Déplacer…' }).tap();
+      const chooser = page.getByRole('dialog', { name: 'Déplacer vers' });
+      await chooser.getByRole('button', { name: 'Racine' }).tap();
+      await chooser.getByRole('button', { name: 'Archives audio' }).tap();
+      await chooser.getByRole('button', { name: 'Déplacer ici' }).tap();
+      const conflict = page.getByRole('dialog', { name: 'Résoudre le doublon' });
+      await expect(conflict.getByText('3 doublons à traiter')).toBeVisible();
+      await expect(conflict.getByText('« Alpha.txt » est déjà utilisé dans « Archives audio ».')).toBeVisible();
+      expect(await conflict.evaluate((dialog) => dialog.scrollWidth - dialog.clientWidth)).toBeLessThanOrEqual(1);
+      await conflict.getByRole('button', { name: 'Remplacer', exact: true }).tap();
+
+      const renameTo = async (name: string) => {
+        await conflict.getByRole('button', { name: 'Renommer', exact: true }).tap();
+        await conflict.getByRole('textbox', { name: 'Nouveau nom' }).fill(name);
+        await conflict.getByRole('button', { name: 'Renommer et déplacer' }).tap();
+      };
+      await expect(conflict.getByText('« Bravo.txt » est déjà utilisé dans « Archives audio ».')).toBeVisible();
+      await renameTo('Occupé.txt');
+      await expect(conflict.getByText('« Charlie.txt » est déjà utilisé dans « Archives audio ».')).toBeVisible();
+      await conflict.getByRole('button', { name: 'Ignorer' }).tap();
+      await expect(conflict.getByText('« Occupé.txt » est déjà utilisé dans « Archives audio ».')).toBeVisible();
+      await renameTo('Bravo (copie).txt');
+      await expect(conflict).toBeHidden();
+      await expect(drawer.getByText('3 éléments déplacés dans « Archives audio ». 1 élément ignoré.')).toBeVisible();
+      await expect(drawer.getByRole('button', { name: 'Détails de Charlie.txt', exact: true })).toBeVisible();
+      await expect(drawer.getByRole('button', { name: 'Détails de Libre.txt', exact: true })).toHaveCount(0);
+      await path.getByRole('button', { name: 'Racine' }).tap();
+      await openFolder('Archives audio');
+      for (const name of ['Alpha.txt', 'Bravo.txt', 'Bravo (copie).txt', 'Charlie.txt', 'Libre.txt']) {
+        await expect(drawer.getByRole('button', { name: 'Détails de ' + name, exact: true })).toHaveCount(1);
+      }
+    });
+  } finally {
+    await context.close();
+  }
+});
+
+test('après un glisser-déposer, annule le lot entier ou ignore le seul doublon', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await withExplorer(page, async () => {
+    const drawer = page.getByRole('dialog', { name: 'Espace documentaire' });
+    const places = drawer.getByRole('navigation', { name: 'Emplacements des documents' });
+    const destination = places.getByRole('button', { name: 'Aller au dossier Archives audio' });
+    await destination.click();
+    await uploadExamples(drawer, ['Même nom.txt']);
+    await places.getByRole('button', { name: 'Aller au dossier Comptes rendus' }).click();
+    await uploadExamples(drawer, ['Même nom.txt', 'Suite.txt']);
+    await drawer.getByRole('button', { name: 'Sélectionner', exact: true }).click();
+    await drawer.getByRole('button', { name: 'Tout sélectionner' }).click();
+    const dragSource = drawer.getByRole('checkbox', { name: 'Sélectionner Même nom.txt' });
+    await expect(dragSource).toHaveAttribute('aria-checked', 'true');
+    await dragWithMouse(page, dragSource, destination);
+    const conflict = page.getByRole('dialog', { name: 'Résoudre le doublon' });
+    await conflict.getByRole('button', { name: 'Annuler le déplacement' }).click();
+    await expect(conflict).toBeHidden();
+    await expect(drawer.getByRole('checkbox', { name: 'Sélectionner Suite.txt' })).toHaveAttribute('aria-checked', 'true');
+    await dragWithMouse(page, dragSource, destination);
+    await conflict.getByRole('button', { name: 'Ignorer' }).click();
+    await expect(drawer.getByText('1 élément déplacé dans « Archives audio ». 1 élément ignoré.')).toBeVisible();
+    await expect(drawer.getByRole('button', { name: 'Détails de Même nom.txt', exact: true })).toBeVisible();
+    await expect(drawer.getByRole('button', { name: 'Détails de Suite.txt', exact: true })).toHaveCount(0);
+  });
+});
