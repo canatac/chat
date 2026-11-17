@@ -57,15 +57,16 @@ import {
 } from '@mui/material';
 import { useTheme } from '@mui/material/styles';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, saveFile } from '../api';
+import { api, ApiError, saveFile } from '../api';
 import { documentsFromDrop, documentsFromPicker, importDocuments, type ExternalDocument } from '../documentImport';
 import { formatFileSize } from '../formatFileSize';
-import type { FileFilters, FileItem, FileSort, Folder } from '../types';
+import type { FileFilters, FileItem, FileSort, Folder, MoveConflict, MoveDecision } from '../types';
 import useDocumentDrag, { documentDropAt, documentDropAttributes, documentDropStyle, type DropTarget } from '../useDocumentDrag';
 import useDocumentSelection, { documentIds, type SelectedDocuments } from '../useDocumentSelection';
 import type { ChatSocket } from '../ws';
 import DocumentExplorerList, { explorerColors, type DocumentItem, type DocumentView } from './DocumentExplorerList';
 import DocumentPlaces, { type DocumentPlace } from './DocumentPlaces';
+import MoveConflictDialog from './MoveConflictDialog';
 
 interface Props {
   open: boolean;
@@ -83,6 +84,8 @@ type FileDetail = Awaited<ReturnType<typeof api.fileDetail>>;
 type FileListing = Awaited<ReturnType<typeof api.files>> & { scope: string };
 type NavigationHistory = { places: DocumentPlace[]; index: number };
 type DocumentAction = DocumentItem | { kind: 'selection'; documents: SelectedDocuments; origin: number | null | undefined };
+type MoveTask = { item: DocumentAction; destination: number | null; decisions: MoveDecision[]; from: 'chooser' | 'drop' };
+type PendingMove = { task: MoveTask; conflicts: MoveConflict[]; index: number };
 
 const dateTime = new Intl.DateTimeFormat('fr-FR', { dateStyle: 'medium', timeStyle: 'short' });
 const FILE_LIMIT = 200;
@@ -160,6 +163,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
   const [nameValue, setNameValue] = useState('');
   const [moveDialog, setMoveDialog] = useState<DocumentAction | null>(null);
   const [moveTarget, setMoveTarget] = useState<number | null>(null);
+  const [pendingMove, setPendingMove] = useState<PendingMove | null>(null);
   const [deleteDialog, setDeleteDialog] = useState<DocumentAction | null>(null);
   const [deleteRecursive, setDeleteRecursive] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
@@ -169,6 +173,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
   const folderRef = useRef<HTMLInputElement>(null);
   const importing = useRef(false);
+  const moving = useRef(false);
   const externalMark = useRef<HTMLElement | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const detailRequest = useRef(0);
@@ -526,27 +531,68 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
     return item.item.parentId !== destination && !pathFor(destination).some(({ id }) => id === item.item.id);
   };
 
-  const moveDocument = async (item: DocumentAction, destination: number | null) => {
-    const placeName = destination === null ? 'à la racine' : 'dans « ' + (folderById.get(destination)?.name ?? 'le dossier') + ' »';
-    if (item.kind === 'selection') {
-      const moved = await api.documentBatch({ action: 'move', destination, ...documentIds(item.documents) });
+  const executeMove = async (task: MoveTask) => {
+    if (moving.current || dialogBusy) return;
+    moving.current = true;
+    setDialogBusy(true);
+    setDialogError(null);
+    setActionError(null);
+    setActionNotice(null);
+    const { item, destination, decisions } = task;
+    const ids = item.kind === 'selection' ? documentIds(item.documents) : {
+      fileIds: item.kind === 'file' ? [item.item.id] : [],
+      folderIds: item.kind === 'folder' ? [item.item.id] : [],
+    };
+    try {
+      const moved = await api.documentBatch({ action: 'move', destination, ...ids, decisions });
       const count = moved.files + moved.folders;
-      selection.clear();
-      setActionNotice(count ? `${selectionLabel(count)} déplacé${count === 1 ? '' : 's'} ${placeName}.` : 'Les éléments sont déjà dans ce dossier.');
-      return;
+      const skipped = moved.skipped ?? 0;
+      const placeName = destination === null ? 'à la racine' : 'dans « ' + (folderById.get(destination)?.name ?? 'le dossier') + ' »';
+      const result = count === 0
+        ? (skipped ? 'Aucun déplacement.' : 'Les éléments sont déjà dans ce dossier.')
+        : item.kind === 'selection' ? `${selectionLabel(count)} déplacé${count === 1 ? '' : 's'} ${placeName}.`
+          : destination === null ? 'Élément déplacé à la racine.' : `Déplacé ${placeName}.`;
+      const ignored = skipped ? ` ${selectionLabel(skipped)} ignoré${skipped === 1 ? '' : 's'}.` : '';
+      if (item.kind === 'selection') selection.clear();
+      setMoveDialog(null);
+      setPendingMove(null);
+      setActionNotice(result + ignored);
+      reload();
+    } catch (error) {
+      if (error instanceof ApiError && error.conflicts?.length) {
+        setPendingMove({ task, conflicts: error.conflicts, index: 0 });
+      } else {
+        const message = errorMessage(error, 'Déplacement impossible.');
+        if (task.from === 'chooser' || pendingMove) setDialogError(message);
+        else setActionError(message);
+      }
+    } finally {
+      setDialogBusy(false);
+      moving.current = false;
     }
-    if (item.kind === 'file') await api.patchFile(item.item.id, { folderId: destination });
-    else await api.patchFolder(item.item.id, { parentId: destination });
-    setActionNotice(destination === null ? 'Élément déplacé à la racine.' : `Déplacé ${placeName}.`);
   };
 
-  const submitMove = async () => {
+  const submitMove = () => {
     if (!moveDialog || !canMove(moveDialog, moveTarget)) return;
-    await runDialogAction(
-      () => moveDocument(moveDialog, moveTarget),
-      () => setMoveDialog(null),
-      'Déplacement impossible.',
-    );
+    void executeMove({ item: moveDialog, destination: moveTarget, decisions: [], from: 'chooser' });
+  };
+
+  const resolveConflict = (decision: MoveDecision) => {
+    if (!pendingMove || moving.current) return;
+    const { task, conflicts, index } = pendingMove;
+    const decisions = task.decisions.filter(({ kind, id }) => kind !== decision.kind || id !== decision.id);
+    decisions.push(decision);
+    const next = { ...task, decisions };
+    if (index + 1 < conflicts.length) {
+      setDialogError(null);
+      setPendingMove({ task: next, conflicts, index: index + 1 });
+    } else void executeMove(next);
+  };
+
+  const cancelMove = () => {
+    setDialogError(null);
+    setMoveDialog(null);
+    setPendingMove(null);
   };
 
   const openDelete = (target: DocumentAction) => {
@@ -596,7 +642,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
   });
   const dragAction = (source: DocumentItem): DocumentAction => selectedBatch && selection.documents?.[source.kind].has(source.item.id) ? selectedBatch : source;
   const drag = useDocumentDrag({
-    enabled: open && !uploading && !dialogBusy && !selection.loading,
+    enabled: open && !uploading && !dialogBusy && !pendingMove && !selection.loading,
     label: (source) => dragAction(source).kind === 'selection' ? selectionLabel(selectedCount) : source.item.name,
     canDrop: (source, target) => {
       const action = dragAction(source);
@@ -607,7 +653,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
     onDrop: (source, target) => {
       const action = dragAction(source);
       if (target.kind === 'destination') openMove(action);
-      else if (target.kind === 'folder') void runFileAction(() => moveDocument(action, target.id), 'Déplacement impossible.');
+      else if (target.kind === 'folder') void executeMove({ item: action, destination: target.id, decisions: [], from: 'drop' });
       else if (action.kind === 'file') {
         const targetFile = visibleListing?.files.find(({ id }) => id === target.id);
         if (targetFile) openGroup(action.item, targetFile);
@@ -622,6 +668,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
     setMenu(null);
     setPlacesAnchor(null);
     setGroupSource(null);
+    cancelMove();
     selection.clear();
     setActionNotice(null);
     setActionError(null);
@@ -629,6 +676,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
   };
 
   const menuTarget = menu?.target;
+  const conflict = pendingMove?.conflicts[pendingMove.index];
   const editingFile = nameDialog?.mode === 'rename-file';
   const grouping = nameDialog?.mode === 'group-files' ? nameDialog : null;
   const nameDialogTitle = grouping ? 'Regrouper les fichiers' : nameDialog?.mode === 'new-folder' ? 'Nouveau dossier' : editingFile ? 'Renommer le fichier' : 'Renommer le dossier';
@@ -660,7 +708,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
           onKeyDown: (event: React.KeyboardEvent<HTMLElement>) => {
             if (!(event.ctrlKey || event.metaKey) || event.altKey || event.key.toLowerCase() !== 'a') return;
             if (!(event.target instanceof HTMLElement) || !event.currentTarget.contains(event.target)) return;
-            if (event.target.closest('input, textarea, select, [contenteditable="true"]') || menu || placesAnchor || detail || moveDialog || deleteDialog || nameDialog) return;
+            if (event.target.closest('input, textarea, select, [contenteditable="true"]') || menu || placesAnchor || detail || moveDialog || pendingMove || deleteDialog || nameDialog) return;
             event.preventDefault();
             void selectAll();
           },
@@ -1051,7 +1099,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
         </Box>
       </Dialog>
 
-      <Dialog {...preparedDialogProps} open={Boolean(moveDialog)} onClose={() => { if (!dialogBusy) setMoveDialog(null); }} aria-labelledby="doc-move-title">
+      <Dialog {...preparedDialogProps} open={Boolean(moveDialog && !pendingMove)} onClose={() => { if (!dialogBusy) cancelMove(); }} aria-labelledby="doc-move-title">
         <DialogTitle id="doc-move-title">Déplacer vers</DialogTitle>
         <DialogContent dividers>
           {dialogError && <Alert severity="error" sx={{ mb: 1 }}>{dialogError}</Alert>}
@@ -1078,10 +1126,23 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
           {moveFolders.length === 0 && <Typography variant="body2" sx={{ color: explorerColors.muted }}>Aucun sous-dossier.</Typography>}
         </DialogContent>
         <DialogActions>
-          <Button disabled={dialogBusy} onClick={() => setMoveDialog(null)}>Annuler</Button>
-          <Button variant="contained" disableElevation sx={primaryButtonStyle} disabled={dialogBusy || !moveDialog || !canMove(moveDialog, moveTarget)} onClick={() => void submitMove()}>Déplacer ici</Button>
+          <Button disabled={dialogBusy} onClick={cancelMove}>Annuler</Button>
+          <Button variant="contained" disableElevation sx={primaryButtonStyle} disabled={dialogBusy || !moveDialog || !canMove(moveDialog, moveTarget)} onClick={submitMove}>Déplacer ici</Button>
         </DialogActions>
       </Dialog>
+
+      {pendingMove && conflict && (
+        <MoveConflictDialog
+          key={`${conflict.kind}:${conflict.id}:${conflict.name}:${conflict.replaceToken ?? ''}`}
+          conflict={conflict}
+          destination={pendingMove.task.destination === null ? 'Racine' : folderById.get(pendingMove.task.destination)?.name ?? 'dossier de destination'}
+          remaining={pendingMove.conflicts.length - pendingMove.index}
+          busy={dialogBusy}
+          error={dialogError}
+          onResolve={resolveConflict}
+          onCancel={cancelMove}
+        />
+      )}
 
       <Dialog {...preparedDialogProps} open={Boolean(deleteDialog)} onClose={() => { if (!dialogBusy) setDeleteDialog(null); }} aria-labelledby="doc-delete-title">
         <DialogTitle id="doc-delete-title">Supprimer {deleteDialog?.kind === 'selection' ? 'la sélection' : deleteDialog?.kind === 'folder' ? 'le dossier' : 'le fichier'} ?</DialogTitle>

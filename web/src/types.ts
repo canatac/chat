@@ -105,6 +105,21 @@ export interface DocumentIds {
   folderIds: number[];
 }
 
+type MoveItem = { kind: 'file' | 'folder'; id: number };
+
+export type MoveDecision = MoveItem & (
+  { action: 'skip' } | { action: 'rename'; name: string } | { action: 'replace'; token: string; name?: string }
+);
+
+export type MoveConflict = MoveItem & {
+  sourceName: string;
+  name: string;
+  existing: number;
+  reason: 'destination' | 'planned' | 'selection';
+  replaceToken: string | null;
+  changed: boolean;
+};
+
 export interface Folder {
   id: number;
   name: string;
