@@ -364,6 +364,7 @@ Le serveur vérifie l’accès au salon à chaque requête.
 - `GET /api/files/:id` → détail (métadonnées + `folderPath` + `history`)
 - `GET /api/files?select=all` renvoie `{fileIds, folderIds}` avec les mêmes critères que la liste et sans pagination. Les dossiers apparaissent dans la sélection en parcourant un dossier sans filtre de fichiers ni recherche.
 - `POST /api/documents/batch` reçoit `{action, fileIds, folderIds}` et renvoie `{files, folders}`. Pour `action: "move"`, fournir `destination` (identifiant ou `null` pour la racine). `action: "delete"` supprime les dossiers sélectionnés avec leur contenu. Les modifications et leur journal sont enregistrés dans une transaction.
+- Lors d’un déplacement, une réponse `409` avec `conflicts` permet de renvoyer la sélection avec `decisions`. Chaque décision identifie la source par `kind` et `id`, puis donne `action` (`skip`, `rename` avec `name`, ou `replace` avec le `replaceToken` reçu dans `token`). La réponse finale indique `skipped` si des éléments ont été ignorés. Remplacer un dossier supprime celui de destination et son contenu.
 - `PATCH /api/files/:id` `{name?|folderId?}` → renommer / déplacer (409 si nom déjà pris dans le dossier cible)
 - `DELETE /api/files/:id` → supprime le fichier (disque + chunks + entrée)
 - `GET /api/folders` → `{folders: [...]}` (arbre aplati avec `parentId`)
