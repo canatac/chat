@@ -13,5 +13,6 @@ export async function askLLM(cfg: Config, messages: ChatMessage[], opts?: ChatOp
   if (!cfg.LLM_MODEL) {
     throw new Error('LLM non configuré : définir LLM_PROVIDER, LLM_MODEL et LLM_API_KEY/LLM_BASE_URL dans le .env');
   }
-  return chatCompletion(getLLM(cfg), messages, opts);
+  const checked = cfg.reviewAI ? await cfg.reviewAI(messages, opts?.userId) : messages;
+  return chatCompletion(getLLM(cfg), checked, opts);
 }

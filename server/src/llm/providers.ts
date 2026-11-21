@@ -7,6 +7,7 @@ export interface ChatMessage {
 }
 
 export interface ChatOptions {
+  userId?: number;
   temperature?: number;
   maxTokens?: number;
   timeoutMs?: number;

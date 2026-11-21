@@ -63,7 +63,7 @@ export async function handleCommand(
       { role: 'system', content: buildSystemPrompt() },
       { role: 'user', content: buildUserPrompt(cmd, context, docs) },
     ];
-    const { text, usage } = await askLLM(deps.config, messages, { timeoutMs: 90000 });
+    const { text, usage } = await askLLM(deps.config, messages, { timeoutMs: 90000, userId: deps.userId });
     record(usage, null);
     deps.postBot(text);
   } catch (err) {

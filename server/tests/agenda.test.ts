@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { meetingInstant, meetingLocalTime } from '../src/agenda-time.js';
 import { createServer } from '../src/app.js';
+import { cleanAnalyzer } from './mock-linguard.js';
 import { loadConfig } from '../src/config.js';
 
 const password = 'mot-de-passe-agenda';
@@ -52,7 +53,7 @@ test('planifie, recueille les réponses, relie un compte rendu et interroge les 
     JWT_SECRET: 'test-secret-chat-agenda', DATA_DIR: dir,
     LLM_MODEL: 'test-agenda', LLM_BASE_URL: providerUrl, STT_MODEL: 'test-stt', STT_BASE_URL: providerUrl,
   });
-  const app = createServer(config, dir);
+  const app = createServer(config, dir, cleanAnalyzer);
   t.after(async () => {
     await app.close();
     await new Promise<void>((resolve) => provider.close(() => resolve()));
