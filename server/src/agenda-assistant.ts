@@ -6,6 +6,7 @@ import type { DB } from './db.js';
 import { HttpError } from './llm/derive.js';
 import { askLLM } from './llm/index.js';
 import { costUsd, type Usage } from './llm/pricing.js';
+import { SecurityBlocked } from './security/ai-guard.js';
 
 const alias = z.string().trim().min(1).max(100);
 const local = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/);
@@ -55,12 +56,16 @@ async function interpret(deps: Dependencies, prompt: string, timeZone: string) {
   try {
     const result = await askLLM(deps.config, [{ role: 'system', content: assistantPrompt }, { role: 'user', content: JSON.stringify({
       maintenant: meetingLocalTime(Date.now(), timeZone), fuseau: timeZone, membres: deps.members.map(({ alias }) => alias), demande: prompt,
-    }) }], { temperature: 0, timeoutMs: 60_000 });
+    }) }], { temperature: 0, timeoutMs: 60_000, userId: deps.userId });
     usage = result.usage;
     const parsed = instruction.parse(JSON.parse(result.text.trim().replace(/^```(?:json)?\s*|\s*```$/gi, '')));
     log(null);
     return parsed;
-  } catch {
+  } catch (error) {
+    if (error instanceof SecurityBlocked) {
+      log(error.message);
+      throw new HttpError(403, error.message);
+    }
     log('Réponse de l’assistant agenda indisponible ou invalide');
     throw new HttpError(502, 'L’assistant n’a pas pu interpréter la demande. Essaie de préciser le titre, les participants ou la date.');
   }

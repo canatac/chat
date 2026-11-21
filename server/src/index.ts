@@ -31,6 +31,6 @@ console.log(
 );
 
 const ctx = createServer(config, config.DATA_DIR);
-ctx.server.listen(config.PORT, () => {
+ctx.server.listen(config.PORT, config.HOST, () => {
   console.log(`Chat démarré sur http://localhost:${config.PORT}`);
 });

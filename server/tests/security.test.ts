@@ -1,0 +1,203 @@
+import assert from 'node:assert/strict';
+import { test, type TestContext } from 'node:test';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { DatabaseSync } from 'node:sqlite';
+import { createServer } from '../src/app.js';
+import { DB } from '../src/db.js';
+import { hashPassword } from '../src/auth.js';
+import { loadConfig } from '../src/config.js';
+import { LinGuardError } from '../src/security/linguard-client.js';
+import type { SecurityPolicy } from '../src/security/security-store.js';
+import type { SecurityReview } from '../src/security/ai-guard.js';
+import { AIGuard } from '../src/security/ai-guard.js';
+
+const pii = 'jean.dupont@example.test';
+const password = 'test-security-password';
+
+function detect(text: string) {
+  return [...text.matchAll(/jean\.dupont@example\.test/g)].map((match) => ({
+    type: 'EMAIL', start: Buffer.byteLength(text.slice(0, match.index)), end: Buffer.byteLength(text.slice(0, match.index)) + Buffer.byteLength(pii),
+    score: 9500, text: pii,
+  }));
+}
+
+async function fixture(t: TestContext) {
+  let failure = false;
+  let modelErrors: unknown[] = [];
+  const sent: string[] = [];
+  const provider = http.createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    sent.push(Buffer.concat(chunks).toString('utf8'));
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ choices: [{ message: { content: 'Réponse externe ' + sent.length } }] }));
+  });
+  await new Promise<void>((resolve) => provider.listen(0, '127.0.0.1', resolve));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'chat-security-'));
+  const legacy = new DB(dir);
+  legacy.createUser('Alice', hashPassword(password));
+  legacy.createUser('Bob', hashPassword(password));
+  legacy.close();
+  const config = loadConfig({ JWT_SECRET: 'test-linguard-secret', ADMIN_NAMES: 'Alice', LLM_MODEL: 'test',
+    LLM_BASE_URL: 'http://127.0.0.1:' + (provider.address() as AddressInfo).port + '/v1' });
+  const app = createServer(config, dir, () => ({
+    health: async () => {
+      if (failure) throw new LinGuardError('unavailable');
+      return { status: 'ok', agent: 'linguard', version: 'test', api: 'v1' };
+    },
+    analyze: async (texts) => {
+      if (failure) throw new LinGuardError('unavailable');
+      return { texts: texts.map(detect), model_errors: modelErrors };
+    },
+  }));
+  await new Promise<void>((resolve) => app.server.listen(0, '127.0.0.1', resolve));
+  const base = 'http://127.0.0.1:' + (app.server.address() as AddressInfo).port;
+  t.after(async () => {
+    await app.close();
+    provider.closeAllConnections();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  async function api(route: string, token: string, method = 'GET', body?: unknown) {
+    return fetch(base + '/api' + route, {
+      method, headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  }
+  const login = async (name: string) => {
+    const res = await api('/auth/login', '', 'POST', { name, password });
+    return (await res.json() as { token: string }).token;
+  };
+  const admin = await login('Alice');
+  const member = await login('Bob');
+  const state = async (token = admin) => (await (await api('/security', token)).json()) as {
+    policy: SecurityPolicy; reviews: SecurityReview[]; health: { available: boolean };
+  };
+  const policy = async (detection: SecurityPolicy['detection'], errors: SecurityPolicy['modelErrors'] = 'fail-closed') => {
+    const current = (await state()).policy;
+    const res = await api('/security/policy', admin, 'PUT', { ...current, detection, modelErrors: errors });
+    assert.equal(res.status, 200);
+  };
+  const send = async (content: string, token = admin) => {
+    const res = await api('/messages', token, 'POST', { content });
+    assert.equal(res.status, 201);
+  };
+  const wait = async <T>(load: () => Promise<T | undefined>): Promise<T> => {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const value = await load();
+      if (value !== undefined) return value;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error('État de sécurité attendu non reçu');
+  };
+  const bot = async (part: string) => wait(async () => {
+    const { messages } = await (await api('/messages', admin)).json() as { messages: { user: { isBot: boolean }; content: string }[] };
+    return messages.find((message) => message.user.isBot && message.content.includes(part));
+  });
+  return { dir, api, admin, member, state, policy, send, wait, bot, sent,
+    unavailable: () => { failure = true; }, modelErrors: () => { modelErrors = [{ error: pii }]; } };
+}
+
+test('bloque par défaut, masque le contexte complet et persiste uniquement les métadonnées dans l’audit', async (t) => {
+  const f = await fixture(t);
+  assert.deepEqual((await f.state()).policy, { detection: 'block', modelErrors: 'fail-closed', version: 1 });
+  await f.send('Note historique Élodie 🧪 ' + pii);
+  await f.send('/ask Résume cette note');
+  await f.bot('politique MaelGard bloque');
+  assert.equal(f.sent.length, 0);
+  await f.policy('anonymize');
+  await f.send('/ask Question avec ' + pii);
+  await f.bot('Réponse externe 1');
+  assert.equal(f.sent.length, 1);
+  assert.equal(f.sent[0].includes(pii), false);
+  assert.equal(f.sent[0].includes('[EMAIL]'), true);
+  const sqlite = new DatabaseSync(path.join(f.dir, 'chat.db'));
+  const events = sqlite.prepare('SELECT * FROM security_events').all();
+  sqlite.close();
+  assert.equal(JSON.stringify(events).includes(pii), false);
+  assert.ok(events.some((event) => event.action === 'anonymized' && Number(event.count) > 0 && event.max_score === 9500));
+});
+
+test('réserve la politique aux administrateurs et ne permet que l’annulation ou le masquage de sa propre demande', async (t) => {
+  const f = await fixture(t);
+  const original = (await f.state()).policy;
+  assert.equal((await f.api('/security/policy', f.member, 'PUT', { ...original, detection: 'ask' })).status, 403);
+  await f.policy('ask');
+  assert.equal((await f.api('/security/policy', f.admin, 'PUT', { ...original, detection: 'anonymize' })).status, 409);
+  await f.send('/ask Mon contact est ' + pii);
+  const review = await f.wait(async () => (await f.state()).reviews[0]);
+  assert.equal(JSON.stringify(review).includes(pii), false);
+  assert.equal(f.sent.length, 0);
+  assert.deepEqual((await f.state(f.member)).reviews, []);
+  assert.equal((await f.api('/security/reviews/' + review.id, f.member, 'POST', { action: 'anonymize' })).status, 409);
+  assert.equal((await f.api('/security/reviews/' + review.id, f.admin, 'POST', { action: 'send-original' })).status, 400);
+  assert.equal((await f.api('/security/reviews/' + review.id, f.admin, 'POST', { action: 'anonymize' })).status, 204);
+  await f.bot('Réponse externe 1');
+  assert.equal(f.sent[0].includes(pii), false);
+  assert.equal((await f.api('/security/reviews/' + review.id, f.admin, 'POST', { action: 'anonymize' })).status, 409);
+  await f.send('/ask Autre demande ' + pii);
+  const cancelled = await f.wait(async () => (await f.state()).reviews[0]);
+  assert.equal((await f.api('/security/reviews/' + cancelled.id, f.admin, 'POST', { action: 'cancel' })).status, 204);
+  await f.bot('annulée');
+  assert.equal(f.sent.length, 1);
+  await f.send('/ask En attente ' + pii);
+  const stale = await f.wait(async () => (await f.state()).reviews[0]);
+  await f.policy('block');
+  assert.equal((await f.api('/security/reviews/' + stale.id, f.admin, 'POST', { action: 'anonymize' })).status, 409);
+  assert.equal(f.sent.length, 1);
+});
+
+test('le fail-open des modèles conserve le blocage des PII et un service indisponible bloque toujours', async (t) => {
+  const f = await fixture(t);
+  f.modelErrors();
+  await f.send('/ask Une question sans PII');
+  await f.bot('politique MaelGard');
+  assert.equal(f.sent.length, 0);
+  await f.policy('block', 'fail-open');
+  await f.send('/ask Contact ' + pii);
+  await f.bot('données personnelles');
+  assert.equal(f.sent.length, 0);
+  await f.policy('anonymize', 'fail-open');
+  await f.send('/ask Contact ' + pii);
+  await f.bot('Réponse externe 1');
+  assert.equal(f.sent[0].includes(pii), false);
+  f.unavailable();
+  await f.send('/ask Encore une question');
+  await f.bot('service local MaelGard');
+  assert.equal(f.sent.length, 1);
+});
+
+test('expire les décisions et annule les demandes en attente à l’arrêt du serveur', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'guard-expiry-'));
+  const db = new DB(dir);
+  db.security.update({ ...db.security.policy(), detection: 'ask' });
+  const guard = new AIGuard(db.security, () => {}, () => ({
+    health: async () => ({ status: 'ok', agent: 'linguard', version: 'test', api: 'v1' }),
+    analyze: async (texts) => ({ texts: texts.map(detect), model_errors: [] }),
+  }));
+  try {
+    const first = guard.protect([{ role: 'user', content: pii }], 1);
+    const expired = assert.rejects(first, /annulée ou a expiré/);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(guard.list(1).length, 1);
+    t.mock.timers.tick(120_001);
+    await expired;
+    assert.deepEqual(guard.list(1), []);
+    const second = guard.protect([{ role: 'user', content: pii }], 1);
+    const cancelled = assert.rejects(second, /annulée ou a expiré/);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await guard.close();
+    await cancelled;
+    assert.deepEqual(guard.list(1), []);
+    await assert.rejects(guard.protect([{ role: 'user', content: pii }], 1));
+  } finally {
+    await guard.close();
+    db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

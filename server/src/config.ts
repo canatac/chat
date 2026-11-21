@@ -1,7 +1,9 @@
 import fs from 'node:fs';
 import { z } from 'zod';
+import type { ChatMessage } from './llm/providers.js';
 
 const envSchema = z.object({
+  HOST: z.string().optional(),
   PORT: z.coerce.number().int().min(1).max(65535).default(4000),
   DATA_DIR: z.string().default('./data'),
   JWT_SECRET: z.string().min(8).default('dev-secret-change-me'),
@@ -37,7 +39,9 @@ const envSchema = z.object({
   LINK_FETCH_ALLOW_PRIVATE: z.string().default('0'),
 });
 
-export type Config = z.infer<typeof envSchema>;
+export type Config = z.infer<typeof envSchema> & {
+  reviewAI?: (messages: ChatMessage[], userId?: number) => Promise<ChatMessage[]>;
+};
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return envSchema.parse(env);

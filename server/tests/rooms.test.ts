@@ -10,6 +10,7 @@ import { test, type TestContext } from 'node:test';
 import jwt from 'jsonwebtoken';
 import WebSocket from 'ws';
 import { createServer } from '../src/app.js';
+import { cleanAnalyzer } from './mock-linguard.js';
 import { hashPassword } from '../src/auth.js';
 import { loadConfig } from '../src/config.js';
 import { DB } from '../src/db.js';
@@ -37,7 +38,7 @@ async function start(t: TestContext, seed?: (dir: string) => void, env: Record<s
     LINK_FETCH_ALLOW_PRIVATE: '1',
     ...env,
   });
-  const ctx = createServer(config, dir);
+  const ctx = createServer(config, dir, cleanAnalyzer);
   t.after(async () => {
     await ctx.close();
     fs.rmSync(dir, { recursive: true, force: true });

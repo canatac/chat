@@ -43,7 +43,7 @@ export async function deriveDocument(deps: DeriveDeps, file: FileRow, kind: Deri
     objet: meeting.title, débutPrévu: new Date(meeting.starts_at).toISOString(), fuseau: meeting.time_zone, ordreDuJour: meeting.agenda,
   }) : '';
   const messages: ChatMessage[] = [{ role: 'user', content: derivePrompt(kind, text.slice(0, 60000)) + context }];
-  const { text: out, usage } = await askLLM(deps.config, messages, { timeoutMs: 120000, temperature: 0.2 });
+  const { text: out, usage } = await askLLM(deps.config, messages, { timeoutMs: 120000, temperature: 0.2, userId: deps.userId });
   deps.db.insertUsage({
     userId: deps.userId,
     messageId: null,

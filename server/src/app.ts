@@ -22,6 +22,8 @@ import { mentionHints, mentionRecipients, positiveId, resolveMentions, type Ment
 import type { MessageReceipt } from './message-receipts.js';
 import { mountRoomAdmin, parseRoomId, publicAccount } from './room-admin.js';
 import { LEGACY_ROOM_ID, RoomDirectory, type Account } from './rooms.js';
+import { AIGuard, type AnalyzerFactory } from './security/ai-guard.js';
+import { mountSecurity } from './security/routes.js';
 
 export interface PublicUser {
   id: number;
@@ -139,7 +141,7 @@ export interface ServerContext {
   close: () => Promise<void>;
 }
 
-function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: number, directory: RoomDirectory) {
+function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: number, directory: RoomDirectory, analyzer?: AnalyzerFactory) {
   const uploadsDir = path.join(dataDir, 'uploads');
   fs.mkdirSync(uploadsDir, { recursive: true });
   db.agenda.endInterruptedCalls();
@@ -148,6 +150,12 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
   const clients = new Set<WebSocket>();
 
   const online = new Map<number, Set<WebSocket>>();
+  const guard = new AIGuard(db.security, notifyUser, analyzer, (userId) => {
+    const account = directory.getAccount(userId);
+    return Boolean(account && directory.accessRoom(account, roomId));
+  });
+  config = { ...config, reviewAI: (messages, userId) => guard.protect(messages, userId) };
+  mountSecurity(app, db.security, guard, () => broadcast({ type: 'securityPolicyChanged' }));
   const typing = new Map<WebSocket, { user: PublicUser; timer: NodeJS.Timeout }>();
   let assistantRequests = 0;
 
@@ -1490,6 +1498,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
   }
 
   function removeMember(accountId: number): void {
+    guard.cancelUser(accountId);
     const sockets = online.get(accountId);
     online.delete(accountId);
     if (sockets) {
@@ -1503,6 +1512,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
   }
 
   function archive(): void {
+    guard.cancelAll();
     if (activeCall) {
       db.endCall(activeCall.row.id);
       activeCall = null;
@@ -1516,10 +1526,10 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
     const account = directory.getAccount(accountId);
     if (account) activateContact(id, account);
   }
-  return { app, db, broadcast, connect, onlineUserIds, activateContact, removeMember, archive };
+  return { app, db, broadcast, connect, onlineUserIds, activateContact, removeMember, archive, guard };
 }
 
-export function createServer(config: Config, dataDir: string): ServerContext {
+export function createServer(config: Config, dataDir: string, analyzer?: AnalyzerFactory): ServerContext {
   const db = new DB(dataDir);
   const directory = new RoomDirectory(dataDir, db, config.ADMIN_NAMES, config.SUPERADMIN_NAMES);
   directory.bootstrapSuperadmin(hashPassword, config.SUPERADMIN_PASSWORD ?? '');
@@ -1531,7 +1541,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     if (existing) return existing;
     const roomDir = roomId === LEGACY_ROOM_ID ? dataDir : path.join(dataDir, 'rooms', String(roomId));
     const roomDb = roomId === LEGACY_ROOM_ID ? db : new DB(roomDir, -1);
-    const runtime = createRoomRuntime(config, roomDir, roomDb, roomId, directory);
+    const runtime = createRoomRuntime(config, roomDir, roomDb, roomId, directory, analyzer);
     runtimes.set(roomId, runtime);
     return runtime;
   }
@@ -1612,14 +1622,17 @@ export function createServer(config: Config, dataDir: string): ServerContext {
     });
   });
 
+  runtimeFor(LEGACY_ROOM_ID);
   return {
     config,
     db,
     broadcast: (payload) => runtimeFor(LEGACY_ROOM_ID).broadcast(payload),
     server,
     onlineUserIds: () => runtimes.get(LEGACY_ROOM_ID)?.onlineUserIds() ?? [],
-    close: () =>
-      new Promise((resolve) => {
+    close: async () => {
+      await Promise.all([...runtimes.values()].map((runtime) => runtime.guard.close()));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      return new Promise<void>((resolve) => {
         for (const client of wss.clients) client.terminate();
         wss.close();
         server.close(() => {
@@ -1631,6 +1644,7 @@ export function createServer(config: Config, dataDir: string): ServerContext {
           resolve();
         });
         server.closeAllConnections();
-      }),
+      });
+    },
   };
 }
