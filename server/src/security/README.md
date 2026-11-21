@@ -73,39 +73,44 @@ le même espace réseau que le backend.
 curl --http1.1 --max-time 5 -H 'Connection: close' http://127.0.0.1:8898/api/v1/health
 ```
 
-Avec Docker en réseau bridge, 127.0.0.1 désigne le conteneur. Pour joindre
-linguard-server installé sur l’hôte Linux, le backend doit partager cet espace
-réseau, par exemple avec le mode réseau host. Adapter alors l’adresse d’écoute
-HTTP et le reverse proxy au déploiement utilisé. La configuration Docker
-actuelle utilise un réseau bridge et doit être adaptée sur ce point avant le
-raccordement. L’écoute LinGuard reste strictement locale.
-
-Pour Docker Engine sur Linux avec un reverse proxy exécuté sur l’hôte, placer
-ces réglages dans le fichier .env de la chatroom.
+Avec Docker Engine sur Linux, les services chat et caddy utilisent le réseau
+host. Le backend atteint ainsi LinGuard sur 127.0.0.1:8898. Caddy dirige les
+requêtes HTTPS vers 127.0.0.1 et le PORT de la chatroom. Placer ces réglages
+dans le fichier .env de la chatroom.
 
 ```dotenv
 HOST=127.0.0.1
 PORT=4000
 ```
 
-Construire l’image puis recréer le conteneur avec le volume et le fichier .env
-du déploiement. Dans cet exemple, remplacer chat-data par le nom exact du
-volume existant avant le lancement.
+Après application du correctif de réseau à une installation Compose existante,
+valider puis recréer les services chat et caddy depuis le répertoire du projet.
 
 ```sh
-docker build -t chat-pme:linguard .
-docker run -d --name chat-pme --restart unless-stopped --network host \
-  --env-file "$PWD/.env" \
-  -v chat-data:/app/data \
-  -v "$PWD/.env:/app/.env:ro" \
-  chat-pme:linguard
+docker compose --profile https config --quiet
+docker compose --profile https up -d --no-deps --force-recreate chat caddy
 ```
 
-Le conteneur précédent nommé chat-pme doit avoir été arrêté et retiré avant
-ce lancement. Configurer le reverse proxy de l’hôte vers 127.0.0.1:4000.
-Si le reverse proxy est lui-même conteneurisé, son espace réseau et sa cible
-doivent être adaptés également. Le paramètre HOST fixe l’adresse HTTP
-d’écoute du backend.
+Cette commande recrée les deux conteneurs avec leurs volumes et montages
+déclarés dans Compose. Elle provoque une courte interruption HTTPS. Le paramètre
+HOST fixe l’adresse HTTP d’écoute du backend. Caddy reçoit CHAT_UPSTREAM depuis
+Compose pour suivre le PORT choisi.
+
+Vérifier ensuite le contrôle health depuis le backend.
+
+```sh
+docker inspect -f '{{.HostConfig.NetworkMode}}' chat-pme
+docker exec chat-pme node --input-type=module -e \
+  'import { LinGuardClient } from "./server/dist/security/linguard-client.js"; console.log(await new LinGuardClient().health());'
+```
+
+Le mode réseau attendu est host et health doit renvoyer status ok, agent linguard
+et api v1. Cliquer ensuite sur **Vérifier** dans la chatroom.
+
+Une réponse correcte sur l’hôte accompagnée de ECONNREFUSED dans le conteneur
+indique que le backend utilise encore un loopback isolé. Un redémarrage du
+processus utilise la configuration réseau du conteneur existant. La commande
+de recréation ci-dessus applique le nouveau mode réseau.
 
 LINGUARD_API_LISTEN doit activer l’API sur 127.0.0.1:8898. Les valeurs off et
 none désactivent l’API et provoquent le blocage des envois IA dans la chatroom.

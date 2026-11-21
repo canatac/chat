@@ -13,5 +13,5 @@ http://{$DOMAIN} {
 		X-Frame-Options "DENY"
 		Referrer-Policy "no-referrer"
 	}
-	reverse_proxy chat:4000
+	reverse_proxy {$CHAT_UPSTREAM:127.0.0.1:4000}
 }

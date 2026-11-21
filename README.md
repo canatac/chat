@@ -121,6 +121,10 @@ L’assistant de l’agenda utilise le `LLM_MODEL` du salon. Dans le chat, `/age
 
 ## Configuration du LLM
 
+Le backend utilise le service local LinGuard sur l’hôte Linux avant les envois
+de textes à l’IA. Pour le raccordement Docker et les politiques de détection,
+consulter le [guide MaelGard](server/src/security/README.md).
+
 Tout se configure par variables d'environnement (voir `.env.example`). Aucune dépendance à un
 fournisseur précis : choisissez le vôtre.
 
