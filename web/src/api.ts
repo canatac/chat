@@ -1,6 +1,7 @@
 import type { AdminStats, CallInfo, DocumentIds, FileEvent, FileFilters, FileItem, FileSort, Folder, Mention, MentionNotification, Message, MessageFile, MoveConflict, MoveDecision, NotificationPage, Room, RoomInvitation, RoomMember, RoomSession, User } from './types';
 import type { AgendaAssistantResponse, Meeting, MeetingInput, MeetingResponse } from './types';
 import type { MessageReceipt, UnreadMessages } from './types';
+import type { SecurityPolicy, SecurityState } from './types';
 
 interface FileListRequest {
   query: string;
@@ -100,6 +101,13 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  security: {
+    get: (signal?: AbortSignal) => req<SecurityState>('/api/security', { signal }),
+    check: () => req<{ health: SecurityState['health'] }>('/api/security/check', { method: 'POST' }),
+    save: (policy: SecurityPolicy) => req<{ policy: SecurityPolicy }>('/api/security/policy', { method: 'PUT', body: JSON.stringify(policy) }),
+    decide: (id: string, action: 'cancel' | 'anonymize') =>
+      req<void>('/api/security/reviews/' + id, { method: 'POST', body: JSON.stringify({ action }) }),
+  },
   register: (name: string, email: string, password: string, roomName: string) =>
     req<RoomSession & { token: string }>('/api/auth/register', {
       method: 'POST',

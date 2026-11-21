@@ -13,12 +13,14 @@ import DocDrawer from './components/DocDrawer';
 import MeetingDocumentDialog from './components/MeetingDocumentDialog';
 import MessageRow from './components/MessageRow';
 import NotificationsDrawer from './components/NotificationsDrawer';
+import SecurityControls from './components/SecurityControls';
 import { mentionLabel } from './systemNotifications';
 import { chatColors } from './theme';
 import type { AgendaAssistantResponse, CallInfo, ConversationActivity, Meeting, MeetingArtifact, MentionNotification, Message, Room, User } from './types';
 import useMentionNotifications from './useMentionNotifications';
 import useMessageActivity from './useMessageActivity';
 import useCallRingtone from './useCallRingtone';
+import useSecurity from './useSecurity';
 import { ChatSocket } from './ws';
 
 const PAGE_SIZE = 50;
@@ -106,6 +108,8 @@ export default function Chat({ token, user, room, adminOpen, onAdmin, onLogout }
   const [unreadError, setUnreadError] = useState(false);
   const feed = useMentionNotifications(socket, connection === 'online', room, user.id);
   const ringtone = useCallRingtone(socket, user.id, room.id);
+  const security = useSecurity(socket, connection === 'online');
+  const [securityOpen, setSecurityOpen] = useState(false);
 
   useEffect(() => {
     const request = new AbortController();
@@ -143,7 +147,7 @@ export default function Chat({ token, user, room, adminOpen, onAdmin, onLogout }
   const liveTail = useRef<Message[]>([]);
   const timelineVersion = useRef(0);
   const navigationRequest = useRef<AbortController | null>(null);
-  const conversationVisible = !(adminOpen || docOpen || statsOpen || callOpen || agendaOpen || notificationsOpen || document);
+  const conversationVisible = !(adminOpen || docOpen || statsOpen || callOpen || agendaOpen || notificationsOpen || document || securityOpen || security.review);
   const { receipts, unread, refreshUnread } = useMessageActivity(socket, connection === 'online', messages, user.id, listRef, conversationVisible);
   const typing = activity.typing.filter((person) => person.id !== user.id)
     .map((person) => usersById.get(person.id)?.name ?? person.name);
@@ -465,6 +469,7 @@ export default function Chat({ token, user, room, adminOpen, onAdmin, onLogout }
         onNotifications={() => { setNotificationError(null); setNotificationsOpen(true); dismissToast(); void feed.load(); }}
         onAdmin={onAdmin}
         onStats={() => setStatsOpen(true)}
+        onSecurity={() => setSecurityOpen(true)}
         onLogout={onLogout}
       />
       <Box component="main" sx={{ position: 'relative', flex: 1, minHeight: 0 }}>
@@ -581,6 +586,7 @@ export default function Chat({ token, user, room, adminOpen, onAdmin, onLogout }
           </Box>
         )}
       </Box>
+      <SecurityControls security={security} settingsOpen={securityOpen} onClose={() => setSecurityOpen(false)} />
       <ChatComposer onPublished={publish} members={users} ownId={user.id} onTyping={reportTyping}
         typing={typing} assistantResponding={activity.assistantResponding} onAgenda={(result) => {
         setAgendaResult(result);

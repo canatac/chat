@@ -1,6 +1,9 @@
 import type { CallInfo, ConversationActivity, Meeting, MentionNotification, Message, MessageReceipt, User } from './types';
+import type { SecurityReview } from './types';
 
 export interface WsEvent {
+  review?: SecurityReview;
+  reviewId?: string;
   type: string;
   message?: Message;
   messages?: Message[];

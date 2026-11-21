@@ -62,6 +62,27 @@ export interface UnreadMessages {
   firstId: number | null;
 }
 
+export interface SecurityPolicy {
+  detection: 'block' | 'anonymize' | 'ask';
+  modelErrors: 'fail-closed' | 'fail-open';
+  version: number;
+}
+
+export interface SecurityReview {
+  id: string;
+  expiresAt: number;
+  policyVersion: number;
+  types: string[];
+  count: number;
+  maxScore: number | null;
+}
+
+export interface SecurityState {
+  policy: SecurityPolicy;
+  health: { available: boolean; error: string | null };
+  reviews: SecurityReview[];
+}
+
 export interface ConversationActivity {
   typing: Pick<User, 'id' | 'name'>[];
   assistantResponding: boolean;

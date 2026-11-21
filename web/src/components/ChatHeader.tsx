@@ -8,6 +8,7 @@ import NotificationsNoneRoundedIcon from '@mui/icons-material/NotificationsNoneR
 import PhoneIcon from '@mui/icons-material/Phone';
 import VolumeOffOutlinedIcon from '@mui/icons-material/VolumeOffOutlined';
 import VolumeUpOutlinedIcon from '@mui/icons-material/VolumeUpOutlined';
+import ShieldOutlinedIcon from '@mui/icons-material/ShieldOutlined';
 import { Avatar, Badge, Box, Button, ButtonBase, Divider, ListItemIcon, Menu, MenuItem, Tooltip, Typography } from '@mui/material';
 import { useState } from 'react';
 import { chatColors } from '../theme';
@@ -36,6 +37,7 @@ interface Props {
   onNotifications: () => void;
   onAdmin: () => void;
   onStats: () => void;
+  onSecurity: () => void;
   onLogout: () => void;
 }
 
@@ -65,7 +67,7 @@ const actionStyle = {
 };
 
 export default function ChatHeader({
-  roomName, user, users, onlineIds, connection, hasCall, onCall, onDocuments, onAdmin, onStats, onLogout,
+  roomName, user, users, onlineIds, connection, hasCall, onCall, onDocuments, onAdmin, onStats, onSecurity, onLogout,
   pendingInvitations, agendaOpen, onAgenda, unreadNotifications, notificationsOpen, onNotifications,
   ringtoneActive, onRingtoneToggle, onRingtoneTest,
 }: Props) {
@@ -195,6 +197,10 @@ export default function ChatHeader({
             Tester la sonnerie
           </MenuItem>
           {(user.role === 'admin' || user.role === 'superadmin') && [
+            <MenuItem key="security" onClick={() => { closeAccount(); onSecurity(); }}>
+              <ListItemIcon><ShieldOutlinedIcon fontSize="small" /></ListItemIcon>
+              Sécurité MaelGard
+            </MenuItem>,
             <MenuItem key="admin" onClick={() => { closeAccount(); onAdmin(); }}>
               <ListItemIcon><AdminPanelSettingsOutlinedIcon fontSize="small" /></ListItemIcon>
               Administration
