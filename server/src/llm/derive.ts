@@ -6,6 +6,7 @@ import { askLLM, llmConfigured } from './index.js';
 import { chunkText, extractText } from './rag.js';
 import { costUsd } from './pricing.js';
 import type { ChatMessage } from './providers.js';
+import { sourcedMessage } from './prompt.js';
 
 export type DeriveKind = 'resume' | 'cr';
 
@@ -18,10 +19,14 @@ export class HttpError extends Error {
 }
 
 export function derivePrompt(kind: DeriveKind, transcript: string): string {
+  return deriveMessage(kind, transcript).content;
+}
+
+function deriveMessage(kind: DeriveKind, transcript: string, context = ''): ChatMessage {
   if (kind === 'resume') {
-    return `Voici la transcription brute d'un appel d'équipe :\n\n${transcript}\n\nRédige un résumé en 10 à 15 lignes maximum : contexte de l'appel, points principaux abordés, décisions éventuelles, actions à suivre. Ne invente rien : si la transcription est illisible ou hors sujet, dis-le clairement.`;
+    return sourcedMessage('user', ["Voici la transcription brute d'un appel d'équipe :\n\n", { kind: 'documents', text: transcript }, "\n\nRédige un résumé en 10 à 15 lignes maximum : contexte de l'appel, points principaux abordés, décisions éventuelles, actions à suivre. Ne invente rien : si la transcription est illisible ou hors sujet, dis-le clairement.", { kind: 'agenda', text: context }]);
   }
-  return `Voici la transcription brute d'un appel d'équipe :\n\n${transcript}\n\nRédige un compte-rendu standard et propre de cette réunion, structuré ainsi : date et objet si identifiables, participants mentionnés, points abordés, décisions prises, actions à suivre (avec responsable si identifiable dans la transcription), questions ouvertes. Ne invente rien : si la transcription est illisible, partielle ou hors sujet, dis-le clairement au lieu de fabriquer un compte-rendu.`;
+  return sourcedMessage('user', ["Voici la transcription brute d'un appel d'équipe :\n\n", { kind: 'documents', text: transcript }, "\n\nRédige un compte-rendu standard et propre de cette réunion, structuré ainsi : date et objet si identifiables, participants mentionnés, points abordés, décisions prises, actions à suivre (avec responsable si identifiable dans la transcription), questions ouvertes. Ne invente rien : si la transcription est illisible, partielle ou hors sujet, dis-le clairement au lieu de fabriquer un compte-rendu.", { kind: 'agenda', text: context }]);
 }
 
 export interface DeriveDeps {
@@ -42,7 +47,7 @@ export async function deriveDocument(deps: DeriveDeps, file: FileRow, kind: Deri
   const context = meeting ? '\n\nContexte de la réunion planifiée (à distinguer de ce qui est attesté par la transcription) : ' + JSON.stringify({
     objet: meeting.title, débutPrévu: new Date(meeting.starts_at).toISOString(), fuseau: meeting.time_zone, ordreDuJour: meeting.agenda,
   }) : '';
-  const messages: ChatMessage[] = [{ role: 'user', content: derivePrompt(kind, text.slice(0, 60000)) + context }];
+  const messages: ChatMessage[] = [deriveMessage(kind, text.slice(0, 60000), context)];
   const { text: out, usage } = await askLLM(deps.config, messages, { timeoutMs: 120000, temperature: 0.2, userId: deps.userId });
   deps.db.insertUsage({
     userId: deps.userId,

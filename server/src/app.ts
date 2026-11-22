@@ -155,7 +155,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
     return Boolean(account && directory.accessRoom(account, roomId));
   });
   config = { ...config, reviewAI: (messages, userId) => guard.protect(messages, userId) };
-  mountSecurity(app, db.security, guard, () => broadcast({ type: 'securityPolicyChanged' }));
+  mountSecurity(app, db.security, guard, () => broadcast({ type: 'securityPolicyChanged' }), (userId) => notifyUser(userId, { type: 'securityMaskingChanged' }));
   const typing = new Map<WebSocket, { user: PublicUser; timer: NodeJS.Timeout }>();
   let assistantRequests = 0;
 

@@ -1,9 +1,11 @@
 import type { Config } from '../config.js';
 import type { Usage } from './pricing.js';
+import type { PromptSource } from './prompt.js';
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
+  sources?: PromptSource[];
 }
 
 export interface ChatOptions {

@@ -1,4 +1,5 @@
 import type { ContextRow } from '../db.js';
+import { sourcedMessage, type PromptPart } from './prompt.js';
 
 export type CommandName = 'resume' | 'solve' | 'ask' | 'lien' | 'help';
 
@@ -46,20 +47,26 @@ export function formatContext(rows: ContextRow[]): string {
 }
 
 export function buildUserPrompt(cmd: Command, context: string, docs = ''): string {
-  const ctx = docs ? `${docs}\n\nConversation récente :\n${context}` : context;
+  return buildUserMessage(cmd, context, docs).content;
+}
+
+export function buildUserMessage(cmd: Command, context: string, docs = '') {
+  const ctx: PromptPart[] = docs
+    ? [{ kind: 'documents', text: docs }, '\n\nConversation récente :\n', { kind: 'history', text: context }]
+    : [{ kind: 'history', text: context }];
   switch (cmd.name) {
     case 'resume': {
       const n = cmd.arg ? Number.parseInt(cmd.arg, 10) : Number.NaN;
       const count = Number.isFinite(n) && n > 0 ? n : 50;
-      return `Voici les ${count} derniers messages de la chatroom, du plus ancien au plus récent :\n\n${ctx}\n\nRédige un compte-rendu structuré de cette conversation : thèmes abordés, décisions prises, actions à suivre (avec responsable si mentionné), questions ouvertes. Si ce n'est pas une réunion, résume simplement les points importants.`;
+      return sourcedMessage('user', [`Voici les ${count} derniers messages de la chatroom, du plus ancien au plus récent :\n\n`, ...ctx, "\n\nRédige un compte-rendu structuré de cette conversation : thèmes abordés, décisions prises, actions à suivre (avec responsable si mentionné), questions ouvertes. Si ce n'est pas une réunion, résume simplement les points importants."]);
     }
     case 'solve':
-      return `Contexte de la chatroom et documents :\n\n${ctx}\n\nProblème soulevé : ${cmd.arg || '(non précisé)'}\n\nPropose 2 à 4 pistes de solution concrètes, ordonnées par pertinence. Pour chaque piste : actions à mener, avantage, risque principal, prochaine étape immédiate. Cite les documents utilisés quand c'est pertinent.`;
+      return sourcedMessage('user', ['Contexte de la chatroom et documents :\n\n', ...ctx, '\n\nProblème soulevé : ', { kind: 'question', text: cmd.arg || '(non précisé)' }, "\n\nPropose 2 à 4 pistes de solution concrètes, ordonnées par pertinence. Pour chaque piste : actions à mener, avantage, risque principal, prochaine étape immédiate. Cite les documents utilisés quand c'est pertinent."]);
     case 'ask':
-      return `Contexte (chatroom + documents) :\n\n${ctx}\n\nQuestion : ${cmd.arg || '(non précisée)'}\n\nRéponds à la question en t'appuyant d'abord sur les documents de référence fournis quand ils sont pertinents, puis sur la conversation. Indique entre parenthèses le nom du document utilisé.`;
+      return sourcedMessage('user', ['Contexte (chatroom + documents) :\n\n', ...ctx, '\n\nQuestion : ', { kind: 'question', text: cmd.arg || '(non précisée)' }, "\n\nRéponds à la question en t'appuyant d'abord sur les documents de référence fournis quand ils sont pertinents, puis sur la conversation. Indique entre parenthèses le nom du document utilisé."]);
     case 'lien':
-      return '';
+      return sourcedMessage('user', []);
     case 'help':
-      return '';
+      return sourcedMessage('user', []);
   }
 }

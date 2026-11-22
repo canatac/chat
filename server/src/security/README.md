@@ -45,13 +45,44 @@ par salon et seuls ses administrateurs et superadministrateurs peuvent la modifi
 | --- | --- |
 | Bloquer l’envoi | Une détection empêche l’appel au fournisseur IA. |
 | Masquer automatiquement et envoyer | Les extraits détectés sont remplacés avant l’appel IA. |
-| Laisser l’utilisateur masquer ou annuler | Une fenêtre personnelle présente les types, le nombre et le score maximal brut. |
+| Laisser l’utilisateur masquer ou annuler | Une fenêtre personnelle indique les types, le nombre d’occurrences et leur provenance, puis propose de masquer pour cette demande ou de mémoriser ce masquage. |
 
 Le choix utilisateur expire après deux minutes. Une seule décision est acceptée
 pour chaque demande, y compris avec plusieurs onglets. Une modification de
 politique ou la révocation de l’accès au salon annule les décisions en attente.
 Les requêtes initiales restent dans l’historique de la chatroom selon son
 fonctionnement habituel.
+
+### Comprendre une alerte et continuer
+
+Une question sans donnée personnelle peut utiliser un historique ou des documents
+qui en contiennent. Le dialogue distingue **Question actuelle**, **Historique de
+la conversation**, **Documents utilisés**, **Contexte de l’agenda** et, si
+nécessaire, les instructions ou un autre contexte. Le compteur représente des
+occurrences ; une même donnée peut apparaître plusieurs fois.
+
+1. **Masquer et envoyer** remplace toutes les détections dans la copie transmise
+   au fournisseur IA, pour cette demande.
+2. Cocher **Mémoriser ce masquage pour mes prochaines demandes dans ce salon**,
+   puis **Mémoriser et envoyer**, conserve le choix pour les mêmes valeurs et
+   types détectés lors des demandes suivantes de cet utilisateur. Les nouvelles
+   données détectées demandent une nouvelle décision. Les messages et documents
+   originaux du salon restent consultables.
+3. **Mes masquages**, près de l’indicateur MaelGard, permet d’oublier ses choix.
+   Ils restent disponibles après rechargement et redémarrage du serveur.
+
+Ces choix sont propres à l’utilisateur et au salon. Ils ne modifient pas la
+politique de l’administrateur. Tout changement de politique les réinitialise pour
+le salon et annule les demandes en attente. En mode **Bloquer l’envoi**, le
+message explique les sources concernées et invite à demander l’autorisation de
+masquage à un administrateur ; aucun choix mémorisé ne contourne ce blocage.
+
+Chaque nouvel envoi reste intégralement analysé par LinGuard avant masquage. La
+mémorisation ne vaut jamais autorisation d’envoyer du texte brut ni de passer
+outre une panne. Les tables `security_mask_rules` et `security_mask_key`
+conservent des empreintes HMAC-SHA-256 (type et valeur exacte) et une clé locale
+propre au salon, sans copie des valeurs détectées. Les extraits personnels ne
+figurent ni dans les événements de sécurité ni dans les messages de dialogue.
 
 La politique initiale bloque les détections et les erreurs de modèles.
 L’administrateur peut autoriser **Continuer avec les détections disponibles**
