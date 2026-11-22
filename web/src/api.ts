@@ -308,6 +308,8 @@ export const api = {
     req<{ file: FileItem }>(`/api/files/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   deleteFile: (id: number) => req<{ ok: boolean }>(`/api/files/${id}`, { method: 'DELETE' }),
   fileDetail: (id: number) => req<{ file: FileItem; folderPath: Folder[]; history: FileEvent[] }>(`/api/files/${id}`),
+  analyzeFile: (id: number) => req<{ file: FileItem }>(`/api/files/${id}/analyze`, { method: 'POST' }),
+  documentResources: () => req<{ usedBytes: number; limits: { uploadBytes: number; storageBytes: number }; queue: { pending: number; concurrency: number } }>('/api/documents/resources'),
   events: (limit = 100) => req<{ events: FileEvent[] }>(`/api/events?limit=${limit}`),
   rtcConfig: () => req<{ iceServers: RTCIceServer[] }>('/api/rtc-config'),
 };

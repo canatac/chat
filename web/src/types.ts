@@ -123,6 +123,7 @@ export interface FileItem {
   messageId: number | null;
   folderId: number | null;
   user: { id: number; name: string };
+  analysis?: { status: 'pending' | 'processing' | 'ready' | 'blocked'; error: string | null };
 }
 
 export type FileColumn = 'name' | 'date' | 'size';
