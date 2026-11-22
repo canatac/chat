@@ -1,5 +1,4 @@
-import fs from 'node:fs';
-import path from 'node:path';
+import { extractDocument } from '../documents/extract.js';
 import type { DB } from '../db.js';
 
 const STOPWORDS = new Set([
@@ -48,25 +47,7 @@ export function chunkText(text: string, size = 1200, overlap = 200): string[] {
 }
 
 export async function extractText(filePath: string, mime: string, name: string): Promise<string> {
-  const ext = path.extname(name).toLowerCase();
-  if (mime.startsWith('text/') || ['.md', '.csv', '.json', '.log', '.xml', '.yaml', '.yml'].includes(ext)) {
-    return fs.readFileSync(filePath, 'utf8');
-  }
-  if (ext === '.html' || ext === '.htm' || mime.includes('html')) {
-    return fs
-      .readFileSync(filePath, 'utf8')
-      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/\s+/g, ' ');
-  }
-  if (mime === 'application/pdf' || ext === '.pdf') {
-    const mod = await import('pdf-parse/lib/pdf-parse.js');
-    const pdfParse = (mod.default ?? mod) as (data: Buffer) => Promise<{ text: string }>;
-    const res = await pdfParse(fs.readFileSync(filePath));
-    return res.text ?? '';
-  }
-  return '';
+  return extractDocument(filePath, mime, name);
 }
 
 export interface RagHit {

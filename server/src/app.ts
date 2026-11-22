@@ -4,7 +4,6 @@ import { randomUUID } from 'node:crypto';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import multer from 'multer';
 import { WebSocket, WebSocketServer } from 'ws';
 import { z } from 'zod';
 import { canEnterMeeting, mountAgenda } from './agenda.js';
@@ -15,7 +14,9 @@ import { DB, type CallRow, type FileEventListRow, type FileListRow, type FileRow
 import { MoveConflicts, moveDecision, planDocumentMove } from './document-moves.js';
 import { deriveDocument, HttpError, type DeriveKind } from './llm/derive.js';
 import { handleCommand } from './llm/run.js';
-import { chunkText, extractText } from './llm/rag.js';
+import { DocumentQueue } from './documents/queue.js';
+import { FileResources } from './documents/resources.js';
+import { DOCUMENT_LIMITS, DocumentError, MiB } from './documents/limits.js';
 import { pricesFor } from './llm/pricing.js';
 import { isAudioMime, sttConfigured, transcribeFile } from './llm/stt.js';
 import { mentionHints, mentionRecipients, positiveId, resolveMentions, type Mention } from './mentions.js';
@@ -40,6 +41,7 @@ export interface PublicFile {
   updatedAt: string | null;
   callId: number | null;
   folderId: number | null;
+  analysis: { status: FileRow['document_status']; error: string | null };
 }
 
 export interface PublicFolder {
@@ -84,6 +86,7 @@ export function toPublicFile(f: FileRow): PublicFile {
     updatedAt: f.updated_at ? new Date(f.updated_at).toISOString() : null,
     callId: f.call_id,
     folderId: f.folder_id ?? null,
+    analysis: { status: f.document_status, error: f.document_error },
   };
 }
 
@@ -380,7 +383,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       const date = new Date().toLocaleString('fr-FR');
       const tName = `🎙️ Transcription — ${displayName} (${date}).txt`;
       const tFname = `${Date.now()}-tr-${Math.random().toString(36).slice(2, 8)}.txt`;
-      fs.writeFileSync(path.join(uploadsDir, tFname), text);
+      config.fileResources!.writeText(path.join(uploadsDir, tFname), text);
       const transcriptRow = db.insertFile(
         db.getBot().id,
         null,
@@ -392,7 +395,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
         null,
         'transcript',
       );
-      chunkText(text, config.RAG_CHUNK_SIZE).forEach((c, i) => db.insertChunk(transcriptRow.id, i, c));
+      config.documents!.enqueue(db, transcriptRow.id);
       db.insertUsage({
         userId,
         messageId: fileRow.message_id,
@@ -692,16 +695,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
     res.json({ unread: db.unreadMentions(userId) });
   });
 
-  const upload = multer({
-    storage: multer.diskStorage({
-      destination: uploadsDir,
-      filename: (_req, file, cb) => {
-        const safe = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-80);
-        cb(null, `${Date.now()}-${randomUUID()}-${safe}`);
-      },
-    }),
-    limits: { fileSize: config.MAX_UPLOAD_MB * 1024 * 1024 },
-  });
+  const upload = config.fileResources!.upload(uploadsDir, config.MAX_UPLOAD_MB);
 
   function discardUploadedFile(file?: Express.Multer.File): void {
     if (!file) return;
@@ -717,19 +711,31 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
   }
 
   async function indexUploadedDocument(file: FileRow): Promise<void> {
-    try {
-      if (isAudioMime(file.mime, file.name)) {
-        await transcribeAndStore(file, file.name, file.mime, file.user_id);
-        return;
-      }
-      const text = await extractText(path.join(uploadsDir, file.path), file.mime, file.name);
-      if (text.trim()) chunkText(text, config.RAG_CHUNK_SIZE).forEach((chunk, i) => db.insertChunk(file.id, i, chunk));
-    } catch {
-      // L’extraction est facultative après l’enregistrement du fichier.
-    }
+    config.documents!.enqueue(db, file.id);
+    if (isAudioMime(file.mime, file.name)) await transcribeAndStore(file, file.name, file.mime, file.user_id);
   }
 
-  app.post('/api/files', upload.single('file'), (req, res) => {
+  app.get('/api/documents/resources', (_req, res) => {
+    res.json({
+      limits: { uploadBytes: config.MAX_UPLOAD_MB * MiB, recordingBytes: config.RECORDING_MAX_MB * MiB,
+        linkBytes: config.MAX_LINK_FETCH_MB * MiB, storageBytes: config.fileResources!.maxBytes,
+        documentBytes: DOCUMENT_LIMITS.fileBytes, pdfPages: DOCUMENT_LIMITS.pdfPages,
+        textChars: DOCUMENT_LIMITS.textChars, imagePixels: DOCUMENT_LIMITS.imagePixels },
+      usedBytes: config.fileResources!.usedBytes(), queue: config.documents!.stats(),
+    });
+  });
+
+  app.post('/api/files/:id/analyze', (req, res) => {
+    try {
+      config.documents!.enqueue(db, Number(req.params.id));
+      docsChanged();
+      res.status(202).json({ file: toPublicFile(db.getFileById(Number(req.params.id))!) });
+    } catch (error) {
+      res.status(error instanceof DocumentError ? error.statusCode : 500).json({ error: error instanceof Error ? error.message : 'Analyse impossible.' });
+    }
+  });
+
+  app.post('/api/files', upload, (req, res) => {
     if (!req.file) {
       res.status(400).json({ error: 'Champ "file" requis' });
       return;
@@ -779,7 +785,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
   const fileIdField = z.union([z.number(), z.string().regex(/^\d+$/).transform(Number)]).pipe(z.number().int().positive().safe());
   const groupFilesSchema = z.object({ name: z.string().trim().min(1).max(120), targetId: fileIdField, sourceId: fileIdField.optional() });
 
-  app.post('/api/files/group', upload.single('file'), (req, res) => {
+  app.post('/api/files/group', upload, (req, res) => {
     const uploaded = req.file;
     const parsed = groupFilesSchema.safeParse(req.body);
     if (!parsed.success || Boolean(parsed.data.sourceId) === Boolean(uploaded)) {
@@ -1210,16 +1216,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
     res.download(path.join(uploadsDir, file.path), file.name);
   });
 
-  const recordUpload = multer({
-    storage: multer.diskStorage({
-      destination: uploadsDir,
-      filename: (_req, file, cb) => {
-        const safe = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-80);
-        cb(null, `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safe}`);
-      },
-    }),
-    limits: { fileSize: config.RECORDING_MAX_MB * 1024 * 1024 },
-  });
+  const recordUpload = config.fileResources!.upload(uploadsDir, config.RECORDING_MAX_MB);
 
   app.post('/api/calls/:id/recording/start', (req, res) => {
     if (!activeCall || activeCall.row.id !== Number(req.params.id)) {
@@ -1253,7 +1250,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
     res.json({ call: serializeCall() });
   });
 
-  app.post('/api/calls/:id/recording', recordUpload.single('file'), (req, res) => {
+  app.post('/api/calls/:id/recording', recordUpload, (req, res) => {
     const call = db.getCallById(Number(req.params.id));
     if (!call) {
       discardUploadedFile(req.file);
@@ -1313,6 +1310,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       'recording',
     );
     if (recordingId) db.setRecordingFile(recordingId, fileRow.id);
+    config.documents!.enqueue(db, fileRow.id);
     logDocEvent(req.user?.id ?? -1, { fileId: fileRow.id, folderId: fileRow.folder_id ?? null, action: 'file_created', detail: `enregistrement d'appel « ${displayName} » déposé` });
     docsChanged();
     const message = serializeMessage(db, messageRow);
@@ -1343,7 +1341,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       docsChanged();
       res.status(201).json({ file: { ...toPublicFile(row), messageId: row.message_id, user: toPublicUser(db.getUserById(row.user_id)!) } });
     } catch (err) {
-      if (err instanceof HttpError) {
+      if (err instanceof HttpError || err instanceof DocumentError) {
         res.status(err.statusCode).json({ error: err.message });
         return;
       }
@@ -1526,11 +1524,15 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
     const account = directory.getAccount(accountId);
     if (account) activateContact(id, account);
   }
+  config.documents!.register(db, uploadsDir, docsChanged);
   return { app, db, broadcast, connect, onlineUserIds, activateContact, removeMember, archive, guard };
 }
 
 export function createServer(config: Config, dataDir: string, analyzer?: AnalyzerFactory): ServerContext {
   const db = new DB(dataDir);
+  const resources = new FileResources(dataDir, config.FILE_STORAGE_MAX_MB * MiB, config.FILE_STORAGE_MIN_FREE_MB * MiB);
+  const documents = new DocumentQueue(config.TIKA_URL, config.RAG_CHUNK_SIZE, resources);
+  config = { ...config, fileResources: resources, documents };
   const directory = new RoomDirectory(dataDir, db, config.ADMIN_NAMES, config.SUPERADMIN_NAMES);
   directory.bootstrapSuperadmin(hashPassword, config.SUPERADMIN_PASSWORD ?? '');
   const runtimes = new Map<number, ReturnType<typeof createRoomRuntime>>();
@@ -1630,6 +1632,7 @@ export function createServer(config: Config, dataDir: string, analyzer?: Analyze
     server,
     onlineUserIds: () => runtimes.get(LEGACY_ROOM_ID)?.onlineUserIds() ?? [],
     close: async () => {
+      await documents.close();
       await Promise.all([...runtimes.values()].map((runtime) => runtime.guard.close()));
       await new Promise<void>((resolve) => setImmediate(resolve));
       return new Promise<void>((resolve) => {

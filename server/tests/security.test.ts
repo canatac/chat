@@ -27,7 +27,7 @@ function detect(text: string) {
   }));
 }
 
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, tikaUrl?: string) {
   let failure = false;
   let modelErrors: unknown[] = [];
   const sent: string[] = [];
@@ -46,6 +46,7 @@ async function fixture(t: TestContext) {
   legacy.createUser('Bob', hashPassword(password));
   legacy.close();
   const config = loadConfig({ JWT_SECRET: 'test-linguard-secret', ADMIN_NAMES: 'Alice', LLM_MODEL: 'test',
+    ...(tikaUrl ? { TIKA_URL: tikaUrl } : {}),
     LLM_BASE_URL: 'http://127.0.0.1:' + (provider.address() as AddressInfo).port + '/v1' });
   const app = createServer(config, dir, () => ({
     health: async () => {
@@ -102,9 +103,37 @@ async function fixture(t: TestContext) {
     const { messages } = await (await api('/messages', admin)).json() as { messages: { user: { isBot: boolean }; content: string }[] };
     return messages.find((message) => message.user.isBot && message.content.includes(part));
   });
-  return { dir, db: app.db, api, admin, member, state, policy, send, wait, bot, sent, analyzed,
+  const upload = async (name: string, bytes: Buffer) => {
+    const body = new FormData(); body.append('file', new Blob([bytes]), name); body.append('post', 'false');
+    const response = await fetch(base + '/api/files', { method: 'POST', headers: { Authorization: 'Bearer ' + admin }, body });
+    assert.equal(response.status, 201);
+    return (await response.json() as { file: { id: number } }).file.id;
+  };
+  return { dir, db: app.db, api, admin, member, state, policy, send, wait, bot, sent, analyzed, upload,
     unavailable: () => { failure = true; }, modelErrors: () => { modelErrors = [{ error: pii }]; } };
 }
+
+test('un contact extrait par OCR reste soumis au blocage puis au masquage LinGuard avant le fournisseur', async (t) => {
+  const tika = http.createServer(async (req, res) => {
+    for await (const _chunk of req) { /* données binaires locales */ }
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify([{ 'Content-Type': 'application/pdf', 'xmpTPg:NPages': 1, 'tk:content': 'Projet confidentiel. Contact du projet : ' + pii }]));
+  });
+  await new Promise<void>((resolve) => tika.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { tika.closeAllConnections(); await new Promise<void>((resolve) => tika.close(() => resolve())); });
+  const f = await fixture(t, 'http://127.0.0.1:' + (tika.address() as AddressInfo).port);
+  const id = await f.upload('scan.pdf', Buffer.from('%PDF-test'));
+  await f.wait(async () => f.db.getFileById(id)?.document_status === 'ready' ? true : undefined);
+  await f.send('/ask Quel est le contact du projet ?');
+  await f.bot('politique MaelGard bloque');
+  assert.equal(f.sent.length, 0);
+  await f.policy('anonymize');
+  await f.send('/ask Donne le contact du projet');
+  await f.bot('Réponse externe 1');
+  assert.equal(f.sent[0].includes(pii), false);
+  assert.match(f.sent[0], /\[EMAIL\]/);
+  assert.ok(f.analyzed.some((texts) => texts.some((text) => text.includes(pii))));
+});
 
 test('bloque par défaut, masque le contexte complet et persiste uniquement les métadonnées dans l’audit', async (t) => {
   const f = await fixture(t);

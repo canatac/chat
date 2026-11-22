@@ -38,7 +38,11 @@ export interface DeriveDeps {
 
 export async function deriveDocument(deps: DeriveDeps, file: FileRow, kind: DeriveKind): Promise<FileRow> {
   const abs = path.join(deps.uploadsDir, file.path);
-  const text = await extractText(abs, file.mime, file.name);
+  const current = deps.db.getFileById(file.id);
+  if (!current) throw new HttpError(404, 'Fichier introuvable.');
+  if (current.document_status === 'blocked') throw new HttpError(422, current.document_error ?? 'Document non analysé.');
+  if (deps.config.documents && current.document_status !== 'ready') throw new HttpError(409, 'Analyse documentaire en cours. Attendre sa fin puis réessayer.');
+  const text = deps.db.documentText(file.id) ?? await extractText(abs, file.mime, file.name);
   if (!text.trim()) throw new HttpError(400, "Pas de texte exploitable dans ce fichier (transcription ou document texte requis)");
   if (text.trim().length < 100) throw new HttpError(422, "Transcription trop courte ou vide (< 100 caractères) — l'enregistrement était probablement muet/inaudible. Vérifie le fichier audio puis regénère.");
   if (!llmConfigured(deps.config)) throw new HttpError(503, 'LLM non configuré : définir LLM_MODEL dans le .env pour générer un résumé / compte-rendu');
@@ -64,8 +68,10 @@ export async function deriveDocument(deps: DeriveDeps, file: FileRow, kind: Deri
   const base = file.name.replace(/\.[^.]+$/, '');
   const outName = `${base} — ${kind === 'resume' ? 'résumé' : 'compte-rendu'}.md`;
   const fname = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${outName.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-80)}`;
-  fs.writeFileSync(path.join(deps.uploadsDir, fname), out);
+  if (deps.config.fileResources) deps.config.fileResources.writeText(path.join(deps.uploadsDir, fname), out);
+  else fs.writeFileSync(path.join(deps.uploadsDir, fname), out);
   const row = deps.db.insertFile(deps.userId, null, outName, 'text/markdown', Buffer.byteLength(out), fname, file.call_id, null, kind === 'cr' ? 'report' : 'summary');
-  chunkText(out, deps.config.RAG_CHUNK_SIZE).forEach((c, i) => deps.db.insertChunk(row.id, i, c));
+  if (deps.config.documents) deps.config.documents.enqueue(deps.db, row.id);
+  else chunkText(out, deps.config.RAG_CHUNK_SIZE).forEach((c, i) => deps.db.insertChunk(row.id, i, c));
   return row;
 }

@@ -54,6 +54,8 @@ export interface FileRow {
   created_at: number;
   folder_id: number | null;
   updated_at: number | null;
+  document_status: 'pending' | 'processing' | 'ready' | 'blocked';
+  document_error: string | null;
 }
 
 export interface FolderRow {
@@ -267,12 +269,21 @@ export class DB {
     for (const [col, def] of [
       ['folder_id', 'INTEGER REFERENCES folders(id) ON DELETE SET NULL'],
       ['updated_at', 'INTEGER'],
+      ['document_status', "TEXT NOT NULL DEFAULT 'pending'"],
+      ['document_error', 'TEXT'],
     ] as const) {
       if (!fileCols.some((c) => c.name === col)) {
         this.db.exec(`ALTER TABLE files ADD COLUMN ${col} ${def}`);
       }
     }
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_files_folder ON files(folder_id)');
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_files_document_status ON files(document_status, id);
+      CREATE TABLE IF NOT EXISTS document_text (
+        file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+        content TEXT NOT NULL
+      );
+    `);
     const userColumns = this.db.prepare('PRAGMA table_info(users)').all() as unknown as { name: string }[];
     if (!userColumns.some((column) => column.name === 'display_name')) {
       this.db.exec('ALTER TABLE users ADD COLUMN display_name TEXT');
@@ -534,11 +545,40 @@ export class DB {
 
   insertChunk(fileId: number, idx: number, content: string): void {
     this.db.prepare('INSERT INTO doc_chunks (file_id, idx, content) VALUES (?, ?, ?)').run(fileId, idx, content);
+    this.db.prepare("UPDATE files SET document_status = 'ready', document_error = NULL WHERE id = ?").run(fileId);
+  }
+
+  setDocumentStatus(id: number, status: FileRow['document_status'], error: string | null = null): void {
+    this.db.prepare('UPDATE files SET document_status = ?, document_error = ? WHERE id = ?').run(status, error, id);
+    if (status !== 'ready') {
+      this.db.prepare('DELETE FROM doc_chunks WHERE file_id = ?').run(id);
+      this.db.prepare('DELETE FROM document_text WHERE file_id = ?').run(id);
+    }
+  }
+
+  saveDocumentText(id: number, text: string): void {
+    this.db.prepare('INSERT OR REPLACE INTO document_text (file_id, content) VALUES (?, ?)').run(id, text);
+  }
+
+  documentText(id: number): string | undefined {
+    return (this.db.prepare("SELECT d.content FROM document_text d JOIN files f ON f.id = d.file_id WHERE d.file_id = ? AND f.document_status = 'ready'").get(id) as { content: string } | undefined)?.content;
+  }
+
+  nextDocument(): FileRow | undefined {
+    return this.db.prepare("SELECT * FROM files WHERE document_status = 'pending' ORDER BY id LIMIT 1").get() as unknown as FileRow | undefined;
+  }
+
+  pendingDocuments(): number {
+    return (this.db.prepare("SELECT count(*) AS n FROM files WHERE document_status IN ('pending', 'processing')").get() as { n: number }).n;
+  }
+
+  recoverDocuments(): void {
+    this.db.prepare("UPDATE files SET document_status = 'pending' WHERE document_status = 'processing'").run();
   }
 
   listChunks(): ChunkRow[] {
     return this.db
-      .prepare('SELECT c.id, c.file_id, c.idx, c.content, f.name FROM doc_chunks c JOIN files f ON f.id = c.file_id LIMIT 50000')
+      .prepare("SELECT c.id, c.file_id, c.idx, c.content, f.name FROM doc_chunks c JOIN files f ON f.id = c.file_id WHERE f.document_status = 'ready' LIMIT 50000")
       .all() as unknown as ChunkRow[];
   }
 
