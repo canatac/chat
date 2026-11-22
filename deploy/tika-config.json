@@ -1,0 +1,53 @@
+{
+  "server": {
+    "endpoints": ["rmeta", "version"],
+    "allowPipes": false,
+    "allowPerRequestConfig": false,
+    "maxRequestSizeBytes": 10485760,
+    "maxInFlightRequestBytes": 10485760,
+    "maxRequestReadMillis": 30000,
+    "maxResponseWriteMillis": 15000,
+    "idleTimeoutMillis": 150000
+  },
+  "pipes": {
+    "numClients": 1,
+    "maxWaitForClientMillis": 1000,
+    "maxFilesProcessedPerProcess": 100,
+    "maxInlineBytes": 1048576,
+    "maxIpcPayloadBytes": 8388608,
+    "forkedJvmArgs": ["-Xms64m", "-Xmx768m", "-XX:ActiveProcessorCount=1", "-Dtika.pipes.cacheMemoryBudgetBytes=33554432"]
+  },
+  "parsers": [
+    { "pdf-parser": {
+      "maxPages": 20,
+      "maxMainMemoryBytes": 33554432,
+      "extractInlineImages": true,
+      "extractActions": false,
+      "parseIncrementalUpdates": false,
+      "throwOnEncryptedPayload": true,
+      "pages": {
+        "text": "AUTO",
+        "ocr": { "maxPages": 20 },
+        "render": { "dpi": 150, "maxImagePixels": 16000000, "maxWidth": 4000, "maxHeight": 4000, "imageType": "GRAY" }
+      }
+    } },
+    { "default-parser": {} }
+  ],
+  "engines": {
+    "tesseract": { "tesseract-ocr-parser": {
+      "language": "fra+eng",
+      "timeoutMillis": 15000,
+      "enableImagePreprocessing": false,
+      "applyRotation": false,
+      "otherTesseractConfig": { "tessedit_do_invert": "0" }
+    } }
+  },
+  "text-recognizers": [{ "engine": "tesseract" }],
+  "parse-context": {
+    "embedded-limits": { "maxDepth": 3, "maxCount": 32, "throwOnMaxDepth": true, "throwOnMaxCount": true },
+    "output-limits": { "writeLimit": 200000, "throwOnWriteLimit": true, "maxXmlDepth": 64, "zipBombThreshold": 100000, "zipBombRatio": 100 },
+    "timeout-limits": { "totalTaskTimeoutMillis": 120000, "progressTimeoutMillis": 30000, "throwOnDeadline": true },
+    "standard-metadata-limiter-factory": { "maxTotalBytes": 65536, "maxFieldSize": 8192, "maxKeySize": 256, "maxValuesPerField": 16 },
+    "exception-reporting": { "level": "MESSAGE_REDACTED", "maxLength": 1000 }
+  }
+}

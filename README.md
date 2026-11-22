@@ -1,5 +1,7 @@
 # Chat d'équipe
 
+**V2 documentaire :** extraction locale Tika + Tesseract, états d’analyse et quotas communs aux salons, adaptés à 2 CPU / 8 Go. Voir le [guide de mise à jour](docs/chatroom-v2-documents.md).
+
 Messagerie de chatroom unique, minimaliste et **auto-hébergeable**, pensée pour une petite
 entreprise qui veut faire tourner la discussion sur **ses propres serveurs** (par ex. une VM
 Scaleway), avec une **intégration LLM configurable** : la chatroom profite du modèle de votre
@@ -33,7 +35,7 @@ choix pour faire des comptes-rendus de réunion ou proposer des solutions aux pr
   utilise la commande **`/lien <url> [titre]`**. Le bot poste un récap : média original déposé,
   transcription (STT), copie **webm/opus** (archivage léger, via ffmpeg), et **compte-rendu** généré par le LLM.
 - Garde-fous : `LINK_FETCH_ALLOWED_DOMAINS` (liste blanche de domaines, `*.` supporté), IP privées/localhost
-  bloquées (anti-SSRF), plafond `MAX_LINK_FETCH_MB` (500 Mo par défaut).
+  bloquées (anti-SSRF), plafond `MAX_LINK_FETCH_MB` (50 Mio par défaut).
 
 **Démarrer / rejoindre un appel (audio + caméra optionnelle + partage d'écran)**
 1. Bouton **📞 téléphone** en haut → « Démarrer l'appel » (titre optionnel). Les autres voient une

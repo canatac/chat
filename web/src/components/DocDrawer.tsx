@@ -67,6 +67,7 @@ import type { ChatSocket } from '../ws';
 import DocumentExplorerList, { explorerColors, type DocumentItem, type DocumentView } from './DocumentExplorerList';
 import DocumentPlaces, { type DocumentPlace } from './DocumentPlaces';
 import MoveConflictDialog from './MoveConflictDialog';
+import DocumentAnalysis from './DocumentAnalysis';
 
 interface Props {
   open: boolean;
@@ -169,6 +170,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
   const [dialogError, setDialogError] = useState<string | null>(null);
   const [dialogBusy, setDialogBusy] = useState(false);
   const [detail, setDetail] = useState<FileDetail | null>(null);
+  const [resources, setResources] = useState<Awaited<ReturnType<typeof api.documentResources>> | null>(null);
 
   const fileRef = useRef<HTMLInputElement>(null);
   const folderRef = useRef<HTMLInputElement>(null);
@@ -201,6 +203,22 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
   const scope = JSON.stringify(fileRequest);
   const visibleListing = listing?.scope === scope ? listing : null;
   const reload = useCallback(() => setRevision((previous) => previous + 1), []);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    void api.documentResources().then((value) => { if (!cancelled) setResources(value); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [open, revision]);
+
+  useEffect(() => {
+    if (!detail || !['pending', 'processing'].includes(detail.file.analysis?.status ?? '')) return;
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      void api.fileDetail(detail.file.id).then((loaded) => { if (!cancelled) setDetail(loaded); }).catch(() => {});
+    }, 1500);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [detail?.file.id, detail?.file.analysis?.status]);
 
   useEffect(() => {
     if (!open) return;
@@ -758,6 +776,12 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
         </Box>
       </Box>
 
+      <Box sx={{ px: horizontalPadding, py: 0.75, bgcolor: explorerColors.background }}>
+        <Typography variant="caption" sx={{ display: 'block', overflowWrap: 'anywhere' }}>
+          {resources ? formatFileSize(resources.limits.uploadBytes) : '10 Mio'} par fichier · PDF : 20 pages · une analyse à la fois
+          {resources && ` · ${formatFileSize(resources.usedBytes)} / ${formatFileSize(resources.limits.storageBytes)} utilisés, tous salons`}
+        </Typography>
+      </Box>
       <Box sx={{ display: 'grid', gridTemplateColumns: wide ? '218px minmax(0, 1fr)' : 'minmax(0, 1fr)', flex: 1, minHeight: 0 }}>
         {wide && (
           <Box component="aside" data-document-scroll sx={{ bgcolor: '#edf3f2', borderRight: '1px solid ' + explorerColors.border, overflowY: 'auto', overscrollBehavior: 'contain' }}>
@@ -1176,6 +1200,9 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
           {detail && (
             <>
               <Typography variant="subtitle1" sx={{ fontWeight: 750, overflowWrap: 'anywhere', mb: 1.5 }}>{detail.file.name}</Typography>
+              <Box sx={{ mb: 2 }}><DocumentAnalysis analysis={detail.file.analysis} /></Box>
+              {detail.file.analysis?.error && <Alert severity="warning" sx={{ mb: 2 }}>{detail.file.analysis.error}</Alert>}
+              <Typography variant="body2" sx={{ mb: 2 }}>Extraction locale : PDF, images et documents bureautiques. Le texte utilisé sera contrôlé par LinGuard avant l’envoi à l’IA.</Typography>
               <Box
                 component="dl"
                 sx={{
@@ -1216,6 +1243,10 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
           )}
         </DialogContent>
         <DialogActions>
+          <Button disabled={!detail || ['pending', 'processing'].includes(detail.file.analysis?.status ?? '')} onClick={() => {
+            if (!detail) return;
+            void api.analyzeFile(detail.file.id).then(() => api.fileDetail(detail.file.id)).then((loaded) => { setDetail(loaded); reload(); }).catch((error) => setActionError(errorMessage(error, 'Analyse impossible.')));
+          }}>Réessayer l’analyse</Button>
           <Button onClick={() => setDetail(null)}>Fermer</Button>
         </DialogActions>
       </Dialog>

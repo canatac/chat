@@ -1,9 +1,9 @@
 FROM node:22-alpine AS build
 WORKDIR /app
-COPY package.json ./
+COPY package.json package-lock.json ./
 COPY server/package.json server/package.json
 COPY web/package.json web/package.json
-RUN npm install --no-audit --no-fund
+RUN npm ci --no-audit --no-fund
 COPY server/ server/
 COPY web/ web/
 RUN npm run build
@@ -11,10 +11,10 @@ RUN npm run build
 FROM node:22-alpine AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
-COPY package.json ./
+COPY package.json package-lock.json ./
 COPY server/package.json server/package.json
 COPY web/package.json web/package.json
-RUN npm install --omit=dev --no-audit --no-fund
+RUN npm ci --omit=dev --no-audit --no-fund
 RUN apk add --no-cache ffmpeg
 COPY --from=build /app/server/dist server/dist
 COPY --from=build /app/web/dist web/dist

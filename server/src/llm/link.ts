@@ -1,6 +1,9 @@
 import { execFile, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { Readable, Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import type { FileResources } from '../documents/resources.js';
 import type { Config } from '../config.js';
 import type { DB, FileRow } from '../db.js';
 import { deriveDocument } from './derive.js';
@@ -70,22 +73,35 @@ export async function fetchToFile(
   destPath: string,
   maxMb: number,
   onProgress?: (doneBytes: number, totalBytes: number | null) => void,
+  resources?: FileResources,
 ): Promise<{ size: number; contentType: string | null }> {
-  const res = await fetch(url, { signal: AbortSignal.timeout(600000), redirect: 'follow' });
-  if (!res.ok || !res.body) throw new Error(`Téléchargement échoué (HTTP ${res.status})`);
-  const declared = Number(res.headers.get('content-length') ?? 0);
-  if (declared > maxMb * 1024 * 1024) throw new Error(`Fichier trop gros (${Math.round(declared / 1048576)} Mo > ${maxMb} Mo)`);
-  const chunks: Buffer[] = [];
-  let size = 0;
-  const cap = maxMb * 1024 * 1024;
-  for await (const chunk of res.body as AsyncIterable<Uint8Array>) {
-    size += chunk.byteLength;
-    if (size > cap) throw new Error(`Fichier trop gros (> ${maxMb} Mo pendant le téléchargement)`);
-    chunks.push(Buffer.from(chunk));
-    onProgress?.(size, declared > 0 ? declared : null);
-  }
-  fs.writeFileSync(destPath, Buffer.concat(chunks));
-  return { size, contentType: res.headers.get('content-type') };
+  const cap = Math.min(maxMb, 50) * 1048576;
+  const release = resources?.writer(cap);
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), 120_000);
+  timer.unref();
+  let created = false;
+  try {
+    const res = await fetch(url, { signal: abort.signal, redirect: 'follow' });
+    if (!res.ok || !res.body) throw new Error(`Téléchargement échoué (HTTP ${res.status})`);
+    const declared = Number(res.headers.get('content-length') ?? 0);
+    if (declared > cap) { await res.body.cancel(); throw new Error(`Fichier trop gros (> ${maxMb} Mio)`); }
+    let size = 0;
+    const counter = new Transform({ transform(chunk: Buffer, _encoding, callback) {
+      size += chunk.length;
+      if (size > cap) { callback(new Error(`Fichier trop gros (> ${maxMb} Mio pendant le téléchargement)`)); return; }
+      onProgress?.(size, declared > 0 ? declared : null);
+      callback(null, chunk);
+    } });
+    const output = fs.createWriteStream(destPath, { flags: 'wx' });
+    created = true;
+    await pipeline(Readable.from(res.body as AsyncIterable<Uint8Array>), counter, output, { signal: abort.signal });
+    return { size, contentType: res.headers.get('content-type') };
+  } catch (error) {
+    abort.abort();
+    if (created) fs.rmSync(destPath, { force: true });
+    throw error;
+  } finally { clearTimeout(timer); release?.(); }
 }
 
 let ffmpegOk: boolean | null = null;
@@ -99,15 +115,17 @@ export function ffmpegAvailable(): boolean {
   return ffmpegOk;
 }
 
-export async function transcodeToWebm(srcPath: string, dstPath: string): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
+export async function transcodeToWebm(srcPath: string, dstPath: string, resources?: FileResources): Promise<void> {
+  const release = resources?.writer(50 * 1048576);
+  try { await new Promise<void>((resolve, reject) => {
     execFile(
       'ffmpeg',
-      ['-y', '-i', srcPath, '-vn', '-c:a', 'libopus', '-b:a', '64k', dstPath],
+      ['-y', '-threads', '1', '-i', srcPath, '-vn', '-c:a', 'libopus', '-b:a', '64k', '-threads', '1', '-fs', String(50 * 1048576), dstPath],
       { timeout: 900000, maxBuffer: 4 * 1024 * 1024 },
       (err) => (err ? reject(err) : resolve()),
     );
-  });
+  }); } catch (error) { fs.rmSync(dstPath, { force: true }); throw error; }
+  finally { release?.(); }
 }
 
 async function transcribeAndStore(
@@ -128,7 +146,8 @@ async function transcribeAndStore(
     const date = new Date().toLocaleString('fr-FR');
     const tName = `🎙️ Transcription — ${displayName} (${date}).txt`;
     const tFname = `${Date.now()}-tr-${Math.random().toString(36).slice(2, 8)}.txt`;
-    fs.writeFileSync(path.join(uploadsDir, tFname), text);
+    if (deps.config.fileResources) deps.config.fileResources.writeText(path.join(uploadsDir, tFname), text);
+    else fs.writeFileSync(path.join(uploadsDir, tFname), text);
     const transcriptRow = deps.db.insertFile(
       deps.db.getBot().id,
       null,
@@ -138,7 +157,8 @@ async function transcribeAndStore(
       tFname,
       fileRow.call_id,
     );
-    chunkText(text, deps.config.RAG_CHUNK_SIZE).forEach((c, i) => deps.db.insertChunk(transcriptRow.id, i, c));
+    if (deps.config.documents) deps.config.documents.enqueue(deps.db, transcriptRow.id);
+    else chunkText(text, deps.config.RAG_CHUNK_SIZE).forEach((c, i) => deps.db.insertChunk(transcriptRow.id, i, c));
     deps.db.insertUsage({
       userId: deps.userId,
       messageId: fileRow.message_id,
@@ -219,7 +239,7 @@ export async function handleLinkCommand(deps: LinkDeps, msg: { id: number; conte
     const { size, contentType } = await fetchToFile(url, dest, deps.config.MAX_LINK_FETCH_MB, (done, total) => {
       const pct = total ? Math.round((done / total) * 100) : null;
       postProgress(`⬇️ Téléchargement… ${(done / 1048576).toFixed(0)} Mo${pct !== null ? ` (${pct} %)` : ''}`, pct === 100);
-    });
+    }, deps.config.fileResources);
     const mime = guessMimeFromUrl(url, contentType);
     const displayName = safeBase;
     const fileRow = deps.db.insertFile(deps.userId, msg.id, displayName, mime, size, storedName);
@@ -230,6 +250,8 @@ export async function handleLinkCommand(deps: LinkDeps, msg: { id: number; conte
       detail: `« ${displayName} » téléchargé via /lien (${(size / 1048576).toFixed(1)} Mo, ${url.hostname})`,
       userId: deps.userId,
     });
+
+    deps.config.documents?.enqueue(deps.db, fileRow.id);
 
     let transcriptRow: FileRow | null = null;
     let sttError: string | null = null;
@@ -256,16 +278,18 @@ export async function handleLinkCommand(deps: LinkDeps, msg: { id: number; conte
       if (transcriptRow && ffmpegAvailable()) {
         try {
           const webmName = `${Date.now()}-webm-${Math.random().toString(36).slice(2, 8)}.webm`;
-          await transcodeToWebm(dest, path.join(uploadsDir, webmName));
+          await transcodeToWebm(dest, path.join(uploadsDir, webmName), deps.config.fileResources);
           const webmPath = path.join(uploadsDir, webmName);
           const webmSize = fs.statSync(webmPath).size;
           webmRow = deps.db.insertFile(deps.db.getBot().id, null, displayName.replace(/\.[^.]+$/, '') + '.webm', 'audio/webm', webmSize, webmName, null);
+          deps.config.documents?.enqueue(deps.db, webmRow.id);
         } catch {
           // transcodage best-effort
         }
       }
       if (transcriptRow && llmConfigured(deps.config)) {
         try {
+          await deps.config.documents?.waitReady(deps.db, transcriptRow.id);
           crRow = await deriveDocument({ db: deps.db, config: deps.config, userId: deps.userId, uploadsDir }, transcriptRow, 'cr');
         } catch {
           // CR best-effort

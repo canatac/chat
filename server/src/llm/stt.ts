@@ -99,7 +99,14 @@ export function ffmpegAvailable(): boolean {
 
 function runFfmpeg(args: string[], timeoutMs = 900_000): Promise<void> {
   return new Promise((resolve, reject) => {
-    execFile('ffmpeg', args, { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 }, (err) => (err ? reject(err) : resolve()));
+    const bounded = ['-threads', '1', ...args.slice(0, -1), '-threads', '1', '-fs', String(64 * 1048576), args.at(-1)!];
+    execFile('ffmpeg', bounded, { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 }, (err) => {
+      if (err) { reject(err); return; }
+      try {
+        if (fs.statSync(args.at(-1)!).size >= 64 * 1048576) reject(new Error('Audio temporaire limité à 64 Mio. Réduire la durée du média.'));
+        else resolve();
+      } catch (error) { reject(error); }
+    });
   });
 }
 
@@ -168,6 +175,15 @@ async function transcribeOneFile(
  * `onProgress` (optionnel) reçoit les jalons start / prepare / segment i/N / done.
  */
 export async function transcribeFile(
+  cfg: Config, filePath: string, filename: string, mime: string, onProgress?: SttProgressCb,
+): Promise<TranscriptionResult> {
+  if (fs.statSync(filePath).size > 50 * 1048576) throw new Error('Média limité à 50 Mio. Scinder l’enregistrement.');
+  const release = cfg.fileResources?.writer(128 * 1048576);
+  try { return await transcribeFileBounded(cfg, filePath, filename, mime, onProgress); }
+  finally { release?.(); }
+}
+
+async function transcribeFileBounded(
   cfg: Config,
   filePath: string,
   filename: string,

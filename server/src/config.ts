@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import { z } from 'zod';
 import type { ChatMessage } from './llm/providers.js';
+import type { FileResources } from './documents/resources.js';
+import type { DocumentQueue } from './documents/queue.js';
 
 const envSchema = z.object({
   HOST: z.string().optional(),
@@ -19,7 +21,10 @@ const envSchema = z.object({
   LLM_CONTEXT_MESSAGES: z.coerce.number().int().min(1).max(500).default(50),
   LLM_INPUT_PRICE_PER_1M: z.coerce.number().min(0).optional(),
   LLM_OUTPUT_PRICE_PER_1M: z.coerce.number().min(0).optional(),
-  MAX_UPLOAD_MB: z.coerce.number().int().min(1).max(500).default(25),
+  MAX_UPLOAD_MB: z.coerce.number().int().min(1).max(500).transform((n) => Math.min(n, 10)).default(10),
+  FILE_STORAGE_MAX_MB: z.coerce.number().int().min(100).max(102400).default(2048),
+  FILE_STORAGE_MIN_FREE_MB: z.coerce.number().int().min(0).max(10240).default(512),
+  TIKA_URL: z.string().url().default('http://127.0.0.1:9998'),
   RAG_TOP_K: z.coerce.number().int().min(1).max(20).default(5),
   RAG_CHUNK_SIZE: z.coerce.number().int().min(200).max(4000).default(1200),
   STT_PROVIDER: z.string().default('openai'),
@@ -27,7 +32,7 @@ const envSchema = z.object({
   STT_API_KEY: z.string().optional(),
   STT_MODEL: z.string().default('whisper-1'),
   STT_LANGUAGE: z.string().optional(),
-  RECORDING_MAX_MB: z.coerce.number().int().min(1).max(2000).default(200),
+  RECORDING_MAX_MB: z.coerce.number().int().min(1).max(5000).transform((n) => Math.min(n, 50)).default(50),
   STT_COST_PER_AUDIO_MIN: z.coerce.number().min(0).optional(),
   STT_MAX_FILE_MB: z.coerce.number().min(1).max(5000).default(24),
   STT_CHUNK_MINUTES: z.coerce.number().int().min(1).max(180).default(10),
@@ -35,12 +40,14 @@ const envSchema = z.object({
   TURN_USERNAME: z.string().default(''),
   TURN_CREDENTIAL: z.string().default(''),
   LINK_FETCH_ALLOWED_DOMAINS: z.string().default(''),
-  MAX_LINK_FETCH_MB: z.coerce.number().int().min(1).max(5000).default(500),
+  MAX_LINK_FETCH_MB: z.coerce.number().int().min(1).max(5000).transform((n) => Math.min(n, 50)).default(50),
   LINK_FETCH_ALLOW_PRIVATE: z.string().default('0'),
 });
 
 export type Config = z.infer<typeof envSchema> & {
   reviewAI?: (messages: ChatMessage[], userId?: number) => Promise<ChatMessage[]>;
+  fileResources?: FileResources;
+  documents?: DocumentQueue;
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {

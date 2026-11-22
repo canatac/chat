@@ -46,6 +46,17 @@ async function api(pathname: string, init?: RequestInit): Promise<Response> {
   });
 }
 
+async function waitForAnalysis(id: number, headers: Record<string, string>): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const response = await fetch(`${baseUrl}/api/files/${id}`, { headers });
+    const { file } = await response.json() as { file: { analysis: { status: string } } };
+    if (file.analysis.status === 'ready') return;
+    assert.notEqual(file.analysis.status, 'blocked');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error('Analyse documentaire non terminée');
+}
+
 function waitForEvent(
   ws: WebSocket,
   pred: (event: Record<string, never>) => boolean,
@@ -354,6 +365,7 @@ test('upload d\u2019un enregistrement d\u2019appel + dérivation sans LLM (503)'
   const upTxt = await fetch(`${baseUrl}/api/files`, { method: 'POST', headers: auth, body: txtFd });
   const txtBody = (await upTxt.json()) as { file: { id: number } };
 
+  await waitForAnalysis(txtBody.file.id, auth);
   const derive = await api(`/api/files/${txtBody.file.id}/derive`, {
     method: 'POST',
     headers: { ...auth, 'Content-Type': 'application/json' },
@@ -396,6 +408,7 @@ test('derive : 422 si la transcription est trop courte (garde-fou anti-hallucina
   fd.append('post', 'false');
   const up = await fetch(`${baseUrl}/api/files`, { method: 'POST', headers: auth, body: fd });
   const upBody = (await up.json()) as { file: { id: number } };
+  await waitForAnalysis(upBody.file.id, auth);
   const res = await api(`/api/files/${upBody.file.id}/derive`, {
     method: 'POST',
     headers: { ...auth, 'Content-Type': 'application/json' },

@@ -21,6 +21,7 @@ import { documentDropAttributes, documentDropStyle } from '../useDocumentDrag';
 import type useDocumentDrag from '../useDocumentDrag';
 import type { SelectedDocuments } from '../useDocumentSelection';
 import DocumentColumnControls from './DocumentColumnControls';
+import DocumentAnalysis from './DocumentAnalysis';
 
 export const explorerColors = {
   ...chatColors,
@@ -189,6 +190,7 @@ function DocumentEntry({ target, grid, description, isDownloading, onOpenFolder,
         {selectable && <SelectionIcon sx={{ flexShrink: 0, color: selected ? explorerColors.accent : explorerColors.muted, ...(grid ? { position: 'absolute', top: 7, left: 7 } : { mx: 0.7 }), fontSize: 22 }} />}
         <Box component="span" sx={{ display: 'block', minWidth: 0, width: grid ? '100%' : undefined, flex: grid ? undefined : 1 }}>
           <DocumentName name={item.name} grid={grid} />
+          {file && <DocumentAnalysis analysis={file.analysis} />}
           <Typography component="span" variant="caption" noWrap display="block" title={description} sx={{ color: explorerColors.muted }}>
             {description}
           </Typography>
