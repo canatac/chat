@@ -1,7 +1,7 @@
 import type { Config } from '../config.js';
 import type { DB } from '../db.js';
 import { askLLM, llmConfigured } from './index.js';
-import { buildSystemPrompt, buildUserPrompt, formatContext, parseCommand, COMMAND_HELP } from './commands.js';
+import { buildSystemPrompt, buildUserMessage, formatContext, parseCommand, COMMAND_HELP } from './commands.js';
 import { buildDocsSection, retrieveRelevantChunks } from './rag.js';
 import { handleLinkCommand, maybeAutoLink } from './link.js';
 import { costUsd, type Usage } from './pricing.js';
@@ -61,7 +61,7 @@ export async function handleCommand(
     }
     const messages: ChatMessage[] = [
       { role: 'system', content: buildSystemPrompt() },
-      { role: 'user', content: buildUserPrompt(cmd, context, docs) },
+      buildUserMessage(cmd, context, docs),
     ];
     const { text, usage } = await askLLM(deps.config, messages, { timeoutMs: 90000, userId: deps.userId });
     record(usage, null);

@@ -126,6 +126,13 @@ Le backend utilise le service local LinGuard sur l’hôte Linux avant les envoi
 de textes à l’IA. Pour le raccordement Docker et les politiques de détection,
 consulter le [guide MaelGard](server/src/security/README.md).
 
+En cas de détection, le dialogue indique si les données viennent de la question,
+de l’historique ou des documents. Lorsque la politique autorise le choix
+utilisateur, **Mémoriser ce masquage** évite de confirmer à nouveau les mêmes
+données pour ses prochaines demandes dans le salon. **Mes masquages** permet
+d’oublier ce choix. LinGuard continue de contrôler chaque envoi et les originaux
+restent consultables dans la chatroom.
+
 Tout se configure par variables d'environnement (voir `.env.example`). Aucune dépendance à un
 fournisseur précis : choisissez le vôtre.
 

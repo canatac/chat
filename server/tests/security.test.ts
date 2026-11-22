@@ -14,14 +14,16 @@ import { LinGuardError } from '../src/security/linguard-client.js';
 import type { SecurityPolicy } from '../src/security/security-store.js';
 import type { SecurityReview } from '../src/security/ai-guard.js';
 import { AIGuard } from '../src/security/ai-guard.js';
+import { buildUserMessage } from '../src/llm/commands.js';
 
 const pii = 'jean.dupont@example.test';
+const otherPii = 'marie.martin@example.test';
 const password = 'test-security-password';
 
 function detect(text: string) {
-  return [...text.matchAll(/jean\.dupont@example\.test/g)].map((match) => ({
-    type: 'EMAIL', start: Buffer.byteLength(text.slice(0, match.index)), end: Buffer.byteLength(text.slice(0, match.index)) + Buffer.byteLength(pii),
-    score: 9500, text: pii,
+  return [...text.matchAll(/(?:jean\.dupont|marie\.martin)@example\.test/g)].map((match) => ({
+    type: 'EMAIL', start: Buffer.byteLength(text.slice(0, match.index)), end: Buffer.byteLength(text.slice(0, match.index)) + Buffer.byteLength(match[0]),
+    score: 9500, text: match[0],
   }));
 }
 
@@ -29,6 +31,7 @@ async function fixture(t: TestContext) {
   let failure = false;
   let modelErrors: unknown[] = [];
   const sent: string[] = [];
+  const analyzed: string[][] = [];
   const provider = http.createServer(async (req, res) => {
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(Buffer.from(chunk));
@@ -50,6 +53,7 @@ async function fixture(t: TestContext) {
       return { status: 'ok', agent: 'linguard', version: 'test', api: 'v1' };
     },
     analyze: async (texts) => {
+      analyzed.push(texts);
       if (failure) throw new LinGuardError('unavailable');
       return { texts: texts.map(detect), model_errors: modelErrors };
     },
@@ -75,7 +79,7 @@ async function fixture(t: TestContext) {
   const admin = await login('Alice');
   const member = await login('Bob');
   const state = async (token = admin) => (await (await api('/security', token)).json()) as {
-    policy: SecurityPolicy; reviews: SecurityReview[]; health: { available: boolean };
+    policy: SecurityPolicy; reviews: SecurityReview[]; health: { available: boolean }; remembered: number;
   };
   const policy = async (detection: SecurityPolicy['detection'], errors: SecurityPolicy['modelErrors'] = 'fail-closed') => {
     const current = (await state()).policy;
@@ -98,7 +102,7 @@ async function fixture(t: TestContext) {
     const { messages } = await (await api('/messages', admin)).json() as { messages: { user: { isBot: boolean }; content: string }[] };
     return messages.find((message) => message.user.isBot && message.content.includes(part));
   });
-  return { dir, api, admin, member, state, policy, send, wait, bot, sent,
+  return { dir, db: app.db, api, admin, member, state, policy, send, wait, bot, sent, analyzed,
     unavailable: () => { failure = true; }, modelErrors: () => { modelErrors = [{ error: pii }]; } };
 }
 
@@ -120,6 +124,128 @@ test('bloque par défaut, masque le contexte complet et persiste uniquement les 
   sqlite.close();
   assert.equal(JSON.stringify(events).includes(pii), false);
   assert.ok(events.some((event) => event.action === 'anonymized' && Number(event.count) > 0 && event.max_score === 9500));
+});
+
+test('explique les sources et mémorise le masquage sans changer la politique, les originaux ou les choix des autres membres', async (t) => {
+  const f = await fixture(t);
+  await f.policy('ask');
+  const policy = (await f.state()).policy;
+  await f.send('Note historique Élodie 🧪 ' + pii);
+  const file = f.db.insertFile(f.db.getUserByName('Alice')!.id, null, 'document.txt', 'text/plain', 100, 'document.txt', null);
+  f.db.insertChunk(file.id, 0, 'Document de suivi. Contact : ' + pii);
+  await f.send('/ask Résume ce document');
+  const review = await f.wait(async () => (await f.state()).reviews[0]);
+  assert.deepEqual(review.sources, [{ kind: 'documents', count: 1 }, { kind: 'history', count: 1 }]);
+  assert.equal(review.count, 2);
+  assert.equal(review.rememberedCount, 0);
+  assert.equal(JSON.stringify(review).includes(pii), false);
+  assert.equal(f.sent.length, 0);
+  assert.equal((await f.api('/security/reviews/' + review.id, f.admin, 'POST', { action: 'cancel', remember: true })).status, 400);
+  assert.equal((await f.api('/security/reviews/' + review.id, f.member, 'POST', { action: 'anonymize', remember: true })).status, 409);
+  assert.equal((await f.api('/security/reviews/' + review.id, f.admin, 'POST', { action: 'anonymize', remember: true })).status, 204);
+  await f.bot('Réponse externe 1');
+  assert.deepEqual((await f.state()).policy, policy);
+  assert.equal((await f.state()).remembered, 1);
+  const history = await (await f.api('/messages', f.admin)).json() as { messages: { content: string }[] };
+  assert.ok(history.messages.some(({ content }) => content === 'Note historique Élodie 🧪 ' + pii));
+
+  await f.send('/ask Nouvelle question sur le document');
+  await f.bot('Réponse externe 2');
+  assert.deepEqual((await f.state()).reviews, []);
+  assert.ok(f.analyzed.slice(-1)[0].some((text) => text.includes(pii)));
+  assert.equal(f.sent.length, 2);
+  for (const request of f.sent) {
+    assert.equal(request.includes(pii), false);
+    assert.equal(request.includes('[EMAIL]'), true);
+    const body = JSON.parse(request) as { messages: Record<string, unknown>[] };
+    assert.ok(body.messages.every((message) => Object.keys(message).sort().join(',') === 'content,role'));
+  }
+
+  await f.send('/ask Résume ce document', f.member);
+  const memberReview = await f.wait(async () => (await f.state(f.member)).reviews[0]);
+  assert.equal(memberReview.rememberedCount, 0);
+  assert.equal((await f.state(f.member)).remembered, 0);
+  assert.equal((await f.api('/security/reviews/' + memberReview.id, f.member, 'POST', { action: 'cancel' })).status, 204);
+  assert.equal((await f.api('/security/masking', f.member, 'DELETE')).status, 204);
+  assert.equal((await f.state()).remembered, 1);
+
+  await f.send('/ask Nouvelle référence du document : ' + otherPii);
+  const next = await f.wait(async () => (await f.state()).reviews[0]);
+  assert.deepEqual(next.sources, [{ kind: 'question', count: 1 }]);
+  assert.equal(next.count, 1);
+  assert.ok(next.rememberedCount > 0);
+  assert.equal(f.sent.length, 2);
+  assert.equal((await f.api('/security/reviews/' + next.id, f.admin, 'POST', { action: 'cancel' })).status, 204);
+  const sqlite = new DatabaseSync(path.join(f.dir, 'chat.db'));
+  const rules = sqlite.prepare('SELECT * FROM security_mask_rules').all();
+  const audit = sqlite.prepare('SELECT * FROM security_events').all();
+  sqlite.close();
+  assert.equal(rules.length, 1);
+  assert.match(String(rules[0].fingerprint), /^[a-f0-9]{64}$/);
+  assert.equal(JSON.stringify({ rules, audit }).includes(pii), false);
+  assert.equal(JSON.stringify({ rules, audit }).includes(otherPii), false);
+  assert.equal((await f.api('/security/masking', f.admin, 'DELETE')).status, 204);
+  assert.equal((await f.state()).remembered, 0);
+  await f.send('/ask Encore une demande');
+  const forgotten = await f.wait(async () => (await f.state()).reviews[0]);
+  assert.equal(forgotten.rememberedCount, 0);
+  assert.equal((await f.api('/security/reviews/' + forgotten.id, f.admin, 'POST', { action: 'cancel' })).status, 204);
+  assert.equal(f.sent.length, 2);
+});
+
+test('conserve le masquage au redémarrage, réanalyse chaque demande et réinitialise les choix à un changement de politique', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'guard-remember-'));
+  let db = new DB(dir);
+  let analyses = 0;
+  let failure = false;
+  const client = () => ({
+    health: async () => ({ status: 'ok' as const, agent: 'linguard' as const, version: 'test', api: 'v1' as const }),
+    analyze: async (texts: string[]) => {
+      analyses++;
+      if (failure) throw new LinGuardError('unavailable');
+      return { texts: texts.map(detect), model_errors: [] };
+    },
+  });
+  db.security.update({ ...db.security.policy(), detection: 'ask' });
+  let guard = new AIGuard(db.security, () => {}, client);
+  try {
+    const message = buildUserMessage({ name: 'ask', arg: 'Question Élodie 🧪 ' + pii }, 'Note 🧪 ' + pii);
+    const first = guard.protect([message], 1);
+    void first.catch(() => {});
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const review = guard.list(1)[0];
+    assert.deepEqual(review.sources, [{ kind: 'history', count: 1 }, { kind: 'question', count: 1 }]);
+    assert.equal(guard.decide(1, review.id, 'anonymize', true), true);
+    assert.equal((await first)[0].content.includes(pii), false);
+    await guard.close();
+    db.close();
+    db = new DB(dir);
+    guard = new AIGuard(db.security, () => {}, client);
+    const second = guard.protect([buildUserMessage({ name: 'ask', arg: 'Une autre question' }, 'Note 🧪 ' + pii)], 1);
+    void second.catch(() => {});
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(guard.list(1), []);
+    assert.equal((await second)[0].content.includes(pii), false);
+    assert.equal(analyses, 2);
+    failure = true;
+    await assert.rejects(guard.protect([message], 1), /indisponible/);
+    failure = false;
+    db.security.update({ ...db.security.policy(), detection: 'block' });
+    assert.equal(db.security.remembered(1).size, 0);
+    await assert.rejects(guard.protect([message], 1), /administrateur.*masquage/);
+    db.security.update({ ...db.security.policy(), detection: 'ask' });
+    const afterPolicy = guard.protect([message], 1);
+    const cancelled = assert.rejects(afterPolicy, /annulée/);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const pending = guard.list(1)[0];
+    assert.equal(pending.rememberedCount, 0);
+    guard.decide(1, pending.id, 'cancel');
+    await cancelled;
+  } finally {
+    await guard.close();
+    db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('réserve la politique aux administrateurs et ne permet que l’annulation ou le masquage de sa propre demande', async (t) => {

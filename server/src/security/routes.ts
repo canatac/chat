@@ -3,9 +3,9 @@ import { z } from 'zod';
 import type { AIGuard } from './ai-guard.js';
 import type { SecurityStore } from './security-store.js';
 
-export function mountSecurity(app: Router, store: SecurityStore, guard: AIGuard, changed: () => void) {
+export function mountSecurity(app: Router, store: SecurityStore, guard: AIGuard, changed: () => void, maskingChanged: (userId: number) => void) {
   app.get('/api/security', async (req, res) => {
-    res.json({ policy: store.policy(), health: await guard.status(), reviews: guard.list(req.user!.id) });
+    res.json({ policy: store.policy(), health: await guard.status(), reviews: guard.list(req.user!.id), remembered: store.remembered(req.user!.id).size });
   });
 
   app.post('/api/security/check', async (_req, res) => {
@@ -30,11 +30,18 @@ export function mountSecurity(app: Router, store: SecurityStore, guard: AIGuard,
     res.json({ policy: store.policy() });
   });
 
-  const decision = z.object({ action: z.enum(['cancel', 'anonymize']) }).strict();
+  app.delete('/api/security/masking', (req, res) => {
+    store.forget(req.user!.id);
+    maskingChanged(req.user!.id);
+    res.status(204).end();
+  });
+
+  const decision = z.object({ action: z.enum(['cancel', 'anonymize']), remember: z.boolean().default(false) })
+    .strict().refine((value) => !value.remember || value.action === 'anonymize');
   app.post('/api/security/reviews/:id', (req, res) => {
     const parsed = decision.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: 'Décision invalide.' }); return; }
-    if (!guard.decide(req.user!.id, String(req.params.id), parsed.data.action)) {
+    if (!guard.decide(req.user!.id, String(req.params.id), parsed.data.action, parsed.data.remember)) {
       res.status(409).json({ error: 'Cette demande a été traitée, annulée ou a expiré.' });
       return;
     }

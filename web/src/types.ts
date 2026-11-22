@@ -75,12 +75,15 @@ export interface SecurityReview {
   types: string[];
   count: number;
   maxScore: number | null;
+  sources: { kind: 'question' | 'history' | 'documents' | 'agenda' | 'instructions' | 'context'; count: number }[];
+  rememberedCount: number;
 }
 
 export interface SecurityState {
   policy: SecurityPolicy;
   health: { available: boolean; error: string | null };
   reviews: SecurityReview[];
+  remembered: number;
 }
 
 export interface ConversationActivity {

@@ -6,6 +6,7 @@ import type { DB } from './db.js';
 import { HttpError } from './llm/derive.js';
 import { askLLM } from './llm/index.js';
 import { costUsd, type Usage } from './llm/pricing.js';
+import { sourcedMessage } from './llm/prompt.js';
 import { SecurityBlocked } from './security/ai-guard.js';
 
 const alias = z.string().trim().min(1).max(100);
@@ -54,9 +55,10 @@ async function interpret(deps: Dependencies, prompt: string, timeZone: string) {
     costUsd: costUsd(usage, model, deps.config), error,
   });
   try {
-    const result = await askLLM(deps.config, [{ role: 'system', content: assistantPrompt }, { role: 'user', content: JSON.stringify({
-      maintenant: meetingLocalTime(Date.now(), timeZone), fuseau: timeZone, membres: deps.members.map(({ alias }) => alias), demande: prompt,
-    }) }], { temperature: 0, timeoutMs: 60_000, userId: deps.userId });
+    const context = JSON.stringify({ maintenant: meetingLocalTime(Date.now(), timeZone), fuseau: timeZone, membres: deps.members.map(({ alias }) => alias) });
+    const result = await askLLM(deps.config, [{ role: 'system', content: assistantPrompt }, sourcedMessage('user', [
+      { kind: 'agenda', text: context.slice(0, -1) }, ',"demande":', { kind: 'question', text: JSON.stringify(prompt) }, '}',
+    ])], { temperature: 0, timeoutMs: 60_000, userId: deps.userId });
     usage = result.usage;
     const parsed = instruction.parse(JSON.parse(result.text.trim().replace(/^```(?:json)?\s*|\s*```$/gi, '')));
     log(null);
