@@ -103,6 +103,7 @@ L’assistant de l’agenda utilise le `LLM_MODEL` du salon. Dans le chat, `/age
   transcription
 - **VPN WireGuard** intégré pour donner au PC et au téléphone une IP fixe (filtrage par IP possible)
 - **Commandes LLM** dans la chatroom et assistant privé de l’agenda
+- **Markdown** : titres, gras, listes, citations, tableaux et code dans les réponses de l’assistant et les comptes rendus, y compris les messages historiques. Sur mobile, les tableaux et blocs de code défilent horizontalement. Le HTML est ignoré et les images sont proposées sous forme de liens.
 
 | Commande | Effet |
 | --- | --- |

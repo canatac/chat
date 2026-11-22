@@ -15,6 +15,7 @@ import { chatColors } from '../theme';
 import type { AgendaAssistantResponse, Meeting, MeetingArtifact, User } from '../types';
 import AgendaEditor from './AgendaEditor';
 import AgendaMeeting, { meetingStatus } from './AgendaMeeting';
+import MarkdownContent from './MarkdownContent';
 
 interface Props {
   open: boolean;
@@ -228,7 +229,9 @@ export default function AgendaDrawer({ open, onClose, onCall, onRead, users, own
                 <Box><Button onClick={() => setEditor({ fromAssistant: result })}>Revoir le brouillon</Button></Box>
               )}
               {result && result.kind !== 'draft' && (
-                <Alert severity="info" role="status">{result.answer}</Alert>
+                <Alert severity="info" role="status" sx={{ '& .MuiAlert-message': { minWidth: 0, width: '100%' } }}>
+                  <MarkdownContent content={result.answer} />
+                </Alert>
               )}
               {result?.kind === 'results' && (
                 <>

@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import type { ServerContext } from '../../server/src/app';
 import type { DB } from '../../server/src/db';
 
 const longFileName = '2026-11-15-EXEMPLE_COMPTE_RENDU_EQUIPE_DOCUMENT_ABCDEFGHIJKLMN_12345678901234567890.txt';
@@ -16,7 +17,7 @@ async function login(page: Page, base: string, name: string): Promise<Account> {
   return response.json() as Promise<Account>;
 }
 
-async function withChat(page: Page, historySize: number, run: (base: string, colleague: Account, db: DB) => Promise<void>) {
+async function withChat(page: Page, historySize: number, run: (base: string, colleague: Account, db: DB, ctx: ServerContext) => Promise<void>) {
   const { createServer } = await import('../../server/dist/app.js');
   const { loadConfig } = await import('../../server/dist/config.js');
   const { DB } = await import('../../server/dist/db.js');
@@ -40,12 +41,110 @@ async function withChat(page: Page, historySize: number, run: (base: string, col
     await page.goto(base);
     await expect(page.getByRole('heading', { name: "Chat d'équipe" })).toBeVisible();
     await expect(page.getByRole('status').getByText('Connecté', { exact: true })).toBeVisible();
-    await run(base, colleague, ctx.db);
+    await run(base, colleague, ctx.db, ctx);
   } finally {
     await ctx.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 }
+
+for (const width of [320, 1440]) {
+  test(`interprète le Markdown de l’assistant en direct et dans l’historique à ${width} px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await withChat(page, 0, async (_base, _colleague, db, ctx) => {
+      const { serializeMessage } = await import('../../server/dist/app.js');
+      const content = [
+        '### **Compte rendu de la conversation**',
+        '**Durée** : 32 minutes\n**Participants** : Camille et Noémie',
+        '---',
+        '#### Thèmes abordés',
+        '1. **Disponibilité du service**\n   - Vérifier la connexion\n   - Relire le résultat',
+        '> Une citation avec du *texte en italique* et du ~~texte barré~~.',
+        '| Action | Responsable | Échéance | Statut |\n| --- | --- | --- | --- |\n| Relire | Camille | Demain | À faire |',
+        '- [x] Connexion vérifiée\n- [ ] Revue à terminer',
+        'Utiliser la commande `npm run build`.',
+        '```ts\nconst exemple = "<script>aucuneExecution()</script>";\nconst ligneLongue = "' + 'exemple'.repeat(60) + '";\n```',
+        '[Documentation](https://example.org/guide)',
+      ].join('\n\n');
+      const row = db.insertMessage(db.getBot().id, content);
+      ctx.broadcast({ type: 'message', message: serializeMessage(db, row) });
+      const bubble = page.locator(`[data-message-id="${row.id}"]`);
+
+      for (const fromHistory of [false, true]) {
+        if (fromHistory) await page.reload();
+        await expect(bubble.getByRole('heading', { level: 3, name: 'Compte rendu de la conversation' })).toBeVisible();
+        await expect(bubble.locator('strong').getByText('Durée', { exact: true })).toBeVisible();
+        await expect(bubble.getByRole('heading', { level: 4, name: 'Thèmes abordés' })).toBeVisible();
+        await expect(bubble.locator('ol > li > ul > li')).toHaveText(['Vérifier la connexion', 'Relire le résultat']);
+        await expect(bubble.locator('blockquote em')).toHaveText('texte en italique');
+        await expect(bubble.locator('del')).toHaveText('texte barré');
+        await expect(bubble.locator('hr')).toHaveCount(1);
+        await expect(bubble.getByRole('columnheader')).toHaveText(['Action', 'Responsable', 'Échéance', 'Statut']);
+        await expect(bubble.getByRole('checkbox')).toHaveCount(2);
+        await expect(bubble.getByRole('checkbox').first()).toBeChecked();
+        await expect(bubble.getByRole('checkbox').last()).toBeDisabled();
+        await expect(bubble.locator('p > code')).toHaveText('npm run build');
+        await expect(bubble.locator('pre code')).toContainText('<script>aucuneExecution()</script>');
+        await expect(bubble.locator('script')).toHaveCount(0);
+        const link = bubble.getByRole('link', { name: 'Documentation' });
+        await expect(link).toHaveAttribute('href', 'https://example.org/guide');
+        await expect(link).toHaveAttribute('target', '_blank');
+        await expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+        if (width === 320) {
+          for (const area of [bubble.getByRole('region', { name: 'Tableau' }), bubble.locator('pre')]) {
+            expect(await area.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
+            await area.focus();
+            await page.keyboard.press('ArrowRight');
+            await expect.poll(() => area.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+          }
+        }
+        expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+        expect(db.getMessageById(row.id)?.content).toBe(content);
+      }
+
+      const editor = page.getByRole('textbox', { name: 'Écrire un message' });
+      await editor.fill('**Texte littéral** pour @Noémie\n' + longLink);
+      await editor.press('Enter');
+      const own = page.getByRole('article').filter({ hasText: '**Texte littéral**' });
+      await expect(own.locator('[data-mention="person"]')).toHaveText('@Noémie');
+      await expect(own.getByRole('link', { name: 'media.example.org / …' })).toHaveAttribute('href', longLink);
+      await expect(own.locator('strong').getByText('Texte littéral', { exact: true })).toHaveCount(0);
+    });
+  });
+}
+
+test('neutralise le HTML et les liens dangereux sans charger les images distantes de l’assistant', async ({ page }) => {
+  let imageRequests = 0;
+  await page.route('https://tracking.example.test/**', async (route) => {
+    imageRequests++;
+    await route.abort();
+  });
+  await withChat(page, 0, async (_base, _colleague, db) => {
+    const content = [
+      '<script>document.documentElement.dataset.markdownInjected = "oui"</script>',
+      '<img src="https://tracking.example.test/html.png" onerror="document.documentElement.dataset.markdownInjected=\'oui\'">',
+      '<iframe src="https://tracking.example.test/frame"></iframe>',
+      '<svg onload="document.documentElement.dataset.markdownInjected=\'oui\'"></svg>',
+      '[Lien script](javascript:alert%281%29)',
+      '[Lien data](data:text/html,test)',
+      '[Lien avec identifiants](https://secret:password@tracking.example.test/)',
+      '![Illustration](https://tracking.example.test/image.png)',
+      '[Documentation sûre](https://example.org/guide)',
+    ].join('\n\n');
+    const row = db.insertMessage(db.getBot().id, content);
+    await page.reload();
+    const bubble = page.locator(`[data-message-id="${row.id}"]`);
+    await expect(bubble.getByText('Lien script', { exact: true })).toBeVisible();
+    await expect(bubble.getByText('Lien data', { exact: true })).toBeVisible();
+    await expect(bubble.getByText('Lien avec identifiants', { exact: true })).toBeVisible();
+    await expect(bubble.getByRole('link')).toHaveCount(2);
+    await expect(bubble.getByRole('link', { name: 'Illustration' })).toHaveAttribute('href', 'https://tracking.example.test/image.png');
+    await expect(bubble.getByRole('link', { name: 'Documentation sûre' })).toHaveAttribute('href', 'https://example.org/guide');
+    await expect(bubble.locator('script, img, iframe, svg')).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.dataset.markdownInjected)).toBeUndefined();
+    expect(imageRequests).toBe(0);
+  });
+});
 
 test('garde le brouillon après un échec et attend la confirmation avant de publier un fichier', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
