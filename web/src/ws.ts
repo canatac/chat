@@ -1,4 +1,4 @@
-import type { CallInfo, ConversationActivity, Meeting, MentionNotification, Message, MessageReceipt, User } from './types';
+import type { CallInfo, ConversationActivity, Meeting, MentionNotification, Message, MessageFile, MessageReceipt, User } from './types';
 import type { SecurityReview } from './types';
 
 export interface WsEvent {
@@ -6,6 +6,7 @@ export interface WsEvent {
   reviewId?: string;
   type: string;
   message?: Message;
+  file?: MessageFile;
   messages?: Message[];
   notification?: MentionNotification;
   user?: User;

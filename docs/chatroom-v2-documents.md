@@ -6,6 +6,8 @@ Le texte et les propriétés documentaires restent dans le SQLite du salon. Seul
 
 L’explorateur affiche l’extraction en attente, en cours, disponible ou bloquée. « Texte disponible » signifie que l’extraction a abouti ; le contrôle LinGuard intervient lors de l’envoi à l’IA. Une extraction interrompue, chiffrée, vide, trop longue ou signalée comme partielle ne fournit aucun extrait au RAG. Le motif et le bouton **Réessayer l’analyse** se trouvent dans les détails du fichier.
 
+Dans le chat, joindre un fichier puis choisir **Résumer le fichier**, **Analyser / questionner**, ou une commande `/ask`, `/resume` ou `/solve` du menu IA. Cliquer sur **Envoyer** : le serveur attend la fin de l’extraction et utilise le contenu du fichier ciblé, même si la question ne partage aucun mot avec celui-ci. Les actions **Résumer** et **Analyser / questionner** d’un fichier déjà publié permettent de le sélectionner sans nouveau téléversement. Le statut de l’extraction est visible dans le message. Si elle échoue, la demande IA est arrêtée avec son motif. Sans fichier sélectionné, `/resume` résume la conversation comme auparavant.
+
 ## Limites pour une VM de 2 CPU et 8 Go
 
 | Ressource | Plafond livré |

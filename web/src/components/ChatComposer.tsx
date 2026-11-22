@@ -13,8 +13,9 @@ import { api } from '../api';
 import { formatFileSize } from '../formatFileSize';
 import { insertMentionTrigger, mentionAt, mentionsAfterEdit } from '../mentions';
 import { chatColors } from '../theme';
-import type { AgendaAssistantResponse, Mention, Message, User } from '../types';
+import type { AgendaAssistantResponse, Mention, Message, MessageFile, User } from '../types';
 import ConversationIndicators from './ConversationIndicators';
+import DocumentAnalysis from './DocumentAnalysis';
 
 const MAX_MESSAGE_LENGTH = 4000;
 
@@ -26,6 +27,7 @@ const commands = [
   { name: '/agenda', description: 'Planifier un appel ou interroger l’agenda' },
   { name: '/aide', description: 'Afficher les commandes disponibles' },
 ];
+const documentCommands = new Set(['/ask', '/resume', '/solve']);
 
 const toolStyle = {
   width: 39,
@@ -48,6 +50,7 @@ interface Props {
   assistantResponding: boolean;
   members: User[];
   ownId: number;
+  documentRequest?: { nonce: number; file: MessageFile; command: 'ask' | 'resume' };
 }
 
 type MentionOption = { userId: number | null; name: string; avatar?: string | null; detail?: string };
@@ -55,13 +58,14 @@ const mentionList = 'chat-mention-options';
 const optionId = (option: MentionOption) => 'chat-mention-option-' + (option.userId ?? 'room');
 const searchKey = (text: string) => text.normalize('NFD').replace(/\p{M}/gu, '').toLocaleLowerCase('fr');
 
-export default function ChatComposer({ onPublished, onAgenda, onTyping, typing, assistantResponding, members, ownId }: Props) {
+export default function ChatComposer({ onPublished, onAgenda, onTyping, typing, assistantResponding, members, ownId, documentRequest }: Props) {
   const [draft, setDraft] = useState('');
   const [mentions, setMentions] = useState<Mention[]>([]);
   const [caret, setCaret] = useState<number | null>(null);
   const [dismissed, setDismissed] = useState(false);
   const [highlight, setHighlight] = useState(-1);
   const [file, setFile] = useState<File | null>(null);
+  const [reference, setReference] = useState<MessageFile | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [commandAnchor, setCommandAnchor] = useState<HTMLElement | null>(null);
@@ -71,11 +75,38 @@ export default function ChatComposer({ onPublished, onAgenda, onTyping, typing, 
   const typingSentAt = useRef(0);
 
   const content = draft.trim();
+  const attachment = file ?? reference;
   const tooLong = content.length > MAX_MESSAGE_LENGTH;
-  const canSubmit = Boolean(content || file) && !tooLong && !sending;
+  const canSubmit = Boolean(content || attachment) && !tooLong && !sending;
   const command = commandIn(draft);
   const agendaCommand = command?.name === '/agenda';
   const agendaPrompt = agendaCommand ? content.slice('/agenda'.length).trim() : '';
+
+  useEffect(() => {
+    if (!documentRequest) return;
+    setFile(null);
+    setReference(documentRequest.file);
+    setDraft((previous) => {
+      const command = commandIn(previous);
+      const text = command ? previous.trimStart().slice(command.name.length).trimStart() : previous;
+      return '/' + documentRequest.command + ' ' + text;
+    });
+    setMentions([]);
+    setError(null);
+    setCaret(null);
+    textInput.current?.focus();
+  }, [documentRequest]);
+
+  useEffect(() => {
+    if (!reference || !['pending', 'processing'].includes(reference.analysis?.status ?? '')) return;
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      void api.fileDetail(reference.id).then(({ file: loaded }) => {
+        if (!cancelled) setReference(loaded);
+      }).catch(() => {});
+    }, 1500);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [reference?.id, reference?.analysis?.status]);
   const options = useMemo(() => {
     const people = members.filter((member) => member.mentionable !== false && !member.isBot);
     const counts = new Map<string, number>();
@@ -169,8 +200,8 @@ export default function ChatComposer({ onPublished, onAgenda, onTyping, typing, 
 
   const submit = async () => {
     if (!canSubmit || submitPending.current) return;
-    if (agendaCommand && file) {
-      setError('Retire la pièce jointe pour utiliser /agenda.');
+    if (attachment && command && !documentCommands.has(command.name)) {
+      setError('Utilise /ask, /resume ou /solve avec cette pièce jointe.');
       return;
     }
     submitPending.current = true;
@@ -184,11 +215,12 @@ export default function ChatComposer({ onPublished, onAgenda, onTyping, typing, 
         const start = draft.length - draft.trimStart().length;
         const hints = mentions.filter((mention) => mention.start >= start && mention.end <= start + content.length)
           .map((mention) => ({ ...mention, start: mention.start - start, end: mention.end - start }));
-        const result = file ? await api.uploadFile(file, content, true, undefined, hints) : await api.send(content, hints);
+        const result = file ? await api.uploadFile(file, content, true, undefined, hints) : await api.send(content || `📎 ${reference!.name}`, hints, reference ? [reference.id] : []);
         if (!result.message) throw new Error('Le serveur n’a pas confirmé la publication.');
         onPublished(result.message);
       }
       setFile(null);
+      setReference(null);
       setDraft('');
       setMentions([]);
       setCaret(null);
@@ -196,7 +228,7 @@ export default function ChatComposer({ onPublished, onAgenda, onTyping, typing, 
     } catch (failure) {
       const detail = failure instanceof Error && !(failure instanceof TypeError) ? failure.message : '';
       const message = agendaCommand ? 'Impossible d’interroger l’agenda.'
-        : file ? 'Impossible d’envoyer la pièce jointe.' : 'Impossible d’envoyer le message.';
+        : attachment ? 'Impossible d’envoyer la pièce jointe.' : 'Impossible d’envoyer le message.';
       setError(detail ? message + ' ' + detail : message);
     } finally {
       submitPending.current = false;
@@ -277,24 +309,31 @@ export default function ChatComposer({ onPublished, onAgenda, onTyping, typing, 
               ))}
             </Paper>
           )}
-          {file && (
+          {attachment && (
             <Box
               sx={{
                 mx: 0.65, my: 0.65, p: 0.75,
-                display: 'flex', alignItems: 'center', gap: 1,
+                display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap',
                 borderRadius: '9px', bgcolor: chatColors.background, border: '1px solid ' + chatColors.border,
               }}
             >
               <InsertDriveFileOutlinedIcon fontSize="small" sx={{ ml: 0.25, color: chatColors.accent }} />
               <Box sx={{ minWidth: 0, flex: 1 }}>
-                <Typography noWrap title={file.name} sx={{ fontSize: '0.83rem', fontWeight: 700, color: chatColors.ink }}>
-                  {file.name}
+                <Typography noWrap title={attachment.name} sx={{ fontSize: '0.83rem', fontWeight: 700, color: chatColors.ink }}>
+                  {attachment.name}
                 </Typography>
-                <Typography component="span" variant="caption" sx={{ color: chatColors.muted }}>{formatFileSize(file.size)}</Typography>
+                <Typography component="span" variant="caption" sx={{ color: chatColors.muted }}>{formatFileSize(attachment.size)}</Typography>
+                {reference && <DocumentAnalysis analysis={reference.analysis} />}
               </Box>
-              <IconButton aria-label="Retirer la pièce jointe" size="small" disabled={sending} onClick={() => setFile(null)} sx={toolStyle}>
+              <IconButton aria-label="Retirer la pièce jointe" size="small" disabled={sending} onClick={() => { setFile(null); setReference(null); }} sx={toolStyle}>
                 <CloseIcon fontSize="small" />
               </IconButton>
+              <Box sx={{ width: '100%', display: 'flex', flexWrap: 'wrap', gap: 0.75, alignItems: 'center' }}>
+                <Button size="small" disabled={sending} onClick={() => selectCommand('/resume')}>Résumer le fichier</Button>
+                <Button size="small" disabled={sending} onClick={() => selectCommand('/ask')}>Analyser / questionner</Button>
+                <Typography variant="caption" sx={{ color: chatColors.muted }}>Extraction locale puis contrôle LinGuard avant l’IA.</Typography>
+              </Box>
+              {reference?.analysis?.error && <Typography role="status" variant="caption" color="warning.main" sx={{ width: '100%' }}>{reference.analysis.error}</Typography>}
             </Box>
           )}
           <TextField
@@ -305,9 +344,9 @@ export default function ChatComposer({ onPublished, onAgenda, onTyping, typing, 
             fullWidth
             size="small"
             inputRef={textInput}
-            placeholder={file ? 'Ajouter un message (facultatif)…' : 'Écrire un message…'}
+            placeholder={attachment ? 'Ajouter une question ou choisir Résumer le fichier…' : 'Écrire un message…'}
             error={tooLong}
-            helperText={tooLong ? 'Le message dépasse la limite de 4 000 caractères.' : command?.description}
+            helperText={tooLong ? 'Le message dépasse la limite de 4 000 caractères.' : attachment && command?.name === '/resume' ? 'Résumer le document joint après son extraction locale' : command?.description}
             onChange={(event) => changeDraft(event.target.value, event.target.selectionStart)}
             onKeyDown={(event) => {
               if (event.nativeEvent.isComposing) return;
@@ -354,7 +393,7 @@ export default function ChatComposer({ onPublished, onAgenda, onTyping, typing, 
               onChange={(event) => {
                 const selected = event.target.files?.[0];
                 event.target.value = '';
-                if (selected) { setFile(selected); setError(null); }
+                if (selected) { setFile(selected); setReference(null); setError(null); }
               }}
             />
             <Tooltip title="Joindre un fichier">
@@ -375,7 +414,7 @@ export default function ChatComposer({ onPublished, onAgenda, onTyping, typing, 
               <span>
                 <IconButton
                   aria-label="Commandes de l’assistant"
-                  disabled={Boolean(file) || sending}
+                  disabled={sending}
                   aria-haspopup="menu"
                   aria-expanded={Boolean(commandAnchor)}
                   onClick={(event) => setCommandAnchor(event.currentTarget)}
@@ -414,10 +453,10 @@ export default function ChatComposer({ onPublished, onAgenda, onTyping, typing, 
           slotProps={{ paper: { sx: { maxWidth: 'calc(100vw - 28px)', mb: 1, borderRadius: '12px' } } }}
         >
           {commands.map((entry) => (
-            <MenuItem key={entry.name} onClick={() => selectCommand(entry.name)}>
+            <MenuItem key={entry.name} disabled={Boolean(attachment) && !documentCommands.has(entry.name)} onClick={() => selectCommand(entry.name)}>
               <ListItemText
                 primary={entry.name}
-                secondary={entry.description}
+                secondary={attachment && entry.name === '/resume' ? 'Résumer le document joint' : entry.description}
                 slotProps={{ primary: { sx: { fontWeight: 720, color: chatColors.accent } } }}
               />
             </MenuItem>
