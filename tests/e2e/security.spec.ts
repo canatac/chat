@@ -53,9 +53,9 @@ test('à 320 px, administre la politique puis annule ou masque avant tout envoi 
       await settings.getByRole('button', { name: 'Enregistrer la politique' }).click();
       await expect(settings).toBeHidden();
     };
-    const send = async (label: string) => {
+    const send = async (label: string, withPii = true) => {
       const editor = page.getByRole('textbox', { name: 'Écrire un message' });
-      await editor.fill('/ask ' + label + ' Élodie 🧪 ' + pii);
+      await editor.fill('/ask ' + label + (withPii ? ' Élodie 🧪 ' + pii : ''));
       await editor.press('Enter');
       await expect(page.locator('textarea[aria-label="Écrire un message"]')).toBeEmpty();
     };
@@ -64,6 +64,7 @@ test('à 320 px, administre la politique puis annule ou masque avant tout envoi 
     await send('Annulation');
     const review = page.getByRole('dialog', { name: 'Données personnelles détectées' });
     await expect(review).toContainText('EMAIL');
+    await expect(review.getByRole('list', { name: 'Origine des détections' })).toContainText('Question actuelle');
     await expect(review).not.toContainText(pii);
     expect(sent.length).toBe(0);
     await review.getByRole('button', { name: 'Annuler l’envoi' }).click();
@@ -77,15 +78,50 @@ test('à 320 px, administre la politique puis annule ou masque avant tout envoi 
     expect(sent[0]).not.toContain(pii);
     expect(sent[0]).toContain('[EMAIL]');
 
+    await send('Résume notre discussion', false);
+    await expect(review).toBeVisible();
+    const origins = review.getByRole('list', { name: 'Origine des détections' });
+    await expect(origins).toContainText('Historique de la conversation');
+    await expect(origins).not.toContainText('Question actuelle');
+    await expect(review).toContainText('Même si ta question ne contient aucune donnée personnelle');
+    await expect(review).toContainText('Les messages et documents originaux restent consultables');
+    const remember = review.getByRole('checkbox', { name: 'Mémoriser ce masquage pour mes prochaines demandes dans ce salon' });
+    await expect(remember).not.toBeChecked();
+    expect(sent.length).toBe(1);
+    await remember.check();
+    await expect(review.getByRole('button', { name: 'Mémoriser et envoyer' })).toBeInViewport();
+    expect(await review.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+    await review.getByRole('button', { name: 'Mémoriser et envoyer' }).click();
+    await expect(page.getByText('Réponse contrôlée 2', { exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Mes masquages (1)' })).toBeVisible();
+    await page.reload();
+    await expect(page.getByRole('button', { name: 'Mes masquages (1)' })).toBeVisible();
+    await send('Une question sans donnée personnelle', false);
+    await expect(page.getByText('Réponse contrôlée 3', { exact: true })).toBeVisible();
+    await expect(review).toBeHidden();
+    for (const request of sent) expect(request).not.toContain(pii);
+
+    await page.getByRole('button', { name: 'Mes masquages (1)' }).click();
+    const memory = page.getByRole('dialog', { name: 'Mes masquages mémorisés' });
+    await expect(memory).toContainText('LinGuard contrôle toujours chaque demande');
+    await memory.getByRole('button', { name: 'Oublier mes masquages' }).click();
+    await expect(memory).toBeHidden();
+    await expect(page.getByRole('button', { name: /^Mes masquages \(/ })).toHaveCount(0);
+    await send('Après oubli', false);
+    await expect(review).toBeVisible();
+    await expect(remember).not.toBeChecked();
+    await review.getByRole('button', { name: 'Annuler l’envoi' }).click();
+
     await setPolicy('Bloquer l’envoi');
     await send('Blocage');
     await expect(page.getByText(/Des données personnelles ont été détectées/)).toBeVisible();
-    expect(sent.length).toBe(1);
+    expect(sent.length).toBe(3);
+    await expect(page.getByText(/Des données personnelles ont été détectées/)).toContainText('administrateur');
     await expect(review).toBeHidden();
     await setPolicy('Masquer automatiquement et envoyer');
     await send('Masquage automatique');
-    await expect(page.getByText('Réponse contrôlée 2', { exact: true })).toBeVisible();
-    expect(sent[1]).not.toContain(pii);
+    await expect(page.getByText('Réponse contrôlée 4', { exact: true })).toBeVisible();
+    expect(sent[3]).not.toContain(pii);
     await expect(review).toBeHidden();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
   } finally {

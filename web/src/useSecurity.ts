@@ -8,6 +8,7 @@ export default function useSecurity(socket: ChatSocket | null, online: boolean) 
   const [reviews, setReviews] = useState<SecurityReview[]>([]);
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string>();
   const pending = useRef<AbortController>();
   const generation = useRef(0);
 
@@ -39,7 +40,7 @@ export default function useSecurity(socket: ChatSocket | null, online: boolean) 
     } else if (event.type === 'securityReviewClosed') {
       generation.current++;
       setReviews((current) => current.filter((item) => item.id !== event.reviewId));
-    } else if (event.type === 'securityPolicyChanged') void load();
+    } else if (event.type === 'securityPolicyChanged' || event.type === 'securityMaskingChanged') void load();
   }), [load, socket]);
 
   async function save(policy: SecurityPolicy): Promise<boolean> {
@@ -58,17 +59,38 @@ export default function useSecurity(socket: ChatSocket | null, online: boolean) 
     }
   }
 
-  async function decide(action: 'cancel' | 'anonymize') {
+  async function decide(action: 'cancel' | 'anonymize', remember = false) {
     const review = reviews[0];
     if (!review || busy) return;
     setBusy(true);
     setError(undefined);
     try {
-      await api.security.decide(review.id, action);
+      await api.security.decide(review.id, action, remember);
       setReviews((current) => current.filter((item) => item.id !== review.id));
+      if (action === 'anonymize' && remember) {
+        setNotice('Masquage mémorisé pour tes prochaines demandes dans ce salon.');
+        await load();
+      }
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : 'Impossible de confirmer la décision.');
       await load();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function forgetMasking(): Promise<boolean> {
+    if (busy) return false;
+    setBusy(true);
+    setError(undefined);
+    try {
+      await api.security.forgetMasking();
+      await load();
+      setNotice('Masquages mémorisés effacés. Les prochaines détections suivront la politique du salon.');
+      return true;
+    } catch {
+      setError('Impossible d’effacer les masquages mémorisés.');
+      return false;
     } finally {
       setBusy(false);
     }
@@ -87,5 +109,5 @@ export default function useSecurity(socket: ChatSocket | null, online: boolean) 
     }
   }
 
-  return { state, review: reviews[0], error, busy, save, decide, check };
+  return { state, review: reviews[0], error, busy, notice, dismissNotice: () => setNotice(undefined), save, decide, check, forgetMasking };
 }

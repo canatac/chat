@@ -105,8 +105,9 @@ export const api = {
     get: (signal?: AbortSignal) => req<SecurityState>('/api/security', { signal }),
     check: () => req<{ health: SecurityState['health'] }>('/api/security/check', { method: 'POST' }),
     save: (policy: SecurityPolicy) => req<{ policy: SecurityPolicy }>('/api/security/policy', { method: 'PUT', body: JSON.stringify(policy) }),
-    decide: (id: string, action: 'cancel' | 'anonymize') =>
-      req<void>('/api/security/reviews/' + id, { method: 'POST', body: JSON.stringify({ action }) }),
+    decide: (id: string, action: 'cancel' | 'anonymize', remember = false) =>
+      req<void>('/api/security/reviews/' + id, { method: 'POST', body: JSON.stringify({ action, remember }) }),
+    forgetMasking: () => req<void>('/api/security/masking', { method: 'DELETE' }),
   },
   register: (name: string, email: string, password: string, roomName: string) =>
     req<RoomSession & { token: string }>('/api/auth/register', {
