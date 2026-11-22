@@ -8,6 +8,7 @@ import { Fragment, useState, type ReactNode } from 'react';
 import { saveFile } from '../api';
 import { chatColors } from '../theme';
 import type { Mention, Message, MessageFile, MessageReceipt, User } from '../types';
+import MarkdownContent from './MarkdownContent';
 
 interface Props {
   message: Message;
@@ -209,7 +210,9 @@ export default function MessageRow({ message, sender, own, groupStart, highlight
             outlineOffset: 2,
           }}
         >
-          {!attachmentOnly && <MessageText content={message.content} mentions={message.mentions ?? []} />}
+          {!attachmentOnly && (isBot
+            ? <MarkdownContent content={message.content} />
+            : <MessageText content={message.content} mentions={message.mentions ?? []} />)}
           {files.length > 0 && (
             <Box sx={{ display: 'grid', minWidth: 0, gap: 0.7, mt: attachmentOnly ? 0 : 0.8 }}>
               {files.map((file) => <FileDownload key={file.id} file={file} />)}

@@ -6,7 +6,7 @@ import path from 'node:path';
 import type { Meeting } from '../../web/src/types';
 
 type Account = { token: string; user: { id: number } };
-const reportText = 'Décision du point de suivi : la revue est validée.';
+const reportText = '### Compte rendu du point de suivi\n\n**Décision** : la revue est validée.\n\n- Relire la proposition.\n- Préparer la prochaine revue.';
 const password = 'chat-agenda-e2e';
 
 async function signIn(page: Page, base: string, name: string): Promise<Account> {
@@ -60,7 +60,7 @@ test('planifie un appel depuis le prompt et ouvre son compte rendu depuis l’ag
       else {
         const response = await page.request.get(base + '/api/agenda/' + meeting!.id, { headers });
         const stored = (await response.json()).meeting;
-        await route.fulfill({ json: { kind: 'results', meetings: [stored], total: 1, answer: '1 réunion avec un compte rendu disponible.' } });
+        await route.fulfill({ json: { kind: 'results', meetings: [stored], total: 1, answer: '**1 réunion** avec un compte rendu disponible.' } });
       }
     });
 
@@ -117,11 +117,22 @@ test('planifie un appel depuis le prompt et ouvre son compte rendu depuis l’ag
     ctx.db.insertFile(organizer.user.id, null, filename, 'text/markdown', Buffer.byteLength(reportText), filename, call.id, null, 'report');
     ctx.broadcast({ type: 'docsChanged' });
 
+    let downloadVerified = false;
     async function readReport(from: ReturnType<Page['getByRole']>) {
       await from.getByRole('button', { name: 'Lire le compte rendu' }).tap();
       const reader = page.getByRole('dialog', { name: 'Compte rendu' });
-      await expect(reader.getByText(reportText)).toBeVisible();
+      await expect(reader.getByRole('heading', { name: 'Compte rendu du point de suivi', level: 3 })).toBeVisible();
+      await expect(reader.locator('strong')).toHaveText('Décision');
+      await expect(reader.getByRole('listitem')).toHaveText(['Relire la proposition.', 'Préparer la prochaine revue.']);
       expect(await reader.evaluate((item) => item.scrollWidth <= item.clientWidth + 1)).toBe(true);
+      if (!downloadVerified) {
+        const downloaded = page.waitForEvent('download');
+        await reader.getByRole('button', { name: 'Télécharger' }).tap();
+        const download = await downloaded;
+        expect(download.suggestedFilename()).toBe(filename);
+        expect(fs.readFileSync((await download.path())!, 'utf8')).toBe(reportText);
+        downloadVerified = true;
+      }
       await reader.getByRole('button', { name: 'Fermer', exact: true }).tap();
     }
     const activeCall = page.getByRole('dialog', { name: /Appel en cours.*Point de suivi/ });
@@ -134,6 +145,7 @@ test('planifie un appel depuis le prompt et ouvre son compte rendu depuis l’ag
     await composer.fill('/agenda Ai-je un compte rendu pour le point de suivi ?');
     await composer.press('Enter');
     await expect(agenda.getByText('1 réunion avec un compte rendu disponible.')).toBeVisible();
+    await expect(agenda.locator('strong').getByText('1 réunion', { exact: true })).toBeVisible();
     await agenda.getByRole('button', { name: /Point de suivi/ }).tap();
     await readReport(agenda);
   } finally {
