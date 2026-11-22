@@ -4,8 +4,20 @@ services:
     container_name: chat-pme
     restart: unless-stopped
     network_mode: host
+    cpus: 0.75
+    mem_limit: 2g
+    memswap_limit: 2g
+    pids_limit: 192
+    tmpfs:
+      - /tmp:size=256m,mode=1777,noexec,nosuid
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
     environment:
       HOST: "${HOST:-127.0.0.1}"
+      NODE_OPTIONS: "--max-old-space-size=1024"
     env_file:
       - .env
     volumes:
@@ -13,6 +25,38 @@ services:
       # .env monté en lecture seule et relu par l'app à chaque démarrage :
       # après édition du .env, `docker compose restart chat` suffit (pas besoin de recréer le conteneur)
       - ./.env:/app/.env:ro
+
+  tika:
+    image: apache/tika:4.2.0-full
+    restart: unless-stopped
+    init: true
+    cpus: 1.0
+    mem_limit: 2g
+    memswap_limit: 2g
+    pids_limit: 128
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      JAVA_TOOL_OPTIONS: "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1 -Djava.io.tmpdir=/tmp"
+      OMP_THREAD_LIMIT: "1"
+      OMP_NUM_THREADS: "1"
+    ports:
+      - "127.0.0.1:9998:9998"
+    networks:
+      - documents-local
+    tmpfs:
+      - /tmp:size=512m,mode=1777,noexec,nosuid
+    volumes:
+      - ./deploy/tika-config.json:/etc/tika-config.json:ro
+    command: ["-c", "/etc/tika-config.json"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
 
   coturn:
     image: coturn/coturn:4.6.2
@@ -79,3 +123,7 @@ volumes:
   wg-config:
   caddy-data:
   caddy-config:
+
+networks:
+  documents-local:
+    internal: true
