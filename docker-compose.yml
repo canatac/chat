@@ -43,8 +43,6 @@ services:
       JAVA_TOOL_OPTIONS: "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1 -Djava.io.tmpdir=/tmp"
       OMP_THREAD_LIMIT: "1"
       OMP_NUM_THREADS: "1"
-    ports:
-      - "127.0.0.1:9998:9998"
     networks:
       - documents-local
     tmpfs:
@@ -56,6 +54,35 @@ services:
       driver: json-file
       options:
         max-size: "5m"
+        max-file: "2"
+
+  # Docker ne publie pas les ports d'un conteneur sur un réseau internal seul.
+  # Ce relais publie le port local sans donner de réseau sortant à Tika.
+  tika-access:
+    image: haproxy:3.2.27-alpine
+    restart: unless-stopped
+    cpus: 0.10
+    mem_limit: 64m
+    memswap_limit: 64m
+    pids_limit: 16
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:9998:9998"
+    networks:
+      - documents-access
+      - documents-local
+    volumes:
+      - ./deploy/tika-access.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      - tika
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
         max-file: "2"
 
   coturn:
@@ -127,3 +154,5 @@ volumes:
 networks:
   documents-local:
     internal: true
+  documents-access:
+    driver: bridge
