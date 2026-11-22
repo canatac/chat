@@ -124,7 +124,25 @@ export interface FileItem {
   messageId: number | null;
   folderId: number | null;
   user: { id: number; name: string };
-  analysis?: { status: 'pending' | 'processing' | 'ready' | 'blocked'; error: string | null };
+  analysis?: { status: 'pending' | 'processing' | 'ready' | 'blocked'; error: string | null; issue?: DocumentIssue | null };
+}
+
+export interface DocumentIssue {
+  stage: 'extraction';
+  category: 'service' | 'document' | 'limit' | 'unsupported' | 'unknown';
+  code: string;
+  title: string;
+  message: string;
+  action: string;
+  retryable: boolean;
+  diagnostic?: { httpStatus?: number; networkCode?: string };
+}
+
+export interface DocumentServiceHealth {
+  available: boolean;
+  checkedAt: string;
+  version: string | null;
+  issue: DocumentIssue | null;
 }
 
 export type FileColumn = 'name' | 'date' | 'size';

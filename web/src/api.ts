@@ -2,6 +2,7 @@ import type { AdminStats, CallInfo, DocumentIds, FileEvent, FileFilters, FileIte
 import type { AgendaAssistantResponse, Meeting, MeetingInput, MeetingResponse } from './types';
 import type { MessageReceipt, UnreadMessages } from './types';
 import type { SecurityPolicy, SecurityState } from './types';
+import type { DocumentServiceHealth } from './types';
 
 interface FileListRequest {
   query: string;
@@ -310,6 +311,7 @@ export const api = {
   fileDetail: (id: number) => req<{ file: FileItem; folderPath: Folder[]; history: FileEvent[] }>(`/api/files/${id}`),
   analyzeFile: (id: number) => req<{ file: FileItem }>(`/api/files/${id}/analyze`, { method: 'POST' }),
   documentResources: () => req<{ usedBytes: number; limits: { uploadBytes: number; storageBytes: number }; queue: { pending: number; concurrency: number } }>('/api/documents/resources'),
+  documentService: () => req<DocumentServiceHealth>('/api/documents/service'),
   events: (limit = 100) => req<{ events: FileEvent[] }>(`/api/events?limit=${limit}`),
   rtcConfig: () => req<{ iceServers: RTCIceServer[] }>('/api/rtc-config'),
 };

@@ -1200,8 +1200,7 @@ export default function DocDrawer({ open, onClose, socket }: Props) {
           {detail && (
             <>
               <Typography variant="subtitle1" sx={{ fontWeight: 750, overflowWrap: 'anywhere', mb: 1.5 }}>{detail.file.name}</Typography>
-              <Box sx={{ mb: 2 }}><DocumentAnalysis analysis={detail.file.analysis} /></Box>
-              {detail.file.analysis?.error && <Alert severity="warning" sx={{ mb: 2 }}>{detail.file.analysis.error}</Alert>}
+              <Box sx={{ mb: 2 }}><DocumentAnalysis analysis={detail.file.analysis} details /></Box>
               <Typography variant="body2" sx={{ mb: 2 }}>Extraction locale : PDF, images et documents bureautiques. Le texte utilisé sera contrôlé par LinGuard avant l’envoi à l’IA.</Typography>
               <Box
                 component="dl"

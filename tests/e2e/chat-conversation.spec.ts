@@ -245,6 +245,39 @@ for (const width of [320, 1440]) {
   });
 }
 
+for (const width of [320, 1440]) {
+  test(`explique la cause documentaire et vérifie le service depuis le message à ${width} px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await withChat(page, 0, async (_base, _colleague, db, ctx) => {
+      const { serializeMessage, toPublicFile } = await import('../../server/dist/app.js');
+      const { documentIssue } = await import('../../server/dist/documents/issues.js');
+      const user = db.getUserByName('Camille')!;
+      const row = db.insertMessage(user.id, '/resume de quoi parle ce document ?');
+      const file = db.insertFile(user.id, row.id, 'MaelGard_Lancement 20261031.pdf', 'application/pdf', 1000, 'diagnostic.pdf');
+      const issue = documentIssue('service-unreachable', 'Connexion refusée par le service documentaire.', { networkCode: 'ECONNREFUSED' });
+      db.setDocumentStatus(file.id, 'blocked', issue.message, issue);
+      await page.route('**/api/documents/service', (route) => route.fulfill({ json: { available: false, version: null, checkedAt: new Date().toISOString(), issue } }));
+      ctx.broadcast({ type: 'message', message: serializeMessage(db, row) });
+      const bubble = page.locator(`[data-message-id="${row.id}"]`);
+      await expect(bubble.getByText('Service documentaire injoignable', { exact: true })).toBeVisible();
+      await expect(bubble.getByText('Connexion refusée par le service documentaire.', { exact: true })).toBeVisible();
+      await expect(bubble).toContainText('Action : Vérifier le service documentaire');
+      await expect(bubble).toContainText('Le contrôle LinGuard reste à effectuer.');
+      await bubble.getByRole('button', { name: 'Vérifier le service', exact: true }).click();
+      await expect(bubble.getByRole('status')).toContainText('Connexion refusée');
+      await bubble.locator('summary').click();
+      await expect(bubble.getByText('Réseau : ECONNREFUSED', { exact: true })).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+      const encrypted = documentIssue('encrypted', 'Document chiffré : fournir une copie déchiffrée.');
+      db.setDocumentStatus(file.id, 'blocked', encrypted.message, encrypted);
+      ctx.broadcast({ type: 'documentAnalysis', file: toPublicFile(db.getFileById(file.id)!) });
+      await expect(bubble.getByText('Document chiffré', { exact: true })).toBeVisible();
+      await expect(bubble.getByRole('button', { name: 'Vérifier le service', exact: true })).toHaveCount(0);
+      await expect(bubble.getByText(/ECONNREFUSED/)).toHaveCount(0);
+    });
+  });
+}
+
 test('sur mobile, garde la position de lecture et rend les accès aux appels, documents et membres visibles', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 740 });
   await withChat(page, 58, async (base, colleague) => {
