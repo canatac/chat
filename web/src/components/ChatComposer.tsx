@@ -323,7 +323,7 @@ export default function ChatComposer({ onPublished, onAgenda, onTyping, typing, 
                   {attachment.name}
                 </Typography>
                 <Typography component="span" variant="caption" sx={{ color: chatColors.muted }}>{formatFileSize(attachment.size)}</Typography>
-                {reference && <DocumentAnalysis analysis={reference.analysis} />}
+                {reference && <DocumentAnalysis analysis={reference.analysis} details />}
               </Box>
               <IconButton aria-label="Retirer la pièce jointe" size="small" disabled={sending} onClick={() => { setFile(null); setReference(null); }} sx={toolStyle}>
                 <CloseIcon fontSize="small" />
@@ -333,7 +333,6 @@ export default function ChatComposer({ onPublished, onAgenda, onTyping, typing, 
                 <Button size="small" disabled={sending} onClick={() => selectCommand('/ask')}>Analyser / questionner</Button>
                 <Typography variant="caption" sx={{ color: chatColors.muted }}>Extraction locale puis contrôle LinGuard avant l’IA.</Typography>
               </Box>
-              {reference?.analysis?.error && <Typography role="status" variant="caption" color="warning.main" sx={{ width: '100%' }}>{reference.analysis.error}</Typography>}
             </Box>
           )}
           <TextField

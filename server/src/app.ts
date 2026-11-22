@@ -15,6 +15,7 @@ import { MoveConflicts, moveDecision, planDocumentMove } from './document-moves.
 import { deriveDocument, HttpError, type DeriveKind } from './llm/derive.js';
 import { handleCommand } from './llm/run.js';
 import { parseCommand, supportsDocuments } from './llm/commands.js';
+import { restoreDocumentIssue, type DocumentIssue } from './documents/issues.js';
 import { DocumentQueue } from './documents/queue.js';
 import { FileResources } from './documents/resources.js';
 import { DOCUMENT_LIMITS, DocumentError, MiB } from './documents/limits.js';
@@ -42,7 +43,7 @@ export interface PublicFile {
   updatedAt: string | null;
   callId: number | null;
   folderId: number | null;
-  analysis: { status: FileRow['document_status']; error: string | null };
+  analysis: { status: FileRow['document_status']; error: string | null; issue: DocumentIssue | null };
 }
 
 export interface PublicFolder {
@@ -87,7 +88,7 @@ export function toPublicFile(f: FileRow): PublicFile {
     updatedAt: f.updated_at ? new Date(f.updated_at).toISOString() : null,
     callId: f.call_id,
     folderId: f.folder_id ?? null,
-    analysis: { status: f.document_status, error: f.document_error },
+    analysis: { status: f.document_status, error: f.document_error, issue: f.document_status === 'blocked' ? restoreDocumentIssue(f.document_issue, f.document_error) : null },
   };
 }
 
@@ -743,6 +744,11 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
         textChars: DOCUMENT_LIMITS.textChars, imagePixels: DOCUMENT_LIMITS.imagePixels },
       usedBytes: config.fileResources!.usedBytes(), queue: config.documents!.stats(),
     });
+  });
+
+  app.get('/api/documents/service', async (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(await config.documents!.serviceStatus());
   });
 
   app.post('/api/files/:id/analyze', (req, res) => {

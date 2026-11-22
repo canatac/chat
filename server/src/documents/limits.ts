@@ -1,3 +1,5 @@
+import { documentIssue, type DocumentIssue, type DocumentIssueCode } from './issues.js';
+
 export const MiB = 1024 * 1024;
 
 // Plafonds communs au backend et au service Tika livré dans deploy/tika-config.json.
@@ -12,9 +14,13 @@ export const DOCUMENT_LIMITS = {
   pending: 16,
 } as const;
 
+const defaultCodes: Partial<Record<number, DocumentIssueCode>> = { 404: 'missing', 409: 'pending', 413: 'size-limit', 415: 'unsupported', 422: 'unreadable', 429: 'service-busy', 503: 'service-unreachable', 507: 'storage-limit' };
+
 export class DocumentError extends Error {
-  constructor(public readonly statusCode: number, message: string) {
+  readonly issue: DocumentIssue;
+  constructor(public readonly statusCode: number, message: string, code?: DocumentIssueCode, diagnostic?: DocumentIssue['diagnostic']) {
     super(message);
     this.name = 'DocumentError';
+    this.issue = documentIssue(code ?? defaultCodes[statusCode] ?? 'unknown', message, diagnostic);
   }
 }

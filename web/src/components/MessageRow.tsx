@@ -122,14 +122,14 @@ function FileDownload({ file, onUseFile }: { file: MessageFile; onUseFile?: Prop
           </ButtonBase>
         </span>
       </Tooltip>
-      {document && <DocumentAnalysis analysis={file.analysis} />}
+      {document && <DocumentAnalysis analysis={file.analysis} details />}
       {document && onUseFile && <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap', mt: 0.3 }}>
         <Button size="small" aria-label={'Résumer ' + file.name} onClick={() => onUseFile(file, 'resume')}>Résumer</Button>
         <Button size="small" aria-label={'Analyser ' + file.name} onClick={() => onUseFile(file, 'ask')}>Analyser / questionner</Button>
-        {file.analysis?.status === 'blocked' && <Button size="small" disabled={retrying} onClick={() => {
+        {file.analysis?.status === 'blocked' && file.analysis.issue?.retryable !== false && <Button size="small" disabled={retrying} onClick={() => {
           setRetrying(true); setRetryError(null);
           void api.analyzeFile(file.id).catch((error) => setRetryError(error instanceof Error ? error.message : 'Analyse impossible.')).finally(() => setRetrying(false));
-        }}>Réessayer l’analyse</Button>}
+        }}>Relancer l’extraction</Button>}
       </Box>}
       {retryError && <Typography role="alert" variant="caption" color="error">{retryError}</Typography>}
       {status === 'error' && (

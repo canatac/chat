@@ -7,6 +7,7 @@ import { handleLinkCommand, maybeAutoLink } from './link.js';
 import { costUsd, type Usage } from './pricing.js';
 import type { ChatMessage } from './providers.js';
 import { DOCUMENT_LIMITS, DocumentError } from '../documents/limits.js';
+import { SecurityBlocked } from '../security/ai-guard.js';
 
 export interface CommandDeps {
   db: DB;
@@ -95,7 +96,11 @@ export async function handleCommand(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     record(baseUsage, message);
-    deps.postBot(`Erreur lors de l'appel au LLM : ${message}`);
+    if (err instanceof DocumentError) {
+      deps.postBot(`Extraction du document — ${err.issue.title}\n\n${message}\n\nAction : ${err.issue.action}\n\nLe contrôle LinGuard n’a pas pu être effectué. Aucun contenu n’a été envoyé au fournisseur IA pour cette demande.`);
+    } else if (err instanceof SecurityBlocked) {
+      deps.postBot(`Contrôle LinGuard — envoi à l’IA interrompu\n\n${message}`);
+    } else deps.postBot(`Erreur lors de l'appel au LLM : ${message}`);
   } finally {
     deps.onResponseActivity?.(false);
   }

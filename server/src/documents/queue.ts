@@ -5,6 +5,8 @@ import { isAudioMime } from '../llm/stt.js';
 import { extractDocument } from './extract.js';
 import { DOCUMENT_LIMITS as limits, DocumentError } from './limits.js';
 import type { FileResources } from './resources.js';
+import { documentIssue, restoreDocumentIssue } from './issues.js';
+import { checkDocumentService, type DocumentServiceHealth } from './service.js';
 
 interface Room { db: DB; uploadsDir: string; changed: (id: number) => void }
 
@@ -15,6 +17,8 @@ export class DocumentQueue {
   private active: Promise<void> | null = null;
   private closed = false;
   private readonly abort = new AbortController();
+  private healthCheck: Promise<DocumentServiceHealth> | null = null;
+  private lastHealth: DocumentServiceHealth | null = null;
   constructor(private readonly tikaUrl: string, private readonly chunkSize: number, private readonly resources: FileResources) {}
 
   register(db: DB, uploadsDir: string, changed: (id: number) => void): void {
@@ -29,7 +33,8 @@ export class DocumentQueue {
     if (file.document_status === 'processing') throw new DocumentError(409, 'Analyse déjà en cours.');
     const pending = this.rooms.reduce((n, room) => n + room.db.pendingDocuments(), 0);
     if (pending > limits.pending || (file.document_status !== 'pending' && pending >= limits.pending)) {
-      db.setDocumentStatus(id, 'blocked', 'File d’analyse pleine (16 documents). Réessayer plus tard.');
+      const message = 'File d’analyse pleine (16 documents). Réessayer plus tard.';
+      db.setDocumentStatus(id, 'blocked', message, documentIssue('service-busy', message));
     } else db.setDocumentStatus(id, 'pending');
     this.kick();
   }
@@ -66,7 +71,10 @@ export class DocumentQueue {
           });
         } finally { release(); }
       } catch (error) {
-        if (!this.closed) room.db.setDocumentStatus(file.id, 'blocked', error instanceof DocumentError ? error.message : 'Extraction impossible. Vérifier le fichier puis réessayer.');
+        if (!this.closed) {
+          const message = error instanceof DocumentError ? error.message : 'Extraction impossible. Vérifier le fichier puis réessayer.';
+          room.db.setDocumentStatus(file.id, 'blocked', message, error instanceof DocumentError ? error.issue : documentIssue('unknown', message));
+        }
       }
       if (!this.closed) room.changed(file.id);
     }
@@ -76,13 +84,24 @@ export class DocumentQueue {
     return { pending: this.rooms.reduce((n, room) => n + room.db.pendingDocuments(), 0), running: Boolean(this.active), concurrency: 1 };
   }
 
+  async serviceStatus(): Promise<DocumentServiceHealth> {
+    if (this.healthCheck) return this.healthCheck;
+    if (this.lastHealth && Date.now() - Date.parse(this.lastHealth.checkedAt) < 3000) return this.lastHealth;
+    this.healthCheck = checkDocumentService(this.tikaUrl).then((health) => { this.lastHealth = health; return health; });
+    try { return await this.healthCheck; }
+    finally { this.healthCheck = null; }
+  }
+
   async waitReady(db: DB, id: number): Promise<void> {
     const deadline = Date.now() + limits.timeoutMs;
     while (!this.closed && Date.now() < deadline) {
       const file = db.getFileById(id);
       if (!file) throw new DocumentError(404, 'Fichier introuvable.');
       if (file.document_status === 'ready') return;
-      if (file.document_status === 'blocked') throw new DocumentError(422, file.document_error ?? 'Analyse bloquée.');
+      if (file.document_status === 'blocked') {
+        const issue = restoreDocumentIssue(file.document_issue, file.document_error);
+        throw new DocumentError(422, issue.message, issue.code, issue.diagnostic);
+      }
       await new Promise<void>((resolve) => { const timer = setTimeout(resolve, 50); timer.unref(); });
     }
     throw new DocumentError(409, 'Analyse encore en attente. Réessayer depuis le document.');

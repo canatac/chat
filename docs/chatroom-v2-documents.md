@@ -8,6 +8,8 @@ L’explorateur affiche l’extraction en attente, en cours, disponible ou bloqu
 
 Dans le chat, joindre un fichier puis choisir **Résumer le fichier**, **Analyser / questionner**, ou une commande `/ask`, `/resume` ou `/solve` du menu IA. Cliquer sur **Envoyer** : le serveur attend la fin de l’extraction et utilise le contenu du fichier ciblé, même si la question ne partage aucun mot avec celui-ci. Les actions **Résumer** et **Analyser / questionner** d’un fichier déjà publié permettent de le sélectionner sans nouveau téléversement. Le statut de l’extraction est visible dans le message. Si elle échoue, la demande IA est arrêtée avec son motif. Sans fichier sélectionné, `/resume` résume la conversation comme auparavant.
 
+Un échec précise désormais sa cause et l’action conseillée : service injoignable, réponse invalide, délai, document illisible/chiffré ou limite atteinte. **Vérifier le service** permet de contrôler sa connexion depuis la chatroom ; une connexion réussie ne garantit pas l’extraction ni l’OCR. Les erreurs d’extraction indiquent que le contrôle LinGuard reste à effectuer. Les anciennes erreurs ambiguës sont précisées lors de leur prochaine relance.
+
 ## Limites pour une VM de 2 CPU et 8 Go
 
 | Ressource | Plafond livré |

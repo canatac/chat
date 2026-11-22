@@ -5,6 +5,7 @@ import { AgendaStore, type MeetingArtifactKind } from './agenda-store.js';
 import { MessageReceipts } from './message-receipts.js';
 import { SecurityStore } from './security/security-store.js';
 import type { Mention, MentionKind } from './mentions.js';
+import type { DocumentIssue } from './documents/issues.js';
 
 export interface UserRow {
   id: number;
@@ -56,6 +57,7 @@ export interface FileRow {
   updated_at: number | null;
   document_status: 'pending' | 'processing' | 'ready' | 'blocked';
   document_error: string | null;
+  document_issue: string | null;
 }
 
 export interface FolderRow {
@@ -276,6 +278,7 @@ export class DB {
       ['updated_at', 'INTEGER'],
       ['document_status', "TEXT NOT NULL DEFAULT 'pending'"],
       ['document_error', 'TEXT'],
+      ['document_issue', 'TEXT'],
     ] as const) {
       if (!fileCols.some((c) => c.name === col)) {
         this.db.exec(`ALTER TABLE files ADD COLUMN ${col} ${def}`);
@@ -555,11 +558,11 @@ export class DB {
 
   insertChunk(fileId: number, idx: number, content: string): void {
     this.db.prepare('INSERT INTO doc_chunks (file_id, idx, content) VALUES (?, ?, ?)').run(fileId, idx, content);
-    this.db.prepare("UPDATE files SET document_status = 'ready', document_error = NULL WHERE id = ?").run(fileId);
+    this.db.prepare("UPDATE files SET document_status = 'ready', document_error = NULL, document_issue = NULL WHERE id = ?").run(fileId);
   }
 
-  setDocumentStatus(id: number, status: FileRow['document_status'], error: string | null = null): void {
-    this.db.prepare('UPDATE files SET document_status = ?, document_error = ? WHERE id = ?').run(status, error, id);
+  setDocumentStatus(id: number, status: FileRow['document_status'], error: string | null = null, issue?: DocumentIssue): void {
+    this.db.prepare('UPDATE files SET document_status = ?, document_error = ?, document_issue = ? WHERE id = ?').run(status, error, issue ? JSON.stringify(issue) : null, id);
     if (status !== 'ready') {
       this.db.prepare('DELETE FROM doc_chunks WHERE file_id = ?').run(id);
       this.db.prepare('DELETE FROM document_text WHERE file_id = ?').run(id);
