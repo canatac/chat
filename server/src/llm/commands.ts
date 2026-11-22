@@ -10,13 +10,14 @@ export interface Command {
 
 export const COMMAND_HELP = [
   'Commandes disponibles :',
-  '• /resume [n] — compte-rendu des n derniers messages (50 par défaut)',
+  '• /resume [n] — résumer le document joint ou, sans document, les n derniers messages (50 par défaut)',
   '• /solve <problème> — pistes de solution pour un problème soulevé dans la chatroom',
   '• /ask <question> — question à l\u2019assistant (contexte de la chatroom + documents déposés)',
   '• /lien <url> [titre] — télécharge un média (ex. émission radio .m4a), le transcrit (STT), génère un CR et archive une copie webm',
   '• /agenda [demande] — planifier un appel ou rechercher des réunions dans le panneau Agenda',
   '• /aide — afficher cette aide',
   'Les commandes /ask et /solve fouillent aussi les documents déposés dans l\u2019espace documentaire (RAG).',
+  'Avec un document joint ou sélectionné dans le chat, /ask, /resume et /solve utilisent ce document après son extraction locale.',
   'Coller seul un lien média (.m4a, .mp3, .webm…) déclenche aussi /lien automatiquement.',
 ].join('\n');
 
@@ -35,6 +36,23 @@ export function parseCommand(content: string): Command | null {
 
 export function buildSystemPrompt(): string {
   return "Tu es l'assistant d'une chatroom d'équipe. Tu réponds en français, de manière concise et structurée (puces et titres courts quand c'est utile). Tu t'appuies sur la conversation et, quand elle est fournie, sur les documents de référence ; tu n'inventes pas de faits et tu cites le document concerné quand tu t'en sers.";
+}
+
+export function supportsDocuments(command: Command): boolean {
+  return ['ask', 'resume', 'solve'].includes(command.name);
+}
+
+export function buildDocumentUserMessage(cmd: Command, docs: string) {
+  const instructions = cmd.name === 'resume'
+    ? 'Résume les documents joints : sujet, points clés, chiffres importants, conclusions et actions éventuelles. Cite le nom du document concerné. Ne résume pas la conversation et n’invente aucune information.'
+    : cmd.name === 'solve'
+      ? 'À partir des documents joints, propose des pistes concrètes pour résoudre le problème indiqué. Cite tes sources et signale les informations manquantes.'
+      : 'Réponds à la question en t’appuyant sur les documents joints. Si aucune question n’est précisée, analyse leur contenu, leurs points clés et les éléments à vérifier. Cite tes sources et n’invente rien.';
+  return sourcedMessage('user', [
+    'Documents joints (texte extrait localement) :\n\n', { kind: 'documents', text: docs },
+    '\n\nDemande de l’utilisateur :\n', { kind: 'question', text: cmd.arg || '(non précisée)' },
+    '\n\n', instructions,
+  ]);
 }
 
 export function formatContext(rows: ContextRow[]): string {

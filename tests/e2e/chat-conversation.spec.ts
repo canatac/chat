@@ -199,6 +199,52 @@ test('garde le brouillon après un échec et attend la confirmation avant de pub
   });
 });
 
+for (const width of [320, 1440]) {
+  test(`commande IA accessible avec un fichier joint et réutilisation depuis le chat à ${width} px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await withChat(page, 0, async () => {
+      let uploads = 0;
+      const references: number[][] = [];
+      await page.route('**/api/files', async (route) => {
+        if (route.request().method() === 'POST') uploads++;
+        await route.continue();
+      });
+      await page.route('**/api/messages', async (route) => {
+        if (route.request().method() === 'POST') {
+          const body = route.request().postDataJSON() as { fileIds?: number[] };
+          if (body.fileIds) references.push(body.fileIds);
+        }
+        await route.continue();
+      });
+      const composer = page.getByRole('form', { name: 'Rédaction du message' });
+      const editor = page.getByRole('textbox', { name: 'Écrire un message' });
+      const name = 'Rapport de projet.txt';
+      await page.locator('input[aria-label="Fichier à joindre"]').setInputFiles({ name, mimeType: 'text/plain', buffer: Buffer.from('Budget du projet et conclusion.') });
+      const commands = page.getByRole('button', { name: 'Commandes de l’assistant' });
+      await expect(commands).toBeEnabled();
+      await commands.click();
+      await expect(page.getByRole('menuitem', { name: /\/ask/ })).toBeEnabled();
+      await expect(page.getByRole('menuitem', { name: /\/lien/ })).toBeDisabled();
+      await page.getByRole('menuitem', { name: /\/resume/ }).click();
+      await expect(editor).toHaveValue('/resume ');
+      await expect(composer).toContainText('Résumer le document joint');
+      await composer.getByRole('button', { name: 'Envoyer', exact: true }).click();
+      const timeline = page.getByRole('log', { name: 'Messages', exact: true });
+      await expect(timeline.getByRole('button', { name: 'Télécharger ' + name, exact: true })).toHaveCount(1);
+      await expect(timeline.getByText(/LLM non configuré côté serveur/)).toHaveCount(1);
+      await timeline.getByRole('button', { name: 'Analyser ' + name, exact: true }).click();
+      await expect(editor).toHaveValue('/ask ');
+      await expect(composer.getByText(name, { exact: true })).toBeVisible();
+      await editor.fill('/ask Quel est le budget ?');
+      await composer.getByRole('button', { name: 'Envoyer', exact: true }).click();
+      await expect.poll(() => references.length).toBe(1);
+      expect(references[0]).toHaveLength(1);
+      expect(uploads).toBe(1);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+    });
+  });
+}
+
 test('sur mobile, garde la position de lecture et rend les accès aux appels, documents et membres visibles', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 740 });
   await withChat(page, 58, async (base, colleague) => {

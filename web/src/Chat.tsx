@@ -16,7 +16,7 @@ import NotificationsDrawer from './components/NotificationsDrawer';
 import SecurityControls from './components/SecurityControls';
 import { mentionLabel } from './systemNotifications';
 import { chatColors } from './theme';
-import type { AgendaAssistantResponse, CallInfo, ConversationActivity, Meeting, MeetingArtifact, MentionNotification, Message, Room, User } from './types';
+import type { AgendaAssistantResponse, CallInfo, ConversationActivity, Meeting, MeetingArtifact, MentionNotification, Message, MessageFile, Room, User } from './types';
 import useMentionNotifications from './useMentionNotifications';
 import useMessageActivity from './useMessageActivity';
 import useCallRingtone from './useCallRingtone';
@@ -110,6 +110,7 @@ export default function Chat({ token, user, room, adminOpen, onAdmin, onLogout }
   const ringtone = useCallRingtone(socket, user.id, room.id);
   const security = useSecurity(socket, connection === 'online');
   const [securityOpen, setSecurityOpen] = useState(false);
+  const [documentRequest, setDocumentRequest] = useState<{ nonce: number; file: MessageFile; command: 'ask' | 'resume' }>();
 
   useEffect(() => {
     const request = new AbortController();
@@ -228,6 +229,11 @@ export default function Chat({ token, user, room, adminOpen, onAdmin, onLogout }
         setMessages((previous) =>
           previous.some((item) => item.id === message.id) ? previous : mergeMessages(previous, [message]),
         );
+      } else if (event.type === 'documentAnalysis' && event.file) {
+        const file = event.file;
+        const update = (message: Message) => ({ ...message, files: message.files.map((item) => item.id === file.id ? { ...item, ...file } : item) });
+        liveTail.current = liveTail.current.map(update);
+        setMessages((previous) => previous.map(update));
       } else if (event.type === 'conversationActivity' && Array.isArray(event.typing)) {
         setActivity({ typing: event.typing, assistantResponding: Boolean(event.assistantResponding) });
       } else if (event.type === 'presence' && Array.isArray(event.online)) {
@@ -545,6 +551,7 @@ export default function Chat({ token, user, room, adminOpen, onAdmin, onLogout }
                         groupStart={groupStart}
                         highlighted={highlighted?.id === message.id}
                         receipt={receipts.get(message.id)}
+                        onUseFile={(file, command) => setDocumentRequest((previous) => ({ nonce: (previous?.nonce ?? 0) + 1, file, command }))}
                       />
                     </Fragment>
                   );
@@ -587,7 +594,7 @@ export default function Chat({ token, user, room, adminOpen, onAdmin, onLogout }
         )}
       </Box>
       <SecurityControls security={security} settingsOpen={securityOpen} onClose={() => setSecurityOpen(false)} />
-      <ChatComposer onPublished={publish} members={users} ownId={user.id} onTyping={reportTyping}
+      <ChatComposer onPublished={publish} members={users} ownId={user.id} onTyping={reportTyping} documentRequest={documentRequest}
         typing={typing} assistantResponding={activity.assistantResponding} onAgenda={(result) => {
         setAgendaResult(result);
         setAgendaOpen(true);

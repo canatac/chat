@@ -3,12 +3,13 @@ import DoneAllRoundedIcon from '@mui/icons-material/DoneAllRounded';
 import DoneRoundedIcon from '@mui/icons-material/DoneRounded';
 import DownloadOutlinedIcon from '@mui/icons-material/DownloadOutlined';
 import SmartToyOutlinedIcon from '@mui/icons-material/SmartToyOutlined';
-import { Avatar, Box, ButtonBase, CircularProgress, Link, Tooltip, Typography } from '@mui/material';
+import { Avatar, Box, Button, ButtonBase, CircularProgress, Link, Tooltip, Typography } from '@mui/material';
 import { Fragment, useState, type ReactNode } from 'react';
-import { saveFile } from '../api';
+import { api, saveFile } from '../api';
 import { chatColors } from '../theme';
 import type { Mention, Message, MessageFile, MessageReceipt, User } from '../types';
 import MarkdownContent from './MarkdownContent';
+import DocumentAnalysis from './DocumentAnalysis';
 
 interface Props {
   message: Message;
@@ -17,6 +18,7 @@ interface Props {
   groupStart: boolean;
   highlighted: boolean;
   receipt?: MessageReceipt;
+  onUseFile?: (file: MessageFile, command: 'ask' | 'resume') => void;
 }
 
 const hours = new Intl.DateTimeFormat('fr-FR', { hour: '2-digit', minute: '2-digit' });
@@ -77,8 +79,11 @@ function MessageText({ content, mentions }: { content: string; mentions: Mention
   );
 }
 
-function FileDownload({ file }: { file: MessageFile }) {
+function FileDownload({ file, onUseFile }: { file: MessageFile; onUseFile?: Props['onUseFile'] }) {
   const [status, setStatus] = useState<'idle' | 'busy' | 'error'>('idle');
+  const [retrying, setRetrying] = useState(false);
+  const [retryError, setRetryError] = useState<string | null>(null);
+  const document = !/^(audio|video)\//.test(file.mime);
 
   const download = async () => {
     if (status === 'busy') return;
@@ -117,6 +122,16 @@ function FileDownload({ file }: { file: MessageFile }) {
           </ButtonBase>
         </span>
       </Tooltip>
+      {document && <DocumentAnalysis analysis={file.analysis} />}
+      {document && onUseFile && <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap', mt: 0.3 }}>
+        <Button size="small" aria-label={'Résumer ' + file.name} onClick={() => onUseFile(file, 'resume')}>Résumer</Button>
+        <Button size="small" aria-label={'Analyser ' + file.name} onClick={() => onUseFile(file, 'ask')}>Analyser / questionner</Button>
+        {file.analysis?.status === 'blocked' && <Button size="small" disabled={retrying} onClick={() => {
+          setRetrying(true); setRetryError(null);
+          void api.analyzeFile(file.id).catch((error) => setRetryError(error instanceof Error ? error.message : 'Analyse impossible.')).finally(() => setRetrying(false));
+        }}>Réessayer l’analyse</Button>}
+      </Box>}
+      {retryError && <Typography role="alert" variant="caption" color="error">{retryError}</Typography>}
       {status === 'error' && (
         <Typography role="alert" variant="caption" color="error" sx={{ mt: 0.35, display: 'block' }}>
           Téléchargement impossible. Réessaie en cliquant sur le fichier.
@@ -141,7 +156,7 @@ function ReceiptStatus({ receipt }: { receipt?: MessageReceipt }) {
   );
 }
 
-export default function MessageRow({ message, sender, own, groupStart, highlighted, receipt }: Props) {
+export default function MessageRow({ message, sender, own, groupStart, highlighted, receipt, onUseFile }: Props) {
   const time = hours.format(new Date(message.createdAt));
   const isBot = message.user.isBot;
   const author = own ? 'Vous' : isBot ? 'Assistant' : sender.name;
@@ -215,7 +230,7 @@ export default function MessageRow({ message, sender, own, groupStart, highlight
             : <MessageText content={message.content} mentions={message.mentions ?? []} />)}
           {files.length > 0 && (
             <Box sx={{ display: 'grid', minWidth: 0, gap: 0.7, mt: attachmentOnly ? 0 : 0.8 }}>
-              {files.map((file) => <FileDownload key={file.id} file={file} />)}
+              {files.map((file) => <FileDownload key={file.id} file={file} onUseFile={onUseFile} />)}
             </Box>
           )}
         </Box>

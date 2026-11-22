@@ -40,6 +40,7 @@ export interface MessageFile {
   size: number;
   mime: string;
   createdAt: string;
+  analysis?: FileItem['analysis'];
 }
 
 export interface Message {

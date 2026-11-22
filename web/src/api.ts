@@ -161,8 +161,8 @@ export const api = {
     req<{ unread: UnreadMessages; receipts: MessageReceipt[] }>('/api/messages/activity' + (ids.length ? '?ids=' + ids.join(',') : ''), { signal }),
   acknowledgeMessages: (receipts: { id: number; read: boolean }[], signal: AbortSignal) =>
     req<void>('/api/messages/activity', { method: 'PATCH', body: JSON.stringify({ receipts }), signal }),
-  send: (content: string, mentions: Mention[] = []) =>
-    req<{ message: Message }>('/api/messages', { method: 'POST', body: JSON.stringify(mentions.length ? { content, mentions } : { content }) }),
+  send: (content: string, mentions: Mention[] = [], fileIds: number[] = []) =>
+    req<{ message: Message }>('/api/messages', { method: 'POST', body: JSON.stringify({ content, ...(mentions.length ? { mentions } : {}), ...(fileIds.length ? { fileIds } : {}) }) }),
   notifications: (before?: number, signal?: AbortSignal) =>
     req<NotificationPage>('/api/notifications' + (before === undefined ? '' : '?before=' + before), { signal }),
   notification: (id: number, signal?: AbortSignal) =>

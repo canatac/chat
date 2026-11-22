@@ -1,11 +1,12 @@
 import type { Config } from '../config.js';
 import type { DB } from '../db.js';
 import { askLLM, llmConfigured } from './index.js';
-import { buildSystemPrompt, buildUserMessage, formatContext, parseCommand, COMMAND_HELP } from './commands.js';
+import { buildDocumentUserMessage, buildSystemPrompt, buildUserMessage, formatContext, parseCommand, supportsDocuments, COMMAND_HELP } from './commands.js';
 import { buildDocsSection, retrieveRelevantChunks } from './rag.js';
 import { handleLinkCommand, maybeAutoLink } from './link.js';
 import { costUsd, type Usage } from './pricing.js';
 import type { ChatMessage } from './providers.js';
+import { DOCUMENT_LIMITS, DocumentError } from '../documents/limits.js';
 
 export interface CommandDeps {
   db: DB;
@@ -52,6 +53,31 @@ export async function handleCommand(
   };
   deps.onResponseActivity?.(true);
   try {
+    const attached = deps.db.listFilesByMessage(msg.id);
+    if (attached.length && supportsDocuments(cmd)) {
+      const documents: string[] = [];
+      let chars = 0;
+      for (const file of attached) {
+        await deps.config.documents?.waitReady(deps.db, file.id);
+        const current = deps.db.getFileById(file.id);
+        if (!current) throw new DocumentError(404, 'Le document sélectionné a été supprimé.');
+        if (current.document_status !== 'ready') throw new DocumentError(422, current.document_error ?? 'Le document doit être extrait avant l’envoi à l’IA. Réessayer son analyse.');
+        const text = deps.db.documentText(file.id);
+        if (!text) throw new DocumentError(422, 'Le texte du document est indisponible. Réessayer son analyse.');
+        const document = `--- ${current.name} ---\n${text}`;
+        chars += document.length;
+        if (chars > DOCUMENT_LIMITS.textChars) throw new DocumentError(413, 'Les documents sélectionnés dépassent 200 000 caractères. Réduire la sélection ou scinder les fichiers.');
+        documents.push(document);
+      }
+      const messages: ChatMessage[] = [
+        { role: 'system', content: buildSystemPrompt() },
+        buildDocumentUserMessage(cmd, documents.join('\n\n')),
+      ];
+      const { text, usage } = await askLLM(deps.config, messages, { timeoutMs: 90000, userId: deps.userId });
+      record(usage, null);
+      deps.postBot(text);
+      return;
+    }
     const rows = deps.db.listMessagesJoined(deps.config.LLM_CONTEXT_MESSAGES, msg.id).reverse();
     const context = formatContext(rows);
     let docs = '';
