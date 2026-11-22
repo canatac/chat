@@ -6,7 +6,7 @@ import { extractDocument } from './extract.js';
 import { DOCUMENT_LIMITS as limits, DocumentError } from './limits.js';
 import type { FileResources } from './resources.js';
 
-interface Room { db: DB; uploadsDir: string; changed: () => void }
+interface Room { db: DB; uploadsDir: string; changed: (id: number) => void }
 
 /** Une file persistée en SQLite ; un seul worker pour toute la VM. */
 export class DocumentQueue {
@@ -17,7 +17,7 @@ export class DocumentQueue {
   private readonly abort = new AbortController();
   constructor(private readonly tikaUrl: string, private readonly chunkSize: number, private readonly resources: FileResources) {}
 
-  register(db: DB, uploadsDir: string, changed: () => void): void {
+  register(db: DB, uploadsDir: string, changed: (id: number) => void): void {
     db.recoverDocuments();
     this.rooms.push({ db, uploadsDir, changed });
     this.kick();
@@ -50,7 +50,7 @@ export class DocumentQueue {
       if (!selected) return;
       const { room, file } = selected;
       room.db.setDocumentStatus(file.id, 'processing');
-      room.changed();
+      room.changed(file.id);
       try {
         if (isAudioMime(file.mime, file.name) || file.mime.startsWith('video/')) throw new DocumentError(415, 'Média : seule sa transcription texte peut être analysée.');
         const text = await extractDocument(path.join(room.uploadsDir, file.path), file.mime, file.name, this.tikaUrl, this.abort.signal);
@@ -68,7 +68,7 @@ export class DocumentQueue {
       } catch (error) {
         if (!this.closed) room.db.setDocumentStatus(file.id, 'blocked', error instanceof DocumentError ? error.message : 'Extraction impossible. Vérifier le fichier puis réessayer.');
       }
-      if (!this.closed) room.changed();
+      if (!this.closed) room.changed(file.id);
     }
   }
 

@@ -207,6 +207,11 @@ export class DB {
         updated_at INTEGER
       );
       CREATE INDEX IF NOT EXISTS idx_files_id ON files(id);
+      CREATE TABLE IF NOT EXISTS message_documents (
+        message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+        file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        PRIMARY KEY (message_id, file_id)
+      );
       -- journal d'audit : PAS de clé étrangère sur file_id/folder_id (le journal doit survivre
       -- à la suppression du fichier/dossier ; foreign_keys est ON dans node:sqlite)
       CREATE TABLE IF NOT EXISTS file_events (
@@ -503,8 +508,13 @@ export class DB {
 
   listFilesByMessage(messageId: number): FileRow[] {
     return this.db
-      .prepare('SELECT * FROM files WHERE message_id = ? ORDER BY id')
-      .all(messageId) as unknown as FileRow[];
+      .prepare('SELECT * FROM files WHERE message_id = ? OR id IN (SELECT file_id FROM message_documents WHERE message_id = ?) ORDER BY id')
+      .all(messageId, messageId) as unknown as FileRow[];
+  }
+
+  attachDocuments(messageId: number, fileIds: number[]): void {
+    const insert = this.db.prepare('INSERT OR IGNORE INTO message_documents (message_id, file_id) VALUES (?, ?)');
+    for (const fileId of fileIds) insert.run(messageId, fileId);
   }
 
   startCall(userId: number, title: string, meetingId: number | null = null): CallRow {

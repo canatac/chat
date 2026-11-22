@@ -14,6 +14,7 @@ import { DB, type CallRow, type FileEventListRow, type FileListRow, type FileRow
 import { MoveConflicts, moveDecision, planDocumentMove } from './document-moves.js';
 import { deriveDocument, HttpError, type DeriveKind } from './llm/derive.js';
 import { handleCommand } from './llm/run.js';
+import { parseCommand, supportsDocuments } from './llm/commands.js';
 import { DocumentQueue } from './documents/queue.js';
 import { FileResources } from './documents/resources.js';
 import { DOCUMENT_LIMITS, DocumentError, MiB } from './documents/limits.js';
@@ -160,6 +161,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
   config = { ...config, reviewAI: (messages, userId) => guard.protect(messages, userId) };
   mountSecurity(app, db.security, guard, () => broadcast({ type: 'securityPolicyChanged' }), (userId) => notifyUser(userId, { type: 'securityMaskingChanged' }));
   const typing = new Map<WebSocket, { user: PublicUser; timer: NodeJS.Timeout }>();
+  const commandTasks = new Set<Promise<void>>();
   let assistantRequests = 0;
 
   function conversationActivity() {
@@ -307,10 +309,11 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
     broadcast({ type: 'docsChanged' });
   }
 
-  function saveUserMessage(userId: number, content: string, hints: Mention[] = [], useMentions = true) {
+  function saveUserMessage(userId: number, content: string, hints: Mention[] = [], useMentions = true, fileIds: number[] = []) {
     const members = useMentions && content.includes('@') ? directory.listMembers(roomId) : [];
     const mentions = members.length ? resolveMentions(content, members, hints) : [];
     const row = db.insertMessage(userId, content, mentions);
+    db.attachDocuments(row.id, fileIds);
     const notifications = db.createMentionNotifications(row.id, mentionRecipients(userId, mentions, members));
     return { row, notifications };
   }
@@ -330,22 +333,28 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
     return msg;
   }
 
-  function postMessage(userId: number, content: string, hints: Mention[] = []): SerializedMessage {
-    const publication = db.transaction(() => saveUserMessage(userId, content, hints));
-    const msg = publishUserMessage(publication);
-    if (content.trimStart().startsWith('/')) {
-      void handleCommand(
+  function dispatchCommand(msg: SerializedMessage): void {
+    if (msg.content.trimStart().startsWith('/')) {
+      const task = handleCommand(
         {
           db,
           config,
           uploadsDir,
-          userId,
+          userId: msg.user.id,
           postBot: postBotMessage,
           onResponseActivity: assistantActivity,
         },
         { id: msg.id, content: msg.content },
       );
+      commandTasks.add(task);
+      void task.finally(() => commandTasks.delete(task)).catch(() => {});
     }
+  }
+
+  function postMessage(userId: number, content: string, hints: Mention[] = [], fileIds: number[] = []): SerializedMessage {
+    const publication = db.transaction(() => saveUserMessage(userId, content, hints, true, fileIds));
+    const msg = publishUserMessage(publication);
+    dispatchCommand(msg);
     return msg;
   }
 
@@ -639,6 +648,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
   const postSchema = z.object({
     content: z.string().trim().min(1).max(4000),
     mentions: mentionHints.optional(),
+    fileIds: z.array(positiveId).max(4).optional(),
   });
 
   app.post('/api/messages', (req, res) => {
@@ -647,7 +657,17 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       res.status(400).json({ error: 'content requis (1-4000 caractères)' });
       return;
     }
-    res.status(201).json({ message: postMessage(req.user?.id ?? -1, parsed.data.content, parsed.data.mentions) });
+    const fileIds = [...new Set(parsed.data.fileIds ?? [])];
+    if (fileIds.some((id) => !db.getFileById(id))) {
+      res.status(404).json({ error: 'Un document sélectionné est introuvable dans ce salon.' });
+      return;
+    }
+    const cmd = parseCommand(parsed.data.content);
+    if (fileIds.length && cmd && !supportsDocuments(cmd)) {
+      res.status(400).json({ error: 'Utiliser /ask, /resume ou /solve avec un document joint.' });
+      return;
+    }
+    res.status(201).json({ message: postMessage(req.user?.id ?? -1, parsed.data.content, parsed.data.mentions, fileIds) });
   });
 
   const notificationsQuery = z.object({
@@ -746,6 +766,12 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       const displayName = uploadedName(uploaded);
       const post = req.body.post !== 'false';
       const text = typeof req.body.message === 'string' ? req.body.message.trim().slice(0, 4000) : '';
+      const cmd = parseCommand(text);
+      if (post && cmd && !supportsDocuments(cmd)) {
+        discardUploadedFile(uploaded);
+        res.status(400).json({ error: 'Utiliser /ask, /resume ou /solve avec un document joint.' });
+        return;
+      }
       let hints: Mention[] = [];
       if (post && text && typeof req.body.mentions === 'string') {
         try {
@@ -775,6 +801,7 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
       docsChanged();
       void indexUploadedDocument(fileRow);
       const message = publication ? publishUserMessage(publication) : null;
+      if (message) dispatchCommand(message);
       res.status(201).json({ file: toPublicFile(fileRow), message });
     } catch (err) {
       if (!registered) discardUploadedFile(uploaded);
@@ -1524,8 +1551,13 @@ function createRoomRuntime(config: Config, dataDir: string, db: DB, roomId: numb
     const account = directory.getAccount(accountId);
     if (account) activateContact(id, account);
   }
-  config.documents!.register(db, uploadsDir, docsChanged);
-  return { app, db, broadcast, connect, onlineUserIds, activateContact, removeMember, archive, guard };
+  config.documents!.register(db, uploadsDir, (id) => {
+    const file = db.getFileById(id);
+    if (file) broadcast({ type: 'documentAnalysis', file: toPublicFile(file) });
+    docsChanged();
+  });
+  return { app, db, broadcast, connect, onlineUserIds, activateContact, removeMember, archive, guard,
+    commandsDone: () => Promise.allSettled([...commandTasks]) };
 }
 
 export function createServer(config: Config, dataDir: string, analyzer?: AnalyzerFactory): ServerContext {
@@ -1634,6 +1666,7 @@ export function createServer(config: Config, dataDir: string, analyzer?: Analyze
     close: async () => {
       await documents.close();
       await Promise.all([...runtimes.values()].map((runtime) => runtime.guard.close()));
+      await Promise.all([...runtimes.values()].map((runtime) => runtime.commandsDone()));
       await new Promise<void>((resolve) => setImmediate(resolve));
       return new Promise<void>((resolve) => {
         for (const client of wss.clients) client.terminate();
