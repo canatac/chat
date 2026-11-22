@@ -28,9 +28,11 @@ Un échec précise désormais sa cause et l’action conseillée : service injoi
 | Données du backend | 2 Gio par défaut pour tous les salons, fichiers générés et bases SQLite compris |
 | Réserve de disque | Arrêt des nouvelles écritures sous 512 Mio libres, réservations en cours comprises |
 | Tika + ses processus + ses temporaires | 2 Gio de RAM, 1 CPU, 128 processus, swap désactivé pour ce conteneur |
+| Relais d’accès local à Tika | 64 Mio de RAM, 0,10 CPU, 16 processus, 8 connexions simultanées ; aucun fichier temporaire |
 | Chatroom + traitement média | 2 Gio de RAM, 0,75 CPU, 192 processus ; heap Node de 1 Gio |
 | Temporaires | Tika : tmpfs de 512 Mio ; chatroom : tmpfs de 256 Mio, inclus dans leurs plafonds mémoire |
 | Journaux Docker chat/Tika | Deux fichiers de 5 Mio par service |
+| Journaux Docker du relais | Deux fichiers de 1 Mio |
 
 Ces budgets laissent environ 4 Gio à Linux, LinGuard, Caddy et aux autres services. Ce sont des plafonds d’usage, pas des allocations permanentes. La taille des images Docker et les journaux des autres services ne font pas partie du quota applicatif. Les métadonnées d’activité et la base de messages peuvent continuer à croître ; le quota de données est un contrôle d’admission des écritures de fichiers et de l’index documentaire, pas un quota de volume au niveau du système de fichiers.
 
@@ -44,9 +46,9 @@ Appliquer le patch depuis le dépôt de la chatroom, par exemple `/root/chat`. L
 cd /root/chat
 git am /chemin/vers/chatroom-v2-tika-tesseract.patch
 docker compose config --quiet
-docker compose pull tika
+docker compose pull tika tika-access
 docker compose build chat
-docker compose up -d --no-deps --force-recreate tika chat
+docker compose up -d --no-deps --force-recreate tika tika-access chat
 ```
 
 Conserver le `.env` existant. Les nouveaux réglages ont des valeurs par défaut ; voici ceux à rendre explicites si souhaité :
@@ -60,15 +62,20 @@ FILE_STORAGE_MIN_FREE_MB=512
 TIKA_URL=http://127.0.0.1:9998
 ```
 
-Le backend conserve le réseau hôte pour joindre LinGuard sur `127.0.0.1:8898`. Tika est isolé sur un réseau Docker sans accès sortant et publie seulement `127.0.0.1:9998`. Il n’a accès ni au volume de données ni aux secrets de la chatroom. Aucun port Tika public ni route Caddy supplémentaire ne sont nécessaires. La recréation de `chat` applique ses nouvelles limites CPU/mémoire et provoque une brève interruption ; les autres services gardent leur configuration.
+Le backend conserve le réseau hôte pour joindre LinGuard sur `127.0.0.1:8898`. Tika reste exclusivement sur `documents-local`, un réseau Docker `internal` sans accès sortant. Le service `tika-access` (HAProxy) relaie uniquement les connexions vers `tika:9998` et publie `127.0.0.1:9998` sur son second réseau, `documents-access`. Docker n’active pas la publication de ports d’un conteneur connecté uniquement à un réseau `internal` : publier directement le port de Tika dans cette configuration ne fonctionne pas.
+
+Le relais transmet les corps HTTP en flux, sans copie sur disque et sans journalisation des contenus. Son DNS Docker suit les changements d’IP après recréation de Tika. Tika et le relais n’ont accès ni au volume de données ni aux secrets de la chatroom. Aucun port public ni route Caddy supplémentaire ne sont nécessaires. La recréation de `chat` applique ses nouvelles limites CPU/mémoire et provoque une brève interruption ; les autres services gardent leur configuration.
 
 Au premier démarrage, les anciens documents du salon sont réextraits, un par un. Un salon est chargé à sa première utilisation. Les fichiers qui dépassent les nouveaux plafonds restent disponibles au téléchargement, avec un motif de blocage pour l’IA. Les travaux interrompus sont repris au redémarrage ; aucune copie partielle n’est réutilisée.
 
 ```sh
-curl --fail --max-time 10 http://127.0.0.1:9998/version
-docker compose logs --tail=80 tika chat
+docker compose ps tika tika-access
+curl --fail --retry 15 --retry-connrefused --retry-delay 2 --retry-max-time 60 --max-time 5 http://127.0.0.1:9998/version
+docker compose logs --tail=80 tika tika-access chat
 docker stats --no-stream
 ```
+
+La publication `127.0.0.1:9998->9998/tcp` doit apparaître sur **tika-access**. La ligne Tika peut afficher seulement `9998/tcp` : c’est attendu. Attendre le démarrage de Tika (plusieurs secondes), puis la réponse `Apache Tika 4.2.0`. Le message `[fork] ... socket timeout while waiting for task, shutting down` après une minute sans document correspond à l’arrêt du processus d’extraction inactif, relancé automatiquement à la prochaine extraction ; ce n’est pas l’arrêt du serveur HTTP. Voir [CHAT-DOC-005](tickets/CHAT-DOC-005.md) pour corriger une installation V2 déjà déployée.
 
 Dans l’application, déposer un PDF scanné, attendre **Texte disponible**, puis poser une question avec `/ask`. Avec une adresse personnelle détectable dans le document, vérifier que LinGuard bloque l’envoi ou propose le masquage suivant la politique du salon. Un scan de mauvaise qualité peut être mal reconnu : l’OCR n’offre pas de garantie d’exhaustivité de détection.
 
@@ -78,8 +85,9 @@ Le même fichier `deploy/tika-config.json` et la même image conviennent à une 
 
 ```sh
 docker network create --internal chat-documents
+docker network create chat-documents-access
 docker run -d --name chat-tika --restart unless-stopped --init \
-  --network chat-documents -p 127.0.0.1:9998:9998 \
+  --network chat-documents --network-alias tika \
   --cpus=1 --memory=2g --memory-swap=2g --pids-limit=128 \
   --read-only --cap-drop=ALL --security-opt=no-new-privileges:true \
   --tmpfs /tmp:size=512m,mode=1777,noexec,nosuid \
@@ -88,6 +96,17 @@ docker run -d --name chat-tika --restart unless-stopped --init \
   -e OMP_THREAD_LIMIT=1 -e OMP_NUM_THREADS=1 \
   -v "$PWD/deploy/tika-config.json:/etc/tika-config.json:ro" \
   apache/tika:4.2.0-full -c /etc/tika-config.json
+
+# Connecter les deux réseaux avant de démarrer le relais.
+docker create --name chat-tika-access --restart unless-stopped \
+  --network chat-documents-access -p 127.0.0.1:9998:9998 \
+  --cpus=0.10 --memory=64m --memory-swap=64m --pids-limit=16 \
+  --read-only --cap-drop=ALL --security-opt=no-new-privileges:true \
+  --log-opt max-size=1m --log-opt max-file=2 \
+  -v "$PWD/deploy/tika-access.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro" \
+  haproxy:3.2.27-alpine
+docker network connect chat-documents chat-tika-access
+docker start chat-tika-access
 ```
 
 Lors de la recréation habituelle de la chatroom, conserver son réseau `host`, son fichier d’environnement, ses montages et son volume de données exacts. Ajouter `--cpus=0.75 --memory=2g --memory-swap=2g --pids-limit=192 --tmpfs /tmp:size=256m,mode=1777,noexec,nosuid --log-opt max-size=5m --log-opt max-file=2 -e NODE_OPTIONS=--max-old-space-size=1024` à sa commande `docker run`. Ne pas créer de nouveau volume de données pour la mise à jour.
